@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# uv
+.uv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Benchmark outputs (results are published, not committed)
+results/
+*.parquet
+
+# Datasets and samples (never committed)
+data/
+samples/
+*.tif
+*.tiff
+*.zarr/
+*.nc
+*.laz
+*.las
+*.copc.laz
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local environment
+.env
+*.local.yaml
