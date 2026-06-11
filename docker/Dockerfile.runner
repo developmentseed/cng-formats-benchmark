@@ -1,0 +1,22 @@
+# Benchmark runner image.
+#
+# The runner is the batch component of the system: it executes a benchmark
+# described by a config file and emits results. This image is what the
+# docker-compose stack and the Helm chart deploy. It does not run a benchmark
+# at build time; CI only proves it builds and that its entry point works.
+
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1
+
+# Install the project. README is referenced by pyproject metadata.
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN uv sync --no-dev
+
+ENTRYPOINT ["uv", "run", "cng-benchmark"]
+CMD ["--help"]
