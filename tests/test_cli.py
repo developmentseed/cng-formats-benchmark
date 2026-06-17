@@ -1,11 +1,15 @@
 """Tests for the CLI entry point."""
 
+import json
+
 from typer.testing import CliRunner
 
 from cng_benchmark import __version__
 from cng_benchmark.cli import app
 
 runner = CliRunner()
+
+BENCHMARK_EXAMPLE = "configs/benchmarks/example_cog.yaml"
 
 
 def test_version_prints_package_version():
@@ -14,14 +18,66 @@ def test_version_prints_package_version():
     assert __version__ in result.stdout
 
 
-def test_run_is_a_stub_but_exits_cleanly():
-    result = runner.invoke(app, ["run", "configs/example.yaml"])
+def test_run_validates_config_without_objects():
+    result = runner.invoke(app, ["run", BENCHMARK_EXAMPLE])
     assert result.exit_code == 0
-    assert "configs/example.yaml" in result.stdout
+    assert "valid" in result.stdout
+
+
+def test_run_rejects_missing_config():
+    result = runner.invoke(app, ["run", "does/not/exist.yaml"])
+    assert result.exit_code == 1
+
+
+def test_run_emits_object_profile(tmp_path):
+    listing = tmp_path / "objects.json"
+    entries = [{"name": "a", "size": 10}, {"name": "b", "size": 30}]
+    listing.write_text(json.dumps(entries))
+
+    result = runner.invoke(app, ["run", BENCHMARK_EXAMPLE, "--objects", str(listing)])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["object_profile"]["count"] == 2
+    assert payload["object_profile"]["total_bytes"] == 40
+    assert "tier_fit" in payload["object_profile"]
+
+
+def test_run_accepts_bare_size_list(tmp_path):
+    listing = tmp_path / "sizes.json"
+    listing.write_text(json.dumps([100, 200, 300]))
+
+    result = runner.invoke(app, ["run", BENCHMARK_EXAMPLE, "--objects", str(listing)])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["object_profile"]["count"] == 3
+
+
+def test_run_rejects_missing_objects_file():
+    result = runner.invoke(
+        app, ["run", BENCHMARK_EXAMPLE, "--objects", "no/such/file.json"]
+    )
+    assert result.exit_code == 1
+    assert "Cannot profile objects" in result.output
+
+
+def test_run_rejects_malformed_objects_entry(tmp_path):
+    listing = tmp_path / "bad.json"
+    listing.write_text(json.dumps([{"name": "a"}]))  # missing "size"
+
+    result = runner.invoke(app, ["run", BENCHMARK_EXAMPLE, "--objects", str(listing)])
+    assert result.exit_code == 1
+    assert "Cannot profile objects" in result.output
+
+
+def test_run_rejects_empty_objects_listing(tmp_path):
+    listing = tmp_path / "empty.json"
+    listing.write_text(json.dumps([]))
+
+    result = runner.invoke(app, ["run", BENCHMARK_EXAMPLE, "--objects", str(listing)])
+    assert result.exit_code == 1
 
 
 def test_no_args_shows_help():
-    # no_args_is_help exits with the usage code (2) after printing help.
     result = runner.invoke(app, [])
     assert result.exit_code == 2
     assert "Benchmark cloud-native geospatial formats." in result.stdout

@@ -9,6 +9,8 @@ authors = [{ name = "Development Seed" }]
 keywords = ["benchmark", "cloud-native", "geospatial", "cog", "zarr", "copc", "geoparquet"]
 dependencies = [
     "typer>=0.12",
+    "pydantic>=2",
+    "pyyaml>=6",
 ]
 
 [project.scripts]
@@ -29,7 +31,7 @@ packages = ["src/cng_benchmark"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
