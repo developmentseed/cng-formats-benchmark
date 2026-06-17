@@ -42,3 +42,6 @@ samples/
 # Local environment
 .env
 *.local.yaml
+
+# MkDocs build output
+/site/

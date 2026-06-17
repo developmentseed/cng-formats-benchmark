@@ -34,6 +34,10 @@ dev = [
     "boto3>=1.34",
     "moto[s3]>=5",
 ]
+docs = [
+    "mkdocs-material>=9.5",
+    "pymdown-extensions>=10",
+]
 
 [build-system]
 requires = ["hatchling"]
