@@ -59,5 +59,12 @@ runner:
   source: s3://REPLACE-ME-datalake-bucket/path/to/scene.tif
   output: s3://REPLACE-ME-scaleway-bucket/results/
 
+# Pin the runner to the dedicated benchmark pool. On the Scaleway Kapsule
+# cluster (k8s-par-cng-benchmark) this is `pool-bench` (BASIC3-X8C-16G, scales
+# from zero); without this the runner can land on the small always-on pool and
+# struggle on a GDAL conversion. Kapsule labels each node with its pool name.
+nodeSelector:
+  k8s.scaleway.com/pool-name: pool-bench
+
 titiler:
   enabled: true

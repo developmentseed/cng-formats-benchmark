@@ -93,6 +93,13 @@ results:
 
 resources: {}
 
+# Pod scheduling for the runner Job. Empty by default (schedule anywhere). A
+# real target pins the runner to a dedicated pool — e.g. a Scaleway Kapsule
+# benchmark pool that scales from zero — via nodeSelector (see values-lab).
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
 # Benchmark/dataset configs mounted into the runner at /configs. Add datasets
 # here; the templates never change.
 configs:
