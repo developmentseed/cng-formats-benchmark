@@ -8,16 +8,25 @@
 #
 # Flow, gated by health/completion so `docker compose up --wait` blocks until the
 # whole pipeline has succeeded:
-#   minio (healthy) -> createbucket -> seed (fixture COG into MinIO)
-#                   -> runner (profile objects + write artifact); titiler stays up.
+#   minio (healthy) -> createbucket -> seed (fixture raster into MinIO)
+#                   -> runner (convert to COG + write/read/display + artifact);
+#                      titiler stays up and serves the display metric.
 
 x-s3-env: &s3-env
-  # boto3 (runner) reads AWS_ENDPOINT_URL; GDAL (TiTiler) reads AWS_S3_ENDPOINT.
+  # boto3 credentials + endpoint (the runner's storage layer).
   AWS_ACCESS_KEY_ID: minioadmin
   AWS_SECRET_ACCESS_KEY: minioadmin
   AWS_DEFAULT_REGION: us-east-1
   AWS_ENDPOINT_URL: http://minio:9000
   AWS_ENDPOINT_URL_S3: http://minio:9000
+
+x-gdal-env: &gdal-env
+  # GDAL /vsis3 access to MinIO (the runner's read metric and TiTiler).
+  AWS_S3_ENDPOINT: minio:9000
+  AWS_VIRTUAL_HOSTING: "FALSE"
+  AWS_HTTPS: "NO"
+  GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+  CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.TIF,.tiff"
 
 services:
   minio:
@@ -54,13 +63,7 @@ services:
     command:
       ["uvicorn", "titiler.application.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      <<: *s3-env
-      # GDAL/rasterio S3 access to MinIO (used by the display metric in PR-B).
-      AWS_S3_ENDPOINT: minio:9000
-      AWS_VIRTUAL_HOSTING: "FALSE"
-      AWS_HTTPS: "NO"
-      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
-      CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.TIF,.tiff"
+      <<: [*s3-env, *gdal-env]
     ports:
       - "${TITILER_PORT:-8000}:8000"
     depends_on:
@@ -86,7 +89,9 @@ services:
 
   runner:
     image: ${RUNNER_IMAGE:-cng-benchmark-runner:dev}
-    environment: *s3-env
+    environment:
+      <<: [*s3-env, *gdal-env]
+      TITILER_ENDPOINT: http://titiler:8000
     depends_on:
       seed:
         condition: service_completed_successfully
@@ -96,6 +101,6 @@ services:
       - ../configs:/configs:ro
     command:
       ["run", "/configs/benchmarks/synthetic_cog.yaml",
-       "--objects-uri", "s3://bench/fixtures/",
+       "--source", "s3://bench/fixtures/fixture.tif",
        "--output", "s3://bench/results/"]
     restart: "no"

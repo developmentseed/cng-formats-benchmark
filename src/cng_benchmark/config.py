@@ -43,12 +43,13 @@ class TierConfig(BaseModel):
 class BenchmarkConfig(BaseModel):
     """Descriptor for one benchmark run.
 
-    ``object_source`` and ``output`` are optional location URIs (a local path,
-    ``file://`` or ``s3://…``): where the deployed runner reads the objects to
-    profile and where it writes its result artifacts. They are kept generic so
-    the same config is portable across targets — the deployment supplies the
-    concrete URIs (via CLI flags or a ConfigMap), and the CLI flags override
-    whatever the config carries.
+    ``source``, ``object_source`` and ``output`` are optional location URIs (a
+    local path, ``file://`` or ``s3://…``): respectively the baseline raster to
+    convert (the COG end-to-end path), the existing objects to list and profile
+    (the object-only path), and where to write result artifacts. They are kept
+    generic so the same config is portable across targets — the deployment
+    supplies the concrete URIs (via CLI flags or a ConfigMap), and the CLI flags
+    override whatever the config carries.
     """
 
     id: str
@@ -57,6 +58,7 @@ class BenchmarkConfig(BaseModel):
     metrics: list[str]
     tiers: list[TierConfig]
     params: dict[str, Any] = Field(default_factory=dict)
+    source: str | None = None
     object_source: str | None = None
     output: str | None = None
 

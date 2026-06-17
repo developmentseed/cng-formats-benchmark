@@ -30,20 +30,7 @@ spec:
             - {{ .Values.titiler.port | quote }}
           env:
             {{- include "cng-benchmark.s3Env" . | nindent 12 }}
-            {{- $endpoint := include "cng-benchmark.s3Endpoint" . }}
-            {{- if $endpoint }}
-            # GDAL S3 access (host:port form, path-style) for reading COGs.
-            - name: AWS_S3_ENDPOINT
-              value: {{ trimPrefix "https://" (trimPrefix "http://" $endpoint) | quote }}
-            - name: AWS_VIRTUAL_HOSTING
-              value: "FALSE"
-            - name: AWS_HTTPS
-              value: {{ hasPrefix "https://" $endpoint | ternary "YES" "NO" | quote }}
-            {{- end }}
-            - name: GDAL_DISABLE_READDIR_ON_OPEN
-              value: EMPTY_DIR
-            - name: CPL_VSIL_CURL_ALLOWED_EXTENSIONS
-              value: ".tif,.TIF,.tiff"
+            {{- include "cng-benchmark.gdalEnv" . | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.titiler.port }}

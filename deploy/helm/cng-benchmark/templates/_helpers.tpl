@@ -47,6 +47,27 @@ in-cluster MinIO stand-in is enabled, point at its Service; otherwise empty
 {{- end -}}
 {{- end }}
 
+{{/*
+Shared GDAL /vsis3 environment for the runner's read metric and TiTiler. An
+explicit/derived endpoint (MinIO or a non-AWS provider) switches GDAL to
+host:port + path-style; HTTPS is inferred from the endpoint scheme.
+*/}}
+{{- define "cng-benchmark.gdalEnv" -}}
+{{- $endpoint := include "cng-benchmark.s3Endpoint" . }}
+{{- if $endpoint }}
+- name: AWS_S3_ENDPOINT
+  value: {{ trimPrefix "https://" (trimPrefix "http://" $endpoint) | quote }}
+- name: AWS_VIRTUAL_HOSTING
+  value: "FALSE"
+- name: AWS_HTTPS
+  value: {{ hasPrefix "https://" $endpoint | ternary "YES" "NO" | quote }}
+{{- end }}
+- name: GDAL_DISABLE_READDIR_ON_OPEN
+  value: EMPTY_DIR
+- name: CPL_VSIL_CURL_ALLOWED_EXTENSIONS
+  value: ".tif,.TIF,.tiff"
+{{- end }}
+
 {{/* Shared boto3/AWS environment for the runner. */}}
 {{- define "cng-benchmark.s3Env" -}}
 - name: AWS_ACCESS_KEY_ID

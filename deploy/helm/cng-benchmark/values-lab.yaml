@@ -35,9 +35,11 @@ s3:
 
 runner:
   # Provide a real benchmark config via the `configs` map (see values.yaml) and
-  # point these at the real bucket prefixes.
+  # point these at the real bucket. NOTE single-endpoint: source and output
+  # share one S3 endpoint here; the real source-on-Datalake / sink-on-Scaleway
+  # split is #4 (PR-C).
   configFile: synthetic_cog.yaml
-  objectSource: s3://REPLACE-ME-bucket/objects/
+  source: s3://REPLACE-ME-bucket/scene.tif
   output: s3://REPLACE-ME-bucket/results/
 
 titiler:

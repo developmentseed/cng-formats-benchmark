@@ -15,16 +15,17 @@ image:
   pullPolicy: IfNotPresent
 
 # The benchmark the runner executes. `configFile` names a key in the `configs`
-# map below (mounted at /configs). `objectSource` and `output` are storage URIs
-# handed to the runner as flags, keeping the config itself portable.
+# map below (mounted at /configs). `source` (baseline raster to convert) and
+# `output` are storage URIs handed to the runner as flags, keeping the config
+# itself portable.
 runner:
   configFile: synthetic_cog.yaml
-  objectSource: s3://bench/fixtures/
+  source: s3://bench/fixtures/fixture.tif
   output: s3://bench/results/
   backoffLimit: 0
 
-# Seed a synthetic fixture COG before the run. Local/CI only — for a real run
-# against real data, disable this and point objectSource at the real bucket.
+# Seed a synthetic fixture raster before the run. Local/CI only — for a real run
+# against real data, disable this and point runner.source at the real bucket.
 seed:
   enabled: true
   dest: s3://bench/fixtures/fixture.tif
@@ -76,15 +77,19 @@ resources: {}
 # here; the templates never change.
 configs:
   synthetic_cog.yaml: |
-    id: synthetic-cog-object-sizes
+    id: synthetic-cog-end-to-end
     dataset: synthetic-cog
     formats:
       - cog
     metrics:
+      - write
       - object_size
+      - read
+      - display
     tiers:
       - name: warm
         min_object_bytes: 33554432
       - name: cold
         min_object_bytes: 104857600
-    params: {}
+    params:
+      block_size: 256

@@ -20,7 +20,7 @@ seed:
 
 runner:
   configFile: synthetic_cog.yaml
-  objectSource: s3://bench/fixtures/
+  source: s3://bench/fixtures/fixture.tif
   output: s3://bench/results/
 
 titiler:
