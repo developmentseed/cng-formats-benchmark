@@ -74,7 +74,15 @@ jobs:
         working-directory: deploy
         env:
           RUNNER_IMAGE: cng-benchmark-runner:ci
-        run: docker compose up --wait --wait-timeout 240
+        run: |
+          # `up --wait` brings the infra healthy and starts the (one-shot) seed
+          # and runner; it returns once the runner is *running*, not *exited*.
+          docker compose up --wait --wait-timeout 240
+          # Block until the runner finishes and fail on a non-zero exit code.
+          code=$(docker wait "$(docker compose ps -aq runner)")
+          echo "runner exit code: $code"
+          docker compose logs runner
+          test "$code" = "0"
       - name: Assert the runner wrote a result artifact to MinIO
         working-directory: deploy
         run: |
