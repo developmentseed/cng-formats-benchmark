@@ -16,10 +16,23 @@ dependencies = [
 [project.scripts]
 cng-benchmark = "cng_benchmark.cli:app"
 
+# Optional extras keep the core harness import-light and unit-testable in
+# isolation. The deployable runner image installs both; CI's unit-test job uses
+# `dev` (which pulls in `s3` so the storage path is exercised, but not the heavy
+# geo stack — geo tests skip when rasterio is absent).
 [project.optional-dependencies]
+s3 = [
+    "boto3>=1.34",
+]
+cog = [
+    "rasterio>=1.3",
+    "rio-cogeo>=5",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    "boto3>=1.34",
+    "moto[s3]>=5",
 ]
 
 [build-system]

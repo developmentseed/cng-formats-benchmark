@@ -1,0 +1,15 @@
+apiVersion: v2
+name: cng-benchmark
+description: >-
+  Deployable benchmarking system for cloud-native geospatial formats: the runner
+  as a Job, TiTiler as a Deployment+Service, and (for local/CI) a disposable
+  MinIO stand-in. Datasets and benchmarks are configuration, never chart code.
+type: application
+version: 0.1.0
+appVersion: "0.0.0"
+keywords:
+  - benchmark
+  - cloud-native
+  - geospatial
+maintainers:
+  - name: Development Seed

@@ -1,0 +1,16 @@
+{{- if .Values.results.pvc.enabled }}
+# Optional results volume for runs that write artifacts to a local path instead
+# of S3 (set runner.output to results.pvc.mountPath).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cng-benchmark.fullname" . }}-results
+  labels:
+    {{- include "cng-benchmark.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.results.pvc.size }}
+{{- end }}

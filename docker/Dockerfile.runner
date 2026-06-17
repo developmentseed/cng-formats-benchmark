@@ -13,10 +13,20 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1
 
-# Install the project. README is referenced by pyproject metadata.
+# rasterio ships GDAL in its wheel, but GDAL still dynamically links a few base
+# system libraries that the slim image omits (notably libexpat). Install them so
+# `import rasterio` works without pulling a full system GDAL.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install the project with the deployment extras: `s3` (boto3) so the runner
+# can list/read objects and persist artifacts to S3/MinIO, and `cog`
+# (rasterio + rio-cogeo) so it can generate fixtures and convert GeoTIFF -> COG.
+# rasterio ships manylinux wheels bundling GDAL, so no system GDAL is needed.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN uv sync --no-dev
+RUN uv sync --no-dev --extra s3 --extra cog
 
 ENTRYPOINT ["uv", "run", "cng-benchmark"]
 CMD ["--help"]

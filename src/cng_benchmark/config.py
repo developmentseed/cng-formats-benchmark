@@ -41,7 +41,15 @@ class TierConfig(BaseModel):
 
 
 class BenchmarkConfig(BaseModel):
-    """Descriptor for one benchmark run."""
+    """Descriptor for one benchmark run.
+
+    ``object_source`` and ``output`` are optional location URIs (a local path,
+    ``file://`` or ``s3://…``): where the deployed runner reads the objects to
+    profile and where it writes its result artifacts. They are kept generic so
+    the same config is portable across targets — the deployment supplies the
+    concrete URIs (via CLI flags or a ConfigMap), and the CLI flags override
+    whatever the config carries.
+    """
 
     id: str
     dataset: str
@@ -49,6 +57,8 @@ class BenchmarkConfig(BaseModel):
     metrics: list[str]
     tiers: list[TierConfig]
     params: dict[str, Any] = Field(default_factory=dict)
+    object_source: str | None = None
+    output: str | None = None
 
 
 def tier_policy_from_config(tiers: list[TierConfig]) -> TierPolicy:

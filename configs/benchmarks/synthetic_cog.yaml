@@ -1,0 +1,20 @@
+# Synthetic benchmark descriptor used to prove the stack deploys.
+#
+# The runner profiles the object sizes of a generated fixture COG and writes a
+# result artifact. `object_source` and `output` are intentionally omitted here:
+# the deployment supplies them via CLI flags (--objects-uri / --output) so the
+# same config is portable across the compose stack, the kind cluster, and any
+# real target. CI never runs a benchmark on real data — this exercises the
+# deployable path only.
+id: synthetic-cog-object-sizes
+dataset: synthetic-cog
+formats:
+  - cog
+metrics:
+  - object_size
+tiers:
+  - name: warm
+    min_object_bytes: 33554432   # 32 MiB
+  - name: cold
+    min_object_bytes: 104857600  # 100 MiB
+params: {}

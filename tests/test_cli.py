@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from cng_benchmark import __version__
@@ -81,3 +82,50 @@ def test_no_args_shows_help():
     result = runner.invoke(app, [])
     assert result.exit_code == 2
     assert "Benchmark cloud-native geospatial formats." in result.stdout
+
+
+def test_run_profiles_objects_from_uri(tmp_path):
+    objdir = tmp_path / "objects"
+    objdir.mkdir()
+    (objdir / "a.bin").write_bytes(b"x" * 100)
+    (objdir / "b.bin").write_bytes(b"y" * 300)
+
+    result = runner.invoke(
+        app, ["run", BENCHMARK_EXAMPLE, "--objects-uri", str(objdir)]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["object_profile"]["count"] == 2
+    assert payload["object_profile"]["total_bytes"] == 400
+
+
+def test_run_writes_artifacts_to_output(tmp_path):
+    objfile = tmp_path / "o.bin"
+    objfile.write_bytes(b"z" * 50)
+    out = tmp_path / "results"
+
+    result = runner.invoke(
+        app,
+        ["run", BENCHMARK_EXAMPLE, "--objects-uri", str(objfile), "--output", str(out)],
+    )
+    assert result.exit_code == 0
+    assert (out / "result.json").exists()
+    assert (out / "summary.md").exists()
+
+
+def test_run_reports_unreachable_object_source(tmp_path):
+    result = runner.invoke(
+        app, ["run", BENCHMARK_EXAMPLE, "--objects-uri", str(tmp_path / "absent")]
+    )
+    assert result.exit_code == 1
+    assert "Cannot profile objects" in result.output
+
+
+def test_seed_generates_fixture_to_local_path(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+    dest = tmp_path / "fixture.tif"
+
+    result = runner.invoke(app, ["seed", "--dest", str(dest), "--size", "128"])
+    assert result.exit_code == 0
+    assert dest.exists() and dest.stat().st_size > 0

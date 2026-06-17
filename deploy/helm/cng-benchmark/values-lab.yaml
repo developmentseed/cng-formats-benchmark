@@ -1,0 +1,44 @@
+# Lab target: the real Scaleway cluster against a real, external S3 bucket.
+#
+# This is the actual benchmark target — NOT a deployability check. MinIO and the
+# synthetic seed are OFF; credentials come from a pre-created Secret; the runner
+# reads real objects from, and writes results to, the external bucket.
+#
+# Before installing, create the credentials Secret in the target namespace:
+#   kubectl create secret generic cng-benchmark-s3 \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
+# and point s3.existingSecret at it. Override the storage URIs and the benchmark
+# config below for the real dataset (e.g. S2 GeoTIFF -> COG).
+
+image:
+  repository: ghcr.io/developmentseed/cng-benchmark-runner
+  tag: latest
+  pullPolicy: Always
+
+# No in-cluster object store: use the real provider.
+minio:
+  enabled: false
+
+# No synthetic fixture: benchmark real data already in the bucket.
+seed:
+  enabled: false
+
+s3:
+  # Single-endpoint: this is the Scaleway sink only. The real run also reads
+  # from a private-CA CNES Datalake source in the same run (source != sink),
+  # which needs a second endpoint/CA/Secret — see #4 (PR-B).
+  # Scaleway S3-compatible endpoint + region (example — set to your bucket's).
+  endpoint: https://s3.fr-par.scw.cloud
+  region: fr-par
+  existingSecret: cng-benchmark-s3
+
+runner:
+  # Provide a real benchmark config via the `configs` map (see values.yaml) and
+  # point these at the real bucket prefixes.
+  configFile: synthetic_cog.yaml
+  objectSource: s3://REPLACE-ME-bucket/objects/
+  output: s3://REPLACE-ME-bucket/results/
+
+titiler:
+  enabled: true
