@@ -13,6 +13,15 @@
 {{- end }}
 {{- end }}
 
+{{/*
+Runner image reference. The tag defaults to the chart's appVersion (which
+release-please bumps in lockstep with the published image), so a default install
+pulls the matching released image; override image.tag for a local/edge image.
+*/}}
+{{- define "cng-benchmark.runnerImage" -}}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- end }}
+
 {{- define "cng-benchmark.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}

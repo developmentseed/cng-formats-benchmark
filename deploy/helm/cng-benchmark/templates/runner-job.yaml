@@ -30,7 +30,7 @@ spec:
         {{- end }}
         {{- if .Values.seed.enabled }}
         - name: seed
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "cng-benchmark.runnerImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["seed", "--dest", {{ .Values.seed.dest | quote }}, "--size", {{ .Values.seed.size | quote }}]
           env:
@@ -40,7 +40,7 @@ spec:
         # Gate the run on TiTiler readiness — the display metric calls it and
         # does not retry, so the Job must not start before it serves /healthz.
         - name: wait-titiler
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "cng-benchmark.runnerImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/.venv/bin/python", "-c"]
           args:
@@ -57,7 +57,7 @@ spec:
         {{- end }}
       containers:
         - name: runner
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "cng-benchmark.runnerImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - run

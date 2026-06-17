@@ -39,6 +39,7 @@ nav:
   - Getting started: getting-started.md
   - Configuration: configuration.md
   - Deployment: deployment.md
+  - Releasing: releasing.md
 
 markdown_extensions:
   - admonition

@@ -5,6 +5,7 @@
 # pulled IfNotPresent.
 
 image:
+  # The image built locally and loaded into kind (not pulled from a registry).
   repository: cng-benchmark-runner
   tag: ci
   pullPolicy: IfNotPresent
