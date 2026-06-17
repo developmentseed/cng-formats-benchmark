@@ -1,0 +1,90 @@
+# Default values for the cng-benchmark chart.
+#
+# This file documents every knob; the per-target overlays (values-local.yaml,
+# values-lab.yaml) set only what differs. Adding a dataset or benchmark is a
+# change here (the `configs` map), never a change to the templates.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: cng-benchmark-runner
+  tag: dev
+  # IfNotPresent so a locally built / kind-loaded image is used without a
+  # registry; set to Always for a real registry pull.
+  pullPolicy: IfNotPresent
+
+# The benchmark the runner executes. `configFile` names a key in the `configs`
+# map below (mounted at /configs). `objectSource` and `output` are storage URIs
+# handed to the runner as flags, keeping the config itself portable.
+runner:
+  configFile: synthetic_cog.yaml
+  objectSource: s3://bench/fixtures/
+  output: s3://bench/results/
+  backoffLimit: 0
+
+# Seed a synthetic fixture COG before the run. Local/CI only — for a real run
+# against real data, disable this and point objectSource at the real bucket.
+seed:
+  enabled: true
+  dest: s3://bench/fixtures/fixture.tif
+  size: 512
+
+# S3 access. The same settings drive boto3 (runner) and GDAL (TiTiler); only the
+# endpoint and credentials differ between MinIO and a real provider.
+s3:
+  # Explicit endpoint override for S3-compatible storage. Leave empty to derive
+  # it automatically: the in-cluster MinIO Service when minio.enabled, otherwise
+  # the provider's default endpoint (real AWS/Scaleway via region).
+  endpoint: ""
+  region: us-east-1
+  # If set, credentials are read from this pre-existing Secret (keys
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY). This is how the lab target
+  # injects real credentials. If empty, a Secret is created from the values
+  # below (only suitable for the disposable MinIO stand-in).
+  existingSecret: ""
+  accessKey: minioadmin
+  secretKey: minioadmin
+
+# Disposable in-cluster MinIO. ON for local/CI, OFF for the lab (real S3).
+minio:
+  enabled: true
+  image: minio/minio:latest
+  mcImage: minio/mc:latest
+  bucket: bench
+  rootUser: minioadmin
+  rootPassword: minioadmin
+
+# TiTiler tile service. Health-probed on /healthz; the display metric (PR-B)
+# measures tiles against it.
+titiler:
+  enabled: true
+  image: ghcr.io/developmentseed/titiler:latest
+  port: 8000
+  replicas: 1
+
+# Optional PVC for results when not writing to S3. Off by default (S3 path).
+results:
+  pvc:
+    enabled: false
+    size: 1Gi
+    mountPath: /results
+
+resources: {}
+
+# Benchmark/dataset configs mounted into the runner at /configs. Add datasets
+# here; the templates never change.
+configs:
+  synthetic_cog.yaml: |
+    id: synthetic-cog-object-sizes
+    dataset: synthetic-cog
+    formats:
+      - cog
+    metrics:
+      - object_size
+    tiers:
+      - name: warm
+        min_object_bytes: 33554432
+      - name: cold
+        min_object_bytes: 104857600
+    params: {}

@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cng-benchmark.fullname" . }}-runner
+  labels:
+    {{- include "cng-benchmark.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  backoffLimit: {{ .Values.runner.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "cng-benchmark.labels" . | nindent 8 }}
+        app.kubernetes.io/component: runner
+    spec:
+      restartPolicy: Never
+      initContainers:
+        {{- if and .Values.minio.enabled }}
+        - name: createbucket
+          image: {{ .Values.minio.mcImage | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until mc alias set local "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"; do
+                echo "waiting for object store..."; sleep 2;
+              done
+              mc mb --ignore-existing "local/{{ .Values.minio.bucket }}"
+          env:
+            {{- include "cng-benchmark.s3Env" . | nindent 12 }}
+        {{- end }}
+        {{- if .Values.seed.enabled }}
+        - name: seed
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["seed", "--dest", {{ .Values.seed.dest | quote }}, "--size", {{ .Values.seed.size | quote }}]
+          env:
+            {{- include "cng-benchmark.s3Env" . | nindent 12 }}
+        {{- end }}
+      containers:
+        - name: runner
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - run
+            - /configs/{{ .Values.runner.configFile }}
+            - --objects-uri
+            - {{ .Values.runner.objectSource | quote }}
+            - --output
+            - {{ .Values.runner.output | quote }}
+          env:
+            {{- include "cng-benchmark.s3Env" . | nindent 12 }}
+            {{- if .Values.titiler.enabled }}
+            # Forwarded for the display metric (PR-B); harmless otherwise.
+            - name: TITILER_ENDPOINT
+              value: {{ printf "http://%s-titiler:%v" (include "cng-benchmark.fullname" .) .Values.titiler.port | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: configs
+              mountPath: /configs
+              readOnly: true
+            {{- if .Values.results.pvc.enabled }}
+            - name: results
+              mountPath: {{ .Values.results.pvc.mountPath }}
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: configs
+          configMap:
+            name: {{ include "cng-benchmark.fullname" . }}-configs
+        {{- if .Values.results.pvc.enabled }}
+        - name: results
+          persistentVolumeClaim:
+            claimName: {{ include "cng-benchmark.fullname" . }}-results
+        {{- end }}

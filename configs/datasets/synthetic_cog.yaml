@@ -1,0 +1,14 @@
+# Synthetic dataset descriptor used to prove the stack deploys.
+#
+# This is NOT a real benchmark target: it names a small, generated fixture COG
+# so docker-compose and the kind CI job can run the runner end-to-end with no
+# external data and no cloud credentials. Real datasets point `source` at a
+# real bucket; everything here is disposable.
+id: synthetic-cog
+description: Synthetic single COG fixture for deployability checks.
+source: synthetic://fixture.tif
+baseline_format: geotiff
+target_formats:
+  - cog
+grouping_lever:
+  cog_block_size: [256]

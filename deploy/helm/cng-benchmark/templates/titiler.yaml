@@ -1,0 +1,82 @@
+{{- if .Values.titiler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cng-benchmark.fullname" . }}-titiler
+  labels:
+    {{- include "cng-benchmark.labels" . | nindent 4 }}
+    app.kubernetes.io/component: titiler
+spec:
+  replicas: {{ .Values.titiler.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}
+      app.kubernetes.io/component: titiler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}
+        app.kubernetes.io/component: titiler
+    spec:
+      containers:
+        - name: titiler
+          image: {{ .Values.titiler.image | quote }}
+          command:
+            - uvicorn
+            - titiler.application.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - {{ .Values.titiler.port | quote }}
+          env:
+            {{- include "cng-benchmark.s3Env" . | nindent 12 }}
+            {{- $endpoint := include "cng-benchmark.s3Endpoint" . }}
+            {{- if $endpoint }}
+            # GDAL S3 access (host:port form, path-style) for reading COGs.
+            - name: AWS_S3_ENDPOINT
+              value: {{ trimPrefix "https://" (trimPrefix "http://" $endpoint) | quote }}
+            - name: AWS_VIRTUAL_HOSTING
+              value: "FALSE"
+            - name: AWS_HTTPS
+              value: {{ hasPrefix "https://" $endpoint | ternary "YES" "NO" | quote }}
+            {{- end }}
+            - name: GDAL_DISABLE_READDIR_ON_OPEN
+              value: EMPTY_DIR
+            - name: CPL_VSIL_CURL_ALLOWED_EXTENSIONS
+              value: ".tif,.TIF,.tiff"
+          ports:
+            - name: http
+              containerPort: {{ .Values.titiler.port }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cng-benchmark.fullname" . }}-titiler
+  labels:
+    {{- include "cng-benchmark.labels" . | nindent 4 }}
+    app.kubernetes.io/component: titiler
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}
+    app.kubernetes.io/component: titiler
+  ports:
+    - name: http
+      port: {{ .Values.titiler.port }}
+      targetPort: http
+{{- end }}

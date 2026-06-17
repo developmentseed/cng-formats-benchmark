@@ -1,0 +1,100 @@
+# Local deployable stack: runner + TiTiler + MinIO.
+#
+# This proves the system DEPLOYS and runs end-to-end with NO external data and
+# NO cloud credentials. MinIO is a disposable, S3-compatible stand-in for a real
+# provider — the runner and TiTiler talk to it over the same S3 API they use
+# against a real bucket (only the endpoint/credentials differ). It is NOT a
+# benchmark on real data.
+#
+# Flow, gated by health/completion so `docker compose up --wait` blocks until the
+# whole pipeline has succeeded:
+#   minio (healthy) -> createbucket -> seed (fixture COG into MinIO)
+#                   -> runner (profile objects + write artifact); titiler stays up.
+
+x-s3-env: &s3-env
+  # boto3 (runner) reads AWS_ENDPOINT_URL; GDAL (TiTiler) reads AWS_S3_ENDPOINT.
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://minio:9000
+  AWS_ENDPOINT_URL_S3: http://minio:9000
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    # Host ports are for human inspection only; the stack works without them
+    # (services talk over the compose network). Override if a port is taken.
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/bench
+      "
+
+  titiler:
+    image: ghcr.io/developmentseed/titiler:latest
+    command:
+      ["uvicorn", "titiler.application.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *s3-env
+      # GDAL/rasterio S3 access to MinIO (used by the display metric in PR-B).
+      AWS_S3_ENDPOINT: minio:9000
+      AWS_VIRTUAL_HOSTING: "FALSE"
+      AWS_HTTPS: "NO"
+      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+      CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.TIF,.tiff"
+    ports:
+      - "${TITILER_PORT:-8000}:8000"
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python", "-c",
+         "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  seed:
+    image: ${RUNNER_IMAGE:-cng-benchmark-runner:dev}
+    environment: *s3-env
+    depends_on:
+      createbucket:
+        condition: service_completed_successfully
+    command:
+      ["seed", "--dest", "s3://bench/fixtures/fixture.tif"]
+    restart: "no"
+
+  runner:
+    image: ${RUNNER_IMAGE:-cng-benchmark-runner:dev}
+    environment: *s3-env
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      titiler:
+        condition: service_healthy
+    volumes:
+      - ../configs:/configs:ro
+    command:
+      ["run", "/configs/benchmarks/synthetic_cog.yaml",
+       "--objects-uri", "s3://bench/fixtures/",
+       "--output", "s3://bench/results/"]
+    restart: "no"

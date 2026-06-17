@@ -1,0 +1,27 @@
+# Local / CI target: kind + in-cluster MinIO + synthetic fixture.
+#
+# Proves the stack deploys and runs end-to-end with no external data and no
+# credentials. The runner image is built locally and loaded into kind, so it is
+# pulled IfNotPresent.
+
+image:
+  repository: cng-benchmark-runner
+  tag: ci
+  pullPolicy: IfNotPresent
+
+# MinIO stand-in on; credentials created from values (disposable).
+minio:
+  enabled: true
+
+seed:
+  enabled: true
+  dest: s3://bench/fixtures/fixture.tif
+  size: 256
+
+runner:
+  configFile: synthetic_cog.yaml
+  objectSource: s3://bench/fixtures/
+  output: s3://bench/results/
+
+titiler:
+  enabled: true

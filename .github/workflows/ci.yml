@@ -52,6 +52,94 @@ jobs:
       - name: Smoke-test the runner entry point
         run: docker run --rm cng-benchmark-runner:ci version
 
-  # Deployability (docker-compose up --wait, and a kind cluster bring-up that
-  # `helm install`s the stack and asserts the runner Job + TiTiler are healthy)
-  # is added in M2, once the stack exists.
+  # Deployability proves the stack STANDS UP and runs end-to-end against a tiny
+  # synthetic fixture in a disposable MinIO — never a benchmark on real data.
+
+  deploy-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build runner image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.runner
+          push: false
+          load: true
+          tags: cng-benchmark-runner:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Stand up the stack and run end-to-end
+        working-directory: deploy
+        env:
+          RUNNER_IMAGE: cng-benchmark-runner:ci
+        run: docker compose up --wait --wait-timeout 240
+      - name: Assert the runner wrote a result artifact to MinIO
+        working-directory: deploy
+        run: |
+          docker compose exec -T minio sh -c '
+            mc alias set local http://localhost:9000 minioadmin minioadmin &&
+            mc stat local/bench/results/result.json &&
+            mc stat local/bench/results/summary.md'
+      - name: Dump logs on failure
+        if: failure()
+        working-directory: deploy
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        working-directory: deploy
+        run: docker compose down -v
+
+  deploy-k8s:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build runner image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.runner
+          push: false
+          load: true
+          tags: cng-benchmark-runner:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: azure/setup-helm@v4
+      - name: Install kubeconform
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | sudo tar xz -C /usr/local/bin kubeconform
+      - name: Lint and validate the chart
+        run: |
+          helm lint deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/values-local.yaml
+          helm lint deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/values-lab.yaml
+          for v in values-local values-lab; do
+            helm template t deploy/helm/cng-benchmark \
+              -f deploy/helm/cng-benchmark/$v.yaml | kubeconform -strict -summary
+          done
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: cngbench
+      - name: Load runner image into kind
+        run: kind load docker-image cng-benchmark-runner:ci --name cngbench
+      - name: Install the chart (local overlay)
+        run: |
+          helm install bench deploy/helm/cng-benchmark \
+            -f deploy/helm/cng-benchmark/values-local.yaml
+      - name: Assert TiTiler becomes ready
+        run: |
+          kubectl rollout status deploy/bench-cng-benchmark-titiler --timeout=180s
+      - name: Assert the runner Job completes
+        run: |
+          kubectl wait --for=condition=complete --timeout=240s \
+            job/bench-cng-benchmark-runner
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide || true
+          kubectl describe job/bench-cng-benchmark-runner || true
+          kubectl logs job/bench-cng-benchmark-runner --all-containers --prefix || true
+          kubectl logs deploy/bench-cng-benchmark-titiler || true
