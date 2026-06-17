@@ -73,8 +73,11 @@ host:port + path-style; HTTPS is inferred from the endpoint scheme.
 {{- end }}
 - name: GDAL_DISABLE_READDIR_ON_OPEN
   value: EMPTY_DIR
-- name: CPL_VSIL_CURL_ALLOWED_EXTENSIONS
-  value: ".tif,.TIF,.tiff"
+# NB: do not set CPL_VSIL_CURL_ALLOWED_EXTENSIONS. A .tif-only allowlist blocks
+# GDAL from reading delivery-archive sources over /vsis3 (S1/S2 are addressed as
+# /vsizip//vsis3/<scene>.zip/...), and the benchmark also reads .nc/.laz/etc.
+# GDAL_DISABLE_READDIR_ON_OPEN already prevents the sidecar-probing this would
+# otherwise optimise.
 {{- end }}
 
 {{/* Shared boto3/AWS environment for the runner. */}}
