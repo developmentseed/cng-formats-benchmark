@@ -19,7 +19,11 @@ def test_grouping_lever_describes_the_format(name):
     assert EXPECTED_LEVERS[name] in adapter.describe_grouping_lever()
 
 
-@pytest.mark.parametrize("name", sorted(EXPECTED_LEVERS))
+# COG is implemented (see test_cog.py); the rest remain stubs until their PRs.
+STUB_FORMATS = sorted(set(EXPECTED_LEVERS) - {"cog"})
+
+
+@pytest.mark.parametrize("name", STUB_FORMATS)
 def test_convert_and_enumerate_not_implemented_yet(name):
     adapter = FORMATS.get(name)()
     with pytest.raises(NotImplementedError):

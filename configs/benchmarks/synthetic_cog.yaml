@@ -1,20 +1,25 @@
 # Synthetic benchmark descriptor used to prove the stack deploys.
 #
-# The runner profiles the object sizes of a generated fixture COG and writes a
-# result artifact. `object_source` and `output` are intentionally omitted here:
-# the deployment supplies them via CLI flags (--objects-uri / --output) so the
-# same config is portable across the compose stack, the kind cluster, and any
-# real target. CI never runs a benchmark on real data — this exercises the
-# deployable path only.
-id: synthetic-cog-object-sizes
+# The runner converts a generated fixture raster to COG and collects the full
+# metric set end-to-end, then writes a result artifact. `source`, `output` and
+# the TiTiler endpoint are intentionally omitted here: the deployment supplies
+# them via CLI flags (--source / --output / --titiler-endpoint) so the same
+# config is portable across the compose stack, the kind cluster, and any real
+# target. CI never runs a benchmark on real data — this exercises the deployable
+# path only.
+id: synthetic-cog-end-to-end
 dataset: synthetic-cog
 formats:
   - cog
 metrics:
+  - write
   - object_size
+  - read
+  - display
 tiers:
   - name: warm
     min_object_bytes: 33554432   # 32 MiB
   - name: cold
     min_object_bytes: 104857600  # 100 MiB
-params: {}
+params:
+  block_size: 256   # COG internal tiling — the grouping lever for this run

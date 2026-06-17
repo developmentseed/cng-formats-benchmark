@@ -13,8 +13,11 @@ never runs a benchmark on real data; it only proves the stack deploys.
 ## docker-compose (local)
 
 `docker-compose.yml` stands up MinIO + TiTiler + the runner. A seed step writes
-a small synthetic fixture COG into MinIO; the runner profiles it and writes a
-result artifact (`result.json` + `summary.md`) back to MinIO.
+a small synthetic fixture raster into MinIO; the runner converts it to a COG and
+collects the full metric set end-to-end — write (conversion throughput),
+object-size profile, read (windowed `/vsis3` range requests), and display (tile
+latency against TiTiler) — then writes the produced COG and a result artifact
+(`result.json` + `summary.md`) back to MinIO.
 
 ```bash
 docker build -f docker/Dockerfile.runner -t cng-benchmark-runner:dev .
