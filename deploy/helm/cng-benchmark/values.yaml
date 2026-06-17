@@ -47,6 +47,26 @@ s3:
   accessKey: minioadmin
   secretKey: minioadmin
 
+# Optional distinct SOURCE provider (read-only), for runs whose source lives on
+# a different endpoint / credentials / CA than the sink — e.g. a CNES Datalake
+# source read on the fly with a Scaleway sink (#4). Disabled by default: the
+# source then shares the sink's S3 settings (the synthetic single-endpoint
+# path), so this stays off for local/CI.
+s3Source:
+  enabled: false
+  endpoint: ""
+  region: ""
+  # Read-only credentials: reference an existing Secret (preferred for the lab),
+  # or have one created from the literals below.
+  existingSecret: ""
+  accessKey: ""
+  secretKey: ""
+  # Private-CA bundle for the source endpoint, supplied as a Secret holding the
+  # PEM under caBundleKey. Mounted into the runner; SOURCE_AWS_CA_BUNDLE (boto3)
+  # and GDAL_HTTP_CAINFO (/vsis3) point at it.
+  caBundleSecret: ""
+  caBundleKey: ca-bundle.pem
+
 # Disposable in-cluster MinIO. ON for local/CI, OFF for the lab (real S3).
 minio:
   enabled: true

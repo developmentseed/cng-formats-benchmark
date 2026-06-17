@@ -36,8 +36,21 @@ and the benchmark configs via a `ConfigMap`. MinIO is an optional in-cluster
 `Deployment` gated by `minio.enabled`.
 
 - `values-local.yaml` — kind + in-cluster MinIO + synthetic fixture (used by CI).
-- `values-lab.yaml` — the real Scaleway cluster: MinIO off, credentials from a
-  pre-created `Secret`, results to an external S3 bucket.
+- `values-lab.yaml` — the real Scaleway cluster: MinIO off, results to an
+  external S3 bucket.
+
+### Source ≠ sink (two providers in one run)
+
+A real run reads its **source** from one provider and writes its **sink** to
+another. Storage settings are resolved per role: the `sink` role uses the bare
+`AWS_*` environment, the `source` role uses `SOURCE_AWS_*` and falls back to the
+bare `AWS_*`. So the synthetic single-endpoint path (source and sink both MinIO)
+needs no `SOURCE_*` and is unchanged. In the chart, set `s3` (sink) and
+optionally `s3Source` (a distinct read-only source endpoint/credentials + a
+private-CA bundle mounted from a `Secret`) — see `values-lab.yaml` for the CNES
+Datalake source + Scaleway sink shape. The source is read on the fly via GDAL
+`/vsis3` (a plain object or a `/vsizip//vsis3/…` archive member), so the
+conversion's source-read cost is measured, not hidden by pre-staging.
 
 ```bash
 helm lint deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/values-local.yaml

@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 import cng_benchmark.formats  # noqa: F401  (registers the built-in adapters)
 from cng_benchmark import __version__, storage
 from cng_benchmark.config import BenchmarkConfig, tier_policy_from_config
+from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import measure_display
 from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.metrics.read import measure_read
@@ -87,6 +88,10 @@ def run_conversion_benchmark(
     ``read`` reads from the uploaded object (S3 ``/vsis3`` range requests when
     ``output_uri`` is S3); ``display`` requires both a ``titiler_endpoint`` and
     an S3 ``output_uri`` (TiTiler reads the object from the store).
+
+    The source is read in place via GDAL (the ``source`` role's endpoint/CA),
+    so the conversion's source-read cost is measured, not laundered by a
+    pre-download; the produced object and the read metric use the ``sink`` role.
     """
     if not config.formats:
         raise ValueError(f"benchmark {config.id!r} lists no formats")
@@ -95,19 +100,22 @@ def run_conversion_benchmark(
     requested = set(config.metrics)
 
     with tempfile.TemporaryDirectory() as workdir:
-        src_name = os.path.basename(source_uri.rstrip("/")) or "source.tif"
-        local_source = os.path.join(workdir, src_name)
-        storage.download_to_path(source_uri, local_source)
-
         local_target = os.path.join(workdir, f"{chosen}.tif")
-        write_metrics = measure_write(
-            adapter, local_source, local_target, config.params
-        )
+        # Read the source in place (network reads counted in the conversion).
+        source_path = storage.to_gdal_path(source_uri)
+        with gdal_session("source"):
+            write_metrics = measure_write(
+                adapter,
+                source_path,
+                local_target,
+                config.params,
+                source_size=storage.object_size(source_uri, "source"),
+            )
 
         # Always publish the produced object under the output location: it is a
         # first-class run artifact, and read/display address it on the store.
         object_uri = storage.join(output_uri, f"{chosen}/{chosen}.tif")
-        storage.upload_from_path(local_target, object_uri)
+        storage.upload_from_path(local_target, object_uri, role="sink")
 
         policy = tier_policy_from_config(config.tiers)
         profile = profile_object_sizes(adapter.enumerate_objects(local_target), policy)
@@ -123,7 +131,8 @@ def run_conversion_benchmark(
                 ),
             ]
         if "read" in requested:
-            metrics += measure_read(object_uri)
+            with gdal_session("sink"):
+                metrics += measure_read(object_uri)
         if "display" in requested:
             if not titiler_endpoint:
                 raise ValueError("the display metric requires a TiTiler endpoint")

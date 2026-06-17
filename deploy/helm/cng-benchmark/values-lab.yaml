@@ -1,46 +1,63 @@
-# Lab target: the real Scaleway cluster against a real, external S3 bucket.
+# Lab target: the real Scaleway cluster, reading source from the CNES Datalake
+# and writing the sink (results + TiTiler-served COG) to Scaleway.
 #
 # This is the actual benchmark target — NOT a deployability check. MinIO and the
-# synthetic seed are OFF; credentials come from a pre-created Secret; the runner
-# reads real objects from, and writes results to, the external bucket.
+# synthetic seed are OFF. The run spans two providers: a read-only, private-CA
+# CNES Datalake source and a read-write Scaleway sink (#4).
 #
-# Before installing, create the credentials Secret in the target namespace:
+# Before installing, create in the target namespace:
+#   # sink (Scaleway, read-write)
 #   kubectl create secret generic cng-benchmark-s3 \
 #     --from-literal=AWS_ACCESS_KEY_ID=<key> \
 #     --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
-# and point s3.existingSecret at it. Override the storage URIs and the benchmark
-# config below for the real dataset (e.g. S2 GeoTIFF -> COG).
+#   # source (CNES Datalake, read-only)
+#   kubectl create secret generic cng-benchmark-s3-source \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
+#   # source private CA bundle (PEM under key ca-bundle.pem)
+#   kubectl create secret generic cng-datalake-ca \
+#     --from-file=ca-bundle.pem=/path/to/cnes-ca-bundle.pem
+# then set the URIs/config below for the real dataset (e.g. S1/S2 L2A -> COG).
+#
+# GATED on CNES deliverables: the CA bundle file, and confirmation the lab's
+# outbound egress reaches s3.datalake.cnes.fr:443 (the "internet opening").
 
 image:
   repository: ghcr.io/developmentseed/cng-benchmark-runner
   tag: latest
   pullPolicy: Always
 
-# No in-cluster object store: use the real provider.
+# No in-cluster object store: use the real providers.
 minio:
   enabled: false
 
-# No synthetic fixture: benchmark real data already in the bucket.
+# No synthetic fixture: benchmark real data read on the fly from the Datalake.
 seed:
   enabled: false
 
+# Sink: Scaleway (results + the produced COG TiTiler serves).
 s3:
-  # Single-endpoint: this is the Scaleway sink only. The real run also reads
-  # from a private-CA CNES Datalake source in the same run (source != sink),
-  # which needs a second endpoint/CA/Secret — see #4 (PR-B).
-  # Scaleway S3-compatible endpoint + region (example — set to your bucket's).
   endpoint: https://s3.fr-par.scw.cloud
   region: fr-par
   existingSecret: cng-benchmark-s3
 
+# Source: CNES Datalake, read-only, behind a private CA.
+s3Source:
+  enabled: true
+  endpoint: https://s3.datalake.cnes.fr
+  region: us-east-1
+  existingSecret: cng-benchmark-s3-source
+  caBundleSecret: cng-datalake-ca
+  caBundleKey: ca-bundle.pem
+
 runner:
-  # Provide a real benchmark config via the `configs` map (see values.yaml) and
-  # point these at the real bucket. NOTE single-endpoint: source and output
-  # share one S3 endpoint here; the real source-on-Datalake / sink-on-Scaleway
-  # split is #4 (PR-C).
+  # Provide a real benchmark config via the `configs` map (see values.yaml).
+  # `source` reads on the fly from the Datalake — a plain object, or a
+  # /vsizip//vsis3/… archive member (passed through to GDAL); `output` is the
+  # Scaleway sink prefix.
   configFile: synthetic_cog.yaml
-  source: s3://REPLACE-ME-bucket/scene.tif
-  output: s3://REPLACE-ME-bucket/results/
+  source: s3://REPLACE-ME-datalake-bucket/path/to/scene.tif
+  output: s3://REPLACE-ME-scaleway-bucket/results/
 
 titiler:
   enabled: true

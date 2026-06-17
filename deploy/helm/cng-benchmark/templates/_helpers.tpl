@@ -90,3 +90,52 @@ host:port + path-style; HTTPS is inferred from the endpoint scheme.
   value: {{ $endpoint | quote }}
 {{- end }}
 {{- end }}
+
+{{/* Mount path for the source private-CA bundle. */}}
+{{- define "cng-benchmark.sourceCaPath" -}}
+{{- printf "/etc/cng/source-ca/%s" .Values.s3Source.caBundleKey -}}
+{{- end }}
+
+{{/* Name of the Secret holding source S3 credentials. */}}
+{{- define "cng-benchmark.s3SourceSecretName" -}}
+{{- if .Values.s3Source.existingSecret -}}
+{{- .Values.s3Source.existingSecret -}}
+{{- else -}}
+{{- printf "%s-s3-source" (include "cng-benchmark.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+SOURCE_AWS_* environment for the runner, emitted only when a distinct source
+provider is configured (s3Source.enabled). storage.s3_profile("source") reads
+these first and falls back to the bare AWS_* (the sink), so the synthetic
+single-endpoint path needs none of this.
+*/}}
+{{- define "cng-benchmark.sourceEnv" -}}
+{{- if .Values.s3Source.enabled }}
+- name: SOURCE_AWS_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "cng-benchmark.s3SourceSecretName" . }}
+      key: AWS_ACCESS_KEY_ID
+- name: SOURCE_AWS_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "cng-benchmark.s3SourceSecretName" . }}
+      key: AWS_SECRET_ACCESS_KEY
+{{- if .Values.s3Source.region }}
+- name: SOURCE_AWS_DEFAULT_REGION
+  value: {{ .Values.s3Source.region | quote }}
+{{- end }}
+{{- if .Values.s3Source.endpoint }}
+- name: SOURCE_AWS_ENDPOINT_URL
+  value: {{ .Values.s3Source.endpoint | quote }}
+- name: SOURCE_AWS_ENDPOINT_URL_S3
+  value: {{ .Values.s3Source.endpoint | quote }}
+{{- end }}
+{{- if .Values.s3Source.caBundleSecret }}
+- name: SOURCE_AWS_CA_BUNDLE
+  value: {{ include "cng-benchmark.sourceCaPath" . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

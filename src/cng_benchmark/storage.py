@@ -12,6 +12,15 @@ endpoint and credentials differ, and those come from the standard ``AWS_*``
 environment (``AWS_ENDPOINT_URL`` / ``AWS_ENDPOINT_URL_S3`` point boto3 at
 MinIO). boto3 is an optional dependency (the ``s3`` extra); importing it is
 deferred so the core stays installable and unit-testable without it.
+
+A real run spans two providers at once — it reads its *source* from one (the
+private-CA CNES Datalake, read-only) and writes its *sink* to another (Scaleway,
+read-write). Configuration is therefore resolved per **role**: the ``sink`` role
+reads the bare ``AWS_*`` environment, the ``source`` role reads ``SOURCE_AWS_*``
+and falls back to the bare ``AWS_*``. So the synthetic single-endpoint path
+(source and sink both MinIO) needs no ``SOURCE_*`` and behaves exactly as before.
+GDAL ``/vsis3`` reads (the read metric, and the conversion reading its source)
+apply the same per-role profile through :mod:`cng_benchmark.gdal_env`.
 """
 
 from __future__ import annotations
@@ -42,6 +51,59 @@ def is_s3(uri: str) -> bool:
     return uri.startswith("s3://")
 
 
+def to_gdal_path(uri: str) -> str:
+    """Map a URI to a GDAL-openable path.
+
+    ``s3://bucket/key`` becomes ``/vsis3/bucket/key`` and ``file://`` is reduced
+    to its local path; anything else (a local path, or an already-composed GDAL
+    VSI path such as ``/vsizip//vsis3/…`` for an archive) is passed through.
+    """
+    if is_s3(uri):
+        return "/vsis3/" + uri[len("s3://") :]
+    if uri.startswith("file://"):
+        return urlparse(uri).path
+    return uri
+
+
+@dataclass(frozen=True)
+class S3Profile:
+    """Per-role S3 connection settings resolved from the environment."""
+
+    endpoint: str | None
+    region: str | None
+    access_key: str | None
+    secret_key: str | None
+    ca_bundle: str | None
+
+
+_ROLES = ("sink", "source")
+
+
+def _role_env(role: str, name: str) -> str | None:
+    """Read ``name`` for ``role``: ``source`` prefers ``SOURCE_`` then bare."""
+    if role == "source":
+        return os.getenv("SOURCE_" + name) or os.getenv(name)
+    return os.getenv(name)
+
+
+def s3_profile(role: str = "sink") -> S3Profile:
+    """Resolve the S3 settings for ``role`` (``"sink"`` or ``"source"``).
+
+    The role selects which credentials/CA are used, so an unknown value is a
+    programming error and fails fast rather than silently using the sink's.
+    """
+    if role not in _ROLES:
+        raise ValueError(f"unknown S3 role {role!r}; expected one of {_ROLES}")
+    return S3Profile(
+        endpoint=_role_env(role, "AWS_ENDPOINT_URL_S3")
+        or _role_env(role, "AWS_ENDPOINT_URL"),
+        region=_role_env(role, "AWS_DEFAULT_REGION") or _role_env(role, "AWS_REGION"),
+        access_key=_role_env(role, "AWS_ACCESS_KEY_ID"),
+        secret_key=_role_env(role, "AWS_SECRET_ACCESS_KEY"),
+        ca_bundle=_role_env(role, "AWS_CA_BUNDLE"),
+    )
+
+
 def _local_path(uri: str) -> Path:
     """Map a local path or ``file://`` URI to a :class:`Path`."""
     if uri.startswith("file://"):
@@ -49,18 +111,13 @@ def _local_path(uri: str) -> Path:
     return Path(uri)
 
 
-def _s3_client():
-    """Build an S3 client from the ``AWS_*`` environment.
+def _s3_client(role: str = "sink"):
+    """Build an S3 client for ``role`` from the resolved :class:`S3Profile`.
 
     Raises a clear, actionable error when the optional ``s3`` extra (boto3) is
-    not installed. An explicit endpoint override (``AWS_ENDPOINT_URL_S3`` or
-    ``AWS_ENDPOINT_URL``) switches on path-style addressing so MinIO and other
-    S3-compatible servers work without virtual-host DNS.
-
-    Single-endpoint: one global endpoint/credential set, correct for the
-    synthetic MinIO path this PR ships. The real run reads from a private-CA
-    CNES Datalake source and writes to a Scaleway sink in the same run, which
-    needs per-URI (per-role) endpoint/CA/credential resolution — see #4 (PR-B).
+    not installed. An endpoint override switches on path-style addressing so
+    MinIO and other S3-compatible servers work without virtual-host DNS; a
+    role-specific CA bundle (``verify``) supports a private-CA source.
     """
     try:
         import boto3
@@ -71,12 +128,20 @@ def _s3_client():
             "`uv sync --extra s3` (or `pip install cng-benchmark[s3]`)"
         ) from exc
 
-    endpoint = os.getenv("AWS_ENDPOINT_URL_S3") or os.getenv("AWS_ENDPOINT_URL")
-    config = Config(s3={"addressing_style": "path"}) if endpoint else None
-    return boto3.client("s3", endpoint_url=endpoint, config=config)
+    p = s3_profile(role)
+    config = Config(s3={"addressing_style": "path"}) if p.endpoint else None
+    return boto3.client(
+        "s3",
+        endpoint_url=p.endpoint,
+        region_name=p.region,
+        aws_access_key_id=p.access_key,
+        aws_secret_access_key=p.secret_key,
+        config=config,
+        verify=p.ca_bundle or None,
+    )
 
 
-def list_object_sizes(uri: str) -> list[int]:
+def list_object_sizes(uri: str, role: str = "sink") -> list[int]:
     """Return the byte sizes of the objects under ``uri``.
 
     For a local directory, every regular file beneath it (recursively) counts.
@@ -87,7 +152,7 @@ def list_object_sizes(uri: str) -> list[int]:
     """
     if is_s3(uri):
         loc = _parse_s3(uri)
-        client = _s3_client()
+        client = _s3_client(role)
         paginator = client.get_paginator("list_objects_v2")
         sizes: list[int] = []
         for page in paginator.paginate(Bucket=loc.bucket, Prefix=loc.key):
@@ -121,24 +186,24 @@ def _require_object_key(loc: _S3Uri, uri: str) -> None:
         raise ValueError(f"s3 URI {uri!r} must name an object key, not a prefix")
 
 
-def write_bytes(uri: str, data: bytes) -> None:
+def write_bytes(uri: str, data: bytes, role: str = "sink") -> None:
     """Write ``data`` to ``uri`` (a local path/``file://`` or ``s3://`` key)."""
     if is_s3(uri):
         loc = _parse_s3(uri)
         _require_object_key(loc, uri)
-        _s3_client().put_object(Bucket=loc.bucket, Key=loc.key, Body=data)
+        _s3_client(role).put_object(Bucket=loc.bucket, Key=loc.key, Body=data)
         return
     path = _local_path(uri)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
 
 
-def write_text(uri: str, text: str) -> None:
+def write_text(uri: str, text: str, role: str = "sink") -> None:
     """Write ``text`` (UTF-8) to ``uri``."""
-    write_bytes(uri, text.encode("utf-8"))
+    write_bytes(uri, text.encode("utf-8"), role)
 
 
-def download_to_path(uri: str, local_path: str) -> None:
+def download_to_path(uri: str, local_path: str, role: str = "source") -> None:
     """Stream the object at ``uri`` to ``local_path`` without buffering it all.
 
     Uses boto3's file transfer (multipart, streamed to disk) for S3 and a file
@@ -149,30 +214,54 @@ def download_to_path(uri: str, local_path: str) -> None:
     if is_s3(uri):
         loc = _parse_s3(uri)
         _require_object_key(loc, uri)
-        _s3_client().download_file(loc.bucket, loc.key, str(dest))
+        _s3_client(role).download_file(loc.bucket, loc.key, str(dest))
         return
     shutil.copyfile(_local_path(uri), dest)
 
 
-def upload_from_path(local_path: str, uri: str) -> None:
+def upload_from_path(local_path: str, uri: str, role: str = "sink") -> None:
     """Stream ``local_path`` to ``uri`` (S3 multipart or local copy)."""
     if is_s3(uri):
         loc = _parse_s3(uri)
         _require_object_key(loc, uri)
-        _s3_client().upload_file(str(local_path), loc.bucket, loc.key)
+        _s3_client(role).upload_file(str(local_path), loc.bucket, loc.key)
         return
     dest = _local_path(uri)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(local_path, dest)
 
 
-def read_bytes(uri: str) -> bytes:
+def read_bytes(uri: str, role: str = "sink") -> bytes:
     """Read the bytes of the object/file at ``uri``."""
     if is_s3(uri):
         loc = _parse_s3(uri)
         _require_object_key(loc, uri)
-        return _s3_client().get_object(Bucket=loc.bucket, Key=loc.key)["Body"].read()
+        client = _s3_client(role)
+        return client.get_object(Bucket=loc.bucket, Key=loc.key)["Body"].read()
     return _local_path(uri).read_bytes()
+
+
+def object_size(uri: str, role: str = "sink") -> int | None:
+    """Best-effort byte size of a single object, or ``None`` if unknown.
+
+    Used for the write metric's ``bytes_in`` detail. Returns the size for a
+    local file or an S3 object (via ``head_object``); returns ``None`` for a
+    path GDAL can read but that has no cheap stat (e.g. a ``/vsizip`` member).
+    """
+    if is_s3(uri):
+        loc = _parse_s3(uri)
+        if not loc.key or loc.key.endswith("/"):
+            return None
+        try:
+            return int(
+                _s3_client(role).head_object(Bucket=loc.bucket, Key=loc.key)[
+                    "ContentLength"
+                ]
+            )
+        except Exception:  # noqa: BLE001 - best effort; size detail is optional
+            return None
+    path = _local_path(uri)
+    return path.stat().st_size if path.is_file() else None
 
 
 def join(base: str, name: str) -> str:
