@@ -55,6 +55,8 @@ def measure_read(
     window_size: int = 256,
 ) -> list[MetricResult]:
     """Read a grid of windows from the object at ``uri`` and return read metrics."""
+    if windows < 1 or window_size < 1:
+        raise ValueError("windows and window_size must be >= 1")
     rasterio, Window = _require_geo()
     path = _vsi_path(uri)
 

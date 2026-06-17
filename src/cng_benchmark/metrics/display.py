@@ -45,6 +45,8 @@ def measure_display(
     TiTiler serves from (e.g. ``s3://…``). The default tile ``z/x/y = 0/0/0``
     covers the whole world, so it renders for any global raster.
     """
+    if samples < 1:
+        raise ValueError("samples must be >= 1")
     base = endpoint.rstrip("/")
     encoded = quote(cog_uri, safe="")
 

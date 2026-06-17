@@ -144,7 +144,10 @@ def run(
 
     if objects is None and object_listing is None:
         typer.echo(f"Config {config} is valid (benchmark id: {cfg.id}).")
-        typer.echo("Provide --source, --objects, --objects-uri, or a config to run.")
+        typer.echo(
+            "To run, give an input: --source / --objects / --objects-uri, or set "
+            "source / object_source in the config."
+        )
         return
 
     origin = objects if objects is not None else object_listing

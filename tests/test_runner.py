@@ -5,9 +5,14 @@ import pytest
 from cng_benchmark import __version__
 from cng_benchmark.config import load_benchmark_config
 from cng_benchmark.metrics.objects import profile_object_sizes
-from cng_benchmark.runner import run_benchmark, tier_policy_from_config
+from cng_benchmark.runner import (
+    run_benchmark,
+    run_conversion_benchmark,
+    tier_policy_from_config,
+)
 
 BENCHMARK_EXAMPLE = "configs/benchmarks/example_cog.yaml"
+SYNTHETIC = "configs/benchmarks/synthetic_cog.yaml"
 
 
 def test_run_benchmark_populates_run_context():
@@ -36,3 +41,38 @@ def test_run_benchmark_unknown_format_raises():
     cfg = load_benchmark_config(BENCHMARK_EXAMPLE)
     with pytest.raises(KeyError):
         run_benchmark(cfg, [1, 2, 3], format_id="nonesuch")
+
+
+def test_run_conversion_benchmark_local_publishes_and_collects(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+    from cng_benchmark.fixtures import generate_cog_bytes
+
+    source = tmp_path / "source.tif"
+    source.write_bytes(generate_cog_bytes(size=256, blocksize=256))
+    output = tmp_path / "out"
+
+    # Local end-to-end without services: write/object_size/read (no display).
+    cfg = load_benchmark_config(SYNTHETIC).model_copy(
+        update={"metrics": ["write", "object_size", "read"]}
+    )
+    run = run_conversion_benchmark(cfg, str(source), str(output))
+
+    assert run.format_id == "cog"
+    assert run.object_profile.count == 1
+    names = {m.name for m in run.metrics}
+    assert {"write_elapsed", "object_count", "read_window_count"} <= names
+    # The produced object is always published under the output location.
+    assert (output / "cog" / "cog.tif").exists()
+
+
+def test_run_conversion_benchmark_display_without_endpoint_raises(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+    from cng_benchmark.fixtures import generate_cog_bytes
+
+    source = tmp_path / "source.tif"
+    source.write_bytes(generate_cog_bytes(size=128, blocksize=128))
+    cfg = load_benchmark_config(SYNTHETIC).model_copy(update={"metrics": ["display"]})
+    with pytest.raises(ValueError, match="TiTiler endpoint"):
+        run_conversion_benchmark(cfg, str(source), str(tmp_path / "out"))

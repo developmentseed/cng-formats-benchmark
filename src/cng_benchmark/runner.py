@@ -97,18 +97,17 @@ def run_conversion_benchmark(
     with tempfile.TemporaryDirectory() as workdir:
         src_name = os.path.basename(source_uri.rstrip("/")) or "source.tif"
         local_source = os.path.join(workdir, src_name)
-        storage.write_bytes(local_source, storage.read_bytes(source_uri))
+        storage.download_to_path(source_uri, local_source)
 
         local_target = os.path.join(workdir, f"{chosen}.tif")
         write_metrics = measure_write(
             adapter, local_source, local_target, config.params
         )
 
-        # Publish the produced object so read/display can address it on the store.
+        # Always publish the produced object under the output location: it is a
+        # first-class run artifact, and read/display address it on the store.
         object_uri = storage.join(output_uri, f"{chosen}/{chosen}.tif")
-        needs_published = bool({"read", "display"} & requested)
-        if needs_published:
-            storage.write_bytes(object_uri, storage.read_bytes(local_target))
+        storage.upload_from_path(local_target, object_uri)
 
         policy = tier_policy_from_config(config.tiers)
         profile = profile_object_sizes(adapter.enumerate_objects(local_target), policy)
@@ -124,8 +123,7 @@ def run_conversion_benchmark(
                 ),
             ]
         if "read" in requested:
-            read_uri = object_uri if needs_published else local_target
-            metrics += measure_read(read_uri)
+            metrics += measure_read(object_uri)
         if "display" in requested:
             if not titiler_endpoint:
                 raise ValueError("the display metric requires a TiTiler endpoint")

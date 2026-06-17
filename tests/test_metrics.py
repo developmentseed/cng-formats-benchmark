@@ -53,6 +53,11 @@ def test_display_raises_clear_error_on_http_failure(monkeypatch):
         display.measure_display("http://titiler:8000", "s3://b/k.tif")
 
 
+def test_display_rejects_zero_samples():
+    with pytest.raises(ValueError, match="samples"):
+        display.measure_display("http://titiler:8000", "s3://b/k.tif", samples=0)
+
+
 # --- write + read need rasterio -------------------------------------------------
 
 pytest.importorskip("rasterio")
@@ -89,3 +94,8 @@ def test_read_metric_reads_windows_locally(tmp_path):
     assert by_name["read_latency_mean"].value >= 0
     assert by_name["read_throughput"].value > 0
     assert by_name["read_throughput"].detail["bytes_read"] > 0
+
+
+def test_read_metric_rejects_bad_inputs(tmp_path):
+    with pytest.raises(ValueError, match="window"):
+        measure_read(str(tmp_path / "whatever.tif"), windows=0)

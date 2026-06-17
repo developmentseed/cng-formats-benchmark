@@ -17,6 +17,7 @@ deferred so the core stays installable and unit-testable without it.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -135,6 +136,34 @@ def write_bytes(uri: str, data: bytes) -> None:
 def write_text(uri: str, text: str) -> None:
     """Write ``text`` (UTF-8) to ``uri``."""
     write_bytes(uri, text.encode("utf-8"))
+
+
+def download_to_path(uri: str, local_path: str) -> None:
+    """Stream the object at ``uri`` to ``local_path`` without buffering it all.
+
+    Uses boto3's file transfer (multipart, streamed to disk) for S3 and a file
+    copy for local sources, so a multi-gigabyte scene never has to fit in memory.
+    """
+    dest = Path(local_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if is_s3(uri):
+        loc = _parse_s3(uri)
+        _require_object_key(loc, uri)
+        _s3_client().download_file(loc.bucket, loc.key, str(dest))
+        return
+    shutil.copyfile(_local_path(uri), dest)
+
+
+def upload_from_path(local_path: str, uri: str) -> None:
+    """Stream ``local_path`` to ``uri`` (S3 multipart or local copy)."""
+    if is_s3(uri):
+        loc = _parse_s3(uri)
+        _require_object_key(loc, uri)
+        _s3_client().upload_file(str(local_path), loc.bucket, loc.key)
+        return
+    dest = _local_path(uri)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(local_path, dest)
 
 
 def read_bytes(uri: str) -> bytes:
