@@ -5,6 +5,12 @@ read. When the object lives on S3 (``s3://`` mapped to GDAL ``/vsis3``), those
 window reads become HTTP range requests against the store, so this measures the
 realistic cloud-native access pattern — partial reads of an internally tiled
 COG — rather than a bulk download. Requires the ``cog`` extra (rasterio).
+
+Latency reflects the full range-request round-trip. Throughput is reported as
+*decoded* bytes per second (``read_decoded_throughput``), not bytes over the
+wire — a fair relative number across formats (all decode), explicitly named so
+it is not mistaken for wire transfer. True wire bytes would need GDAL
+``/vsis3`` transfer stats (a later refinement).
 """
 
 from __future__ import annotations
@@ -76,10 +82,13 @@ def measure_read(
         MetricResult(name="read_window_count", value=len(latencies)),
         MetricResult(name="read_latency_mean", value=total / len(latencies), unit="s"),
         MetricResult(name="read_latency_p50", value=float(median(latencies)), unit="s"),
+        # Throughput is decoded in-memory bytes per second, NOT bytes over the
+        # wire: a fair *relative* cross-format read metric (both decode), but the
+        # name/unit say "decoded" so it is never mistaken for wire transfer.
         MetricResult(
-            name="read_throughput",
+            name="read_decoded_throughput",
             value=throughput,
-            unit="bytes/s",
-            detail={"bytes_read": bytes_read, "window_px": win},
+            unit="decoded-bytes/s",
+            detail={"decoded_bytes": bytes_read, "window_px": win},
         ),
     ]

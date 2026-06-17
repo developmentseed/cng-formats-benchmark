@@ -92,8 +92,9 @@ def test_read_metric_reads_windows_locally(tmp_path):
     by_name = {m.name: m for m in metrics}
     assert by_name["read_window_count"].value >= 1
     assert by_name["read_latency_mean"].value >= 0
-    assert by_name["read_throughput"].value > 0
-    assert by_name["read_throughput"].detail["bytes_read"] > 0
+    assert by_name["read_decoded_throughput"].value > 0
+    assert by_name["read_decoded_throughput"].unit == "decoded-bytes/s"
+    assert by_name["read_decoded_throughput"].detail["decoded_bytes"] > 0
 
 
 def test_read_metric_rejects_bad_inputs(tmp_path):
