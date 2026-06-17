@@ -105,12 +105,21 @@ def list_object_sizes(uri: str) -> list[int]:
     return sizes
 
 
+def _require_object_key(loc: _S3Uri, uri: str) -> None:
+    """Reject an S3 URI that names a bucket root or prefix rather than an object.
+
+    Gives a clear, actionable error for the single-object operations
+    (read/write) instead of a low-level botocore failure.
+    """
+    if not loc.key or loc.key.endswith("/"):
+        raise ValueError(f"s3 URI {uri!r} must name an object key, not a prefix")
+
+
 def write_bytes(uri: str, data: bytes) -> None:
     """Write ``data`` to ``uri`` (a local path/``file://`` or ``s3://`` key)."""
     if is_s3(uri):
         loc = _parse_s3(uri)
-        if not loc.key or loc.key.endswith("/"):
-            raise ValueError(f"s3 URI {uri!r} must name an object key, not a prefix")
+        _require_object_key(loc, uri)
         _s3_client().put_object(Bucket=loc.bucket, Key=loc.key, Body=data)
         return
     path = _local_path(uri)
@@ -127,6 +136,7 @@ def read_bytes(uri: str) -> bytes:
     """Read the bytes of the object/file at ``uri``."""
     if is_s3(uri):
         loc = _parse_s3(uri)
+        _require_object_key(loc, uri)
         return _s3_client().get_object(Bucket=loc.bucket, Key=loc.key)["Body"].read()
     return _local_path(uri).read_bytes()
 

@@ -90,3 +90,8 @@ def test_s3_list_empty_prefix_raises(s3_bucket):
 def test_s3_write_to_prefix_rejected(s3_bucket):
     with pytest.raises(ValueError, match="object key"):
         storage.write_bytes(f"s3://{s3_bucket}/prefix/", b"x")
+
+
+def test_s3_read_from_prefix_rejected(s3_bucket):
+    with pytest.raises(ValueError, match="object key"):
+        storage.read_bytes(f"s3://{s3_bucket}/prefix/")
