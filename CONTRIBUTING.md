@@ -22,6 +22,16 @@ uv run ruff format .     # format
 - Datasets and runs are configuration. Adding a dataset or a target format
   should not require touching CI or the deployment manifests.
 
+## Commits & releases
+
+- PRs are **squash-merged**, and the PR **title must follow
+  [Conventional Commits](https://www.conventionalcommits.org/)** (`feat:`,
+  `fix:`, `docs:`, `ci:`, `chore:`, …). The `PR Title` check enforces this.
+- Releases are automated with release-please: the title of each merged PR drives
+  the version bump and `CHANGELOG.md`. Merging the release PR tags a GitHub
+  Release and publishes the runner image to GHCR. See the
+  [Releasing](docs/releasing.md) guide.
+
 ## Building the runner image
 
 ```bash

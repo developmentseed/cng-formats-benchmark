@@ -23,8 +23,10 @@
 # outbound egress reaches s3.datalake.cnes.fr:443 (the "internet opening").
 
 image:
+  # Pull the released image by version: tag empty → the chart's appVersion.
+  # Pin to a specific tag here to deploy a particular release or :edge.
   repository: ghcr.io/developmentseed/cng-benchmark-runner
-  tag: latest
+  tag: ""
   pullPolicy: Always
 
 # No in-cluster object store: use the real providers.

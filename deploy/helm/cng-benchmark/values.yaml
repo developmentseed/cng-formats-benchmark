@@ -8,10 +8,11 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  repository: cng-benchmark-runner
-  tag: dev
-  # IfNotPresent so a locally built / kind-loaded image is used without a
-  # registry; set to Always for a real registry pull.
+  # Published runner image. `tag` empty → the chart's appVersion (which
+  # release-please bumps with each release), so a default install pulls the
+  # matching released image. Override for a local/edge image (see values-local).
+  repository: ghcr.io/developmentseed/cng-benchmark-runner
+  tag: ""
   pullPolicy: IfNotPresent
 
 # The benchmark the runner executes. `configFile` names a key in the `configs`
