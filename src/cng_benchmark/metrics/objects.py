@@ -79,12 +79,18 @@ def profile_object_sizes(
     ``policy`` evaluates tier fitness against the mean object size. ``bins``
     optionally overrides the default power-of-two histogram edges (a sorted list
     of at least two edge values); otherwise log-scale edges spanning the data
-    are used. Raises :class:`ValueError` on an empty input.
+    are used. Raises :class:`ValueError` on empty input, negative sizes, or
+    invalid explicit ``bins``.
     """
     if not sizes:
         raise ValueError("cannot profile an empty list of object sizes")
-    if bins is not None and len(bins) < 2:
-        raise ValueError("explicit bin edges need at least two values")
+    if any(size < 0 for size in sizes):
+        raise ValueError("object sizes (bytes) cannot be negative")
+    if bins is not None:
+        if len(bins) < 2:
+            raise ValueError("explicit bin edges need at least two values")
+        if any(a >= b for a, b in zip(bins, bins[1:], strict=False)):
+            raise ValueError("explicit bin edges must be strictly increasing")
 
     sorted_sizes = sorted(sizes)
     count = len(sorted_sizes)
@@ -96,7 +102,11 @@ def profile_object_sizes(
         else _power_of_two_edges(sorted_sizes[0], sorted_sizes[-1])
     )
 
-    mean_int = round(mean)
+    # Truncate toward zero so a layout only fits a tier when its true mean
+    # clears the threshold; rounding could falsely qualify a sub-threshold mean
+    # (e.g. 31.6 MiB -> 32 MiB). For integer thresholds floor(mean) >= t is
+    # exactly mean >= t.
+    mean_int = int(mean)
     return ObjectSizeProfile(
         count=count,
         total_bytes=total,

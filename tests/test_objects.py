@@ -73,11 +73,30 @@ def test_all_equal_sizes():
     assert sum(b.count for b in profile.histogram) == 4
 
 
+def test_mean_below_threshold_does_not_round_up_into_tier():
+    # Mean is 32 MiB - 1 byte: must NOT be reported as fitting the warm tier
+    # even though it rounds to 32 MiB.
+    just_under = 32 * MB - 1
+    profile = profile_object_sizes([just_under], POLICY)
+    assert profile.tier_fit == []
+    assert profile.highest_tier is None
+
+
 def test_empty_input_raises():
     with pytest.raises(ValueError):
         profile_object_sizes([], POLICY)
 
 
+def test_negative_size_raises():
+    with pytest.raises(ValueError):
+        profile_object_sizes([10, -1, 20], POLICY)
+
+
 def test_too_few_explicit_edges_raises():
     with pytest.raises(ValueError):
         profile_object_sizes([1, 2, 3], POLICY, bins=[10])
+
+
+def test_unsorted_explicit_edges_raise():
+    with pytest.raises(ValueError):
+        profile_object_sizes([1, 2, 3], POLICY, bins=[0, 20, 10])

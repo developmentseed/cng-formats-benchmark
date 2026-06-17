@@ -37,16 +37,19 @@ def _load_object_sizes(path: str) -> list[int]:
 
     The file holds either a list of integer byte sizes, or a list of
     ``{"name": ..., "size": ...}`` objects (the ``name`` is ignored here).
+    Raises :class:`ValueError` for any malformed entry, identifying it.
     """
     data = json.loads(Path(path).read_text())
     if not isinstance(data, list):
         raise ValueError("object listing must be a JSON list")
     sizes: list[int] = []
-    for entry in data:
-        if isinstance(entry, dict):
-            sizes.append(int(entry["size"]))
-        else:
-            sizes.append(int(entry))
+    for i, entry in enumerate(data):
+        try:
+            sizes.append(int(entry["size"] if isinstance(entry, dict) else entry))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"object listing entry {i} is not a size or {{name, size}}: {entry!r}"
+            ) from exc
     return sizes
 
 
@@ -77,8 +80,13 @@ def run(
         typer.echo("Provide --objects <listing.json> to emit an object profile.")
         return
 
-    sizes = _load_object_sizes(objects)
-    result = run_benchmark(cfg, sizes)
+    try:
+        sizes = _load_object_sizes(objects)
+        result = run_benchmark(cfg, sizes)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        typer.echo(f"Cannot profile objects from {objects}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
     typer.echo(result.model_dump_json(indent=2))
 
 

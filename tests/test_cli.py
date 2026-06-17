@@ -52,6 +52,31 @@ def test_run_accepts_bare_size_list(tmp_path):
     assert payload["object_profile"]["count"] == 3
 
 
+def test_run_rejects_missing_objects_file():
+    result = runner.invoke(
+        app, ["run", BENCHMARK_EXAMPLE, "--objects", "no/such/file.json"]
+    )
+    assert result.exit_code == 1
+    assert "Cannot profile objects" in result.output
+
+
+def test_run_rejects_malformed_objects_entry(tmp_path):
+    listing = tmp_path / "bad.json"
+    listing.write_text(json.dumps([{"name": "a"}]))  # missing "size"
+
+    result = runner.invoke(app, ["run", BENCHMARK_EXAMPLE, "--objects", str(listing)])
+    assert result.exit_code == 1
+    assert "Cannot profile objects" in result.output
+
+
+def test_run_rejects_empty_objects_listing(tmp_path):
+    listing = tmp_path / "empty.json"
+    listing.write_text(json.dumps([]))
+
+    result = runner.invoke(app, ["run", BENCHMARK_EXAMPLE, "--objects", str(listing)])
+    assert result.exit_code == 1
+
+
 def test_no_args_shows_help():
     result = runner.invoke(app, [])
     assert result.exit_code == 2

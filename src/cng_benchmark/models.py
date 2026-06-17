@@ -14,6 +14,7 @@ profile is a first-class result rather than an incidental statistic.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -57,7 +58,7 @@ class MetricResult(BaseModel):
     name: str
     value: float
     unit: str | None = None
-    detail: dict = Field(default_factory=dict)
+    detail: dict[str, Any] = Field(default_factory=dict)
 
 
 class BenchmarkRun(BaseModel):
@@ -73,6 +74,6 @@ class BenchmarkRun(BaseModel):
     tool_versions: dict[str, str] = Field(default_factory=dict)
     dataset_id: str
     format_id: str
-    params: dict = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
     object_profile: ObjectSizeProfile | None = None
     metrics: list[MetricResult] = Field(default_factory=list)
