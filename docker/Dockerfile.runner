@@ -5,7 +5,7 @@
 # docker-compose stack and the Helm chart deploy. It does not run a benchmark
 # at build time; CI only proves it builds and that its entry point works.
 
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 

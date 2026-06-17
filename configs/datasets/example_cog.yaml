@@ -1,0 +1,17 @@
+# Example dataset descriptor: a generic multi-band raster scene.
+#
+# Datasets are data, not code. This descriptor names where the baseline lives,
+# its baseline format, the cloud-native targets to evaluate, and the grouping
+# lever to sweep when producing each target. Replace the source with any
+# reachable URI; nothing here is specific to a particular provider.
+id: example-raster
+description: Generic multi-band raster scene used to exercise the harness.
+source: s3://example-bucket/rasters/scene.tif
+baseline_format: geotiff
+target_formats:
+  - cog
+  - geozarr
+grouping_lever:
+  # Candidate object-grouping settings to sweep (format-specific keys).
+  cog_block_size: [256, 512, 1024]
+  zarr_shard_shape: [[1, 1024, 1024], [1, 2048, 2048]]

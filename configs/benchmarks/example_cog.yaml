@@ -1,0 +1,19 @@
+# Example benchmark descriptor: profile object sizes for the example raster.
+#
+# A benchmark names the dataset and formats to exercise, the metrics to collect,
+# and the storage-tier policy that object-size fitness is judged against. The
+# tiers below are illustrative thresholds (a warm disk tier and a colder archive
+# tier); real thresholds come from the target object store's guidance.
+id: example-cog-object-sizes
+dataset: example-raster
+formats:
+  - cog
+  - geozarr
+metrics:
+  - object_size
+tiers:
+  - name: warm
+    min_object_bytes: 33554432   # 32 MiB
+  - name: cold
+    min_object_bytes: 104857600  # 100 MiB
+params: {}
