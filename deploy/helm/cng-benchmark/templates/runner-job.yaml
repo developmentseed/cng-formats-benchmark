@@ -50,6 +50,7 @@ spec:
           env:
             {{- include "cng-benchmark.s3Env" . | nindent 12 }}
             {{- include "cng-benchmark.gdalEnv" . | nindent 12 }}
+            {{- include "cng-benchmark.sourceEnv" . | nindent 12 }}
             {{- if .Values.titiler.enabled }}
             # TiTiler endpoint for the display metric (read via --titiler-endpoint envvar).
             - name: TITILER_ENDPOINT
@@ -59,6 +60,11 @@ spec:
             - name: configs
               mountPath: /configs
               readOnly: true
+            {{- if and .Values.s3Source.enabled .Values.s3Source.caBundleSecret }}
+            - name: source-ca
+              mountPath: /etc/cng/source-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.results.pvc.enabled }}
             - name: results
               mountPath: {{ .Values.results.pvc.mountPath }}
@@ -71,6 +77,11 @@ spec:
         - name: configs
           configMap:
             name: {{ include "cng-benchmark.fullname" . }}-configs
+        {{- if and .Values.s3Source.enabled .Values.s3Source.caBundleSecret }}
+        - name: source-ca
+          secret:
+            secretName: {{ .Values.s3Source.caBundleSecret }}
+        {{- end }}
         {{- if .Values.results.pvc.enabled }}
         - name: results
           persistentVolumeClaim:

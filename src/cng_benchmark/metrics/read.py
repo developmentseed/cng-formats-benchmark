@@ -20,6 +20,7 @@ import time
 from statistics import median
 
 from cng_benchmark.models import MetricResult
+from cng_benchmark.storage import to_gdal_path
 
 
 def _require_geo():
@@ -32,15 +33,6 @@ def _require_geo():
             "`uv sync --extra cog` (or `pip install cng-benchmark[cog]`)"
         ) from exc
     return rasterio, Window
-
-
-def _vsi_path(uri: str) -> str:
-    """Map a storage URI to a GDAL-openable path (``s3://`` → ``/vsis3/``)."""
-    if uri.startswith("s3://"):
-        return "/vsis3/" + uri[len("s3://") :]
-    if uri.startswith("file://"):
-        return uri[len("file://") :]
-    return uri
 
 
 def _grid_origins(
@@ -64,7 +56,7 @@ def measure_read(
     if windows < 1 or window_size < 1:
         raise ValueError("windows and window_size must be >= 1")
     rasterio, Window = _require_geo()
-    path = _vsi_path(uri)
+    path = to_gdal_path(uri)
 
     latencies: list[float] = []
     bytes_read = 0
