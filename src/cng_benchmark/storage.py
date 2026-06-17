@@ -76,6 +76,9 @@ class S3Profile:
     ca_bundle: str | None
 
 
+_ROLES = ("sink", "source")
+
+
 def _role_env(role: str, name: str) -> str | None:
     """Read ``name`` for ``role``: ``source`` prefers ``SOURCE_`` then bare."""
     if role == "source":
@@ -84,7 +87,13 @@ def _role_env(role: str, name: str) -> str | None:
 
 
 def s3_profile(role: str = "sink") -> S3Profile:
-    """Resolve the S3 settings for ``role`` (``"sink"`` or ``"source"``)."""
+    """Resolve the S3 settings for ``role`` (``"sink"`` or ``"source"``).
+
+    The role selects which credentials/CA are used, so an unknown value is a
+    programming error and fails fast rather than silently using the sink's.
+    """
+    if role not in _ROLES:
+        raise ValueError(f"unknown S3 role {role!r}; expected one of {_ROLES}")
     return S3Profile(
         endpoint=_role_env(role, "AWS_ENDPOINT_URL_S3")
         or _role_env(role, "AWS_ENDPOINT_URL"),

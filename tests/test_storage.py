@@ -81,6 +81,11 @@ def test_s3_profile_source_falls_back_then_overrides(monkeypatch):
     assert storage.s3_profile("sink").endpoint == "http://minio:9000"
 
 
+def test_s3_profile_rejects_unknown_role():
+    with pytest.raises(ValueError, match="unknown S3 role"):
+        storage.s3_profile("souce")  # typo must fail fast, not fall back to sink
+
+
 def test_object_size_local_and_missing(tmp_path):
     f = tmp_path / "x.bin"
     f.write_bytes(b"a" * 17)

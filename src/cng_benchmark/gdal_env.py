@@ -15,6 +15,7 @@ rasterio is the ``cog`` extra; it is imported lazily so the core stays light.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 from cng_benchmark import storage
 
@@ -45,7 +46,9 @@ def gdal_session(role: str = "sink"):
 
     options: dict[str, str] = {"GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR"}
     if p.endpoint:
-        options["AWS_S3_ENDPOINT"] = p.endpoint.split("://", 1)[-1]
+        # GDAL's AWS_S3_ENDPOINT wants host[:port] only — strip scheme and any
+        # path component (a trailing path would make /vsis3 requests fail).
+        options["AWS_S3_ENDPOINT"] = urlparse(p.endpoint).netloc or p.endpoint
         options["AWS_VIRTUAL_HOSTING"] = "FALSE"
         options["AWS_HTTPS"] = "YES" if p.endpoint.startswith("https") else "NO"
     if p.ca_bundle:

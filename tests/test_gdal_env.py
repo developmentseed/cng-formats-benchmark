@@ -37,3 +37,15 @@ def test_gdal_session_applies_source_endpoint_options(monkeypatch):
         assert opts["AWS_S3_ENDPOINT"] == "s3.datalake.cnes.fr"
         assert opts["AWS_HTTPS"] == "YES"
         assert opts["AWS_VIRTUAL_HOSTING"] == "FALSE"
+
+
+def test_gdal_session_strips_path_from_endpoint(monkeypatch):
+    # AWS_S3_ENDPOINT must be host[:port] only, even if the URL carries a path.
+    monkeypatch.setenv("SOURCE_AWS_ENDPOINT_URL", "https://host.example:9000/tenant/")
+    monkeypatch.setenv("SOURCE_AWS_ACCESS_KEY_ID", "k")
+    monkeypatch.setenv("SOURCE_AWS_SECRET_ACCESS_KEY", "s")
+
+    import rasterio
+
+    with gdal_session("source"):
+        assert rasterio.env.getenv()["AWS_S3_ENDPOINT"] == "host.example:9000"
