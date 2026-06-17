@@ -25,6 +25,9 @@ seed:
   enabled: false
 
 s3:
+  # Single-endpoint: this is the Scaleway sink only. The real run also reads
+  # from a private-CA CNES Datalake source in the same run (source != sink),
+  # which needs a second endpoint/CA/Secret — see #4 (PR-B).
   # Scaleway S3-compatible endpoint + region (example — set to your bucket's).
   endpoint: https://s3.fr-par.scw.cloud
   region: fr-par

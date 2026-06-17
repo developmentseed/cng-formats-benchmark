@@ -55,6 +55,11 @@ def _s3_client():
     not installed. An explicit endpoint override (``AWS_ENDPOINT_URL_S3`` or
     ``AWS_ENDPOINT_URL``) switches on path-style addressing so MinIO and other
     S3-compatible servers work without virtual-host DNS.
+
+    Single-endpoint: one global endpoint/credential set, correct for the
+    synthetic MinIO path this PR ships. The real run reads from a private-CA
+    CNES Datalake source and writes to a Scaleway sink in the same run, which
+    needs per-URI (per-role) endpoint/CA/credential resolution — see #4 (PR-B).
     """
     try:
         import boto3
