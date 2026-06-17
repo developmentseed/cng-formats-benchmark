@@ -9,7 +9,8 @@ The methodology is opinionated and reproducible: **describe your datasets in
 config files, deploy the stack, and run.** Nothing about a particular dataset or
 provider is baked into the code.
 
-📖 **Full documentation:** [docs/](docs/index.md) (built with MkDocs — see below).
+📖 **Full documentation:** <https://developmentseed.github.io/cng-formats-benchmark/>
+(source in [docs/](docs/index.md), built with MkDocs — see below).
 
 ## What it is (and is not)
 

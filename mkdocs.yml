@@ -1,5 +1,6 @@
 site_name: cng-formats-benchmark
 site_description: A reusable, deployable benchmarking system for cloud-native geospatial formats.
+site_url: https://developmentseed.github.io/cng-formats-benchmark/
 repo_url: https://github.com/developmentseed/cng-formats-benchmark
 repo_name: developmentseed/cng-formats-benchmark
 edit_uri: edit/main/docs/
