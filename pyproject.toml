@@ -1,6 +1,6 @@
 [project]
 name = "cng-benchmark"
-version = "0.0.0"
+version = "0.1.0"
 description = "Deployable benchmarking system for cloud-native geospatial formats"
 readme = "README.md"
 requires-python = ">=3.12"
