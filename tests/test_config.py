@@ -14,11 +14,30 @@ DATASET_EXAMPLE = "configs/datasets/example_cog.yaml"
 BENCHMARK_EXAMPLE = "configs/benchmarks/example_cog.yaml"
 
 
+MAJA_DATASET_EXAMPLE = "configs/datasets/example_sentinel2_maja.yaml"
+MAJA_BENCHMARK_EXAMPLE = "configs/benchmarks/example_sentinel2_maja_cog.yaml"
+
+
 def test_example_dataset_config_validates():
     cfg = load_dataset_config(DATASET_EXAMPLE)
     assert cfg.id == "example-raster"
     assert cfg.baseline_format == "geotiff"
     assert "cog" in cfg.target_formats
+    # The single-object reader is the default and needs no options.
+    assert cfg.reader == "single-object"
+    assert cfg.options == {}
+
+
+def test_example_maja_dataset_config_validates():
+    cfg = load_dataset_config(MAJA_DATASET_EXAMPLE)
+    assert cfg.reader == "sentinel2-maja"
+    assert cfg.options["masks"] == ["CLM", "EDG", "SAT", "MG2"]
+
+
+def test_example_maja_benchmark_config_validates():
+    cfg = load_benchmark_config(MAJA_BENCHMARK_EXAMPLE)
+    assert cfg.params["scope"] == "product-set"
+    assert cfg.params["products"]["limit"] == 3
 
 
 def test_example_benchmark_config_validates():

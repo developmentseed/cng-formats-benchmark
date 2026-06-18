@@ -1,0 +1,27 @@
+# Example fan-out benchmark: profile a Sentinel-2 L2A MAJA product as COG.
+#
+# Pairs with datasets/example_sentinel2_maja.yaml (run with `--dataset`). The
+# benchmark carries only run-shape params — the component picks (bands/masks)
+# live in the dataset `options`, not here. `object_size` + `write` cover every
+# component; `read` is sampled to one representative band per product.
+id: example-sentinel2-l2a-cog
+dataset: example-sentinel2-l2a-maja
+formats:
+  - cog
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: warm
+    min_object_bytes: 33554432    # 32 MiB
+  - name: cold
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  block_size: 512
+  scope: product-set              # one scene (product) | many (product-set)
+  products:
+    prefix: "2015/"               # bound which scenes the set covers
+    limit: 3
+  samples:
+    read: 1                       # sample one component per product for read

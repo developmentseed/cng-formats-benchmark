@@ -31,11 +31,45 @@ grouping_lever:
 | Field | Meaning |
 | --- | --- |
 | `id` | stable dataset identifier |
-| `source` | baseline location URI |
+| `source` | dataset root: a single object (`single-object`) or the prefix scenes/granules live under |
 | `baseline_format` | e.g. `geotiff` |
 | `target_formats` | cloud-native targets to evaluate |
+| `reader` | layout-aware reader that enumerates the dataset's products/components (default `single-object`) |
+| `options` | reader-specific picks, validated against the reader's typed `Options` model |
 | `grouping_lever` | format-specific knob(s) that control how bytes group into objects |
 | `description` | optional human note |
+
+### Readers and layout-specific options
+
+A real delivery is rarely one object. The `reader` selects a layout-aware
+[`Dataset`](https://github.com/developmentseed/cng-formats-benchmark/blob/main/src/cng_benchmark/datasets/base.py)
+subclass that enumerates the dataset's **products** (scenes/granules) and the
+**components** within each (bands, masks, …). Component selection is
+layout-specific, so it lives in a typed `options` block owned by the reader — not
+in generic benchmark params. Adding a layout is a new subclass + its `Options` +
+one registry line; the core config and runner are untouched.
+
+| `reader` | Layout | `options` |
+| --- | --- | --- |
+| `single-object` (default) | one product, one component = `source` | none |
+| `sentinel2-maja` | a `.zip`-per-scene MAJA L2A delivery under `source` | `reflectance` (FRE/SRE), `bands`, `masks` (CLM/EDG/SAT/MG2) |
+
+```yaml
+id: sentinel2-l2a-maja
+reader: sentinel2-maja          # selects the Sentinel2MajaDataset subclass
+source: s3://sentinel2-l2a-sprid/T31TCJ/   # tile root; scenes (zips) underneath
+baseline_format: geotiff
+target_formats: [cog]
+options:                        # validated by Sentinel2MajaOptions
+  reflectance: [FRE]
+  bands: [B2, B3, B4, B8]
+  masks: [CLM, EDG, SAT, MG2]
+```
+
+MAJA members are read **on the fly** through GDAL's `/vsizip//vsis3` chain — no
+pre-extraction — so the write metric pays the real archive read cost. The
+member-name patterns (`…_FRE_B3.tif`, `MASKS/…_CLM_R1.tif`) live in the reader,
+never in config.
 
 ## Benchmark descriptor
 
@@ -80,6 +114,43 @@ params:
     across targets. The deployment supplies the concrete URIs via CLI flags
     (`--source`, `--output`) or Helm values, so the same benchmark file runs
     against the synthetic stack, a kind cluster, or a real bucket unchanged.
+
+### Running over a dataset's products (fan-out)
+
+Pass a dataset descriptor with `--dataset <dataset.yaml>` (or `runner.datasetFile`
+in the chart) and the run fans out over the dataset's product(s) instead of a
+single `--source` raster. The benchmark carries only **run-shape** params — the
+component picks live in the dataset `options`:
+
+```yaml
+params:
+  block_size: 512
+  scope: product-set            # product (one scene) | product-set (many)
+  products: {prefix: "2015/", limit: 3}    # bounds a product-set enumeration
+  samples: {read: 1, display: 1}           # object_size + write cover ALL objects
+```
+
+| Param | Meaning |
+| --- | --- |
+| `scope` | `product` (one product) or `product-set` (the bounded set) |
+| `products.prefix` / `products.limit` | bound which/how many products a set covers |
+| `samples.read` / `samples.display` | how many components per product to sample for read/display (default 1) |
+
+`object_size` and `write` cover **every** component; `read` and `display` run on
+the first `samples.{read,display}` components. The run writes a product-set tree:
+
+```text
+<output>/
+  product/<scene-id>/result.json   # ObjectSizeProfile over that scene's components
+  product/<scene-id>/summary.md
+  rollup/result.json               # profile pooled over ALL products' objects
+  rollup/summary.md
+  summary.md                       # per-product table + roll-up
+```
+
+Each run reuses the `BenchmarkRun` model; `params` carries `product_id` and
+`scope` (`product` / `rollup`) to tell the per-product runs apart from the pooled
+roll-up.
 
 ## Tier policy
 

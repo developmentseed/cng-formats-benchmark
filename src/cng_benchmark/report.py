@@ -9,8 +9,13 @@ pure and stdlib-only, so it is fully unit-testable; persistence is delegated to
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from cng_benchmark import storage
 from cng_benchmark.models import BenchmarkRun
+
+if TYPE_CHECKING:
+    from cng_benchmark.runner import ProductSetResult
 
 RESULT_FILENAME = "result.json"
 SUMMARY_FILENAME = "summary.md"
@@ -78,3 +83,70 @@ def write_artifacts(run: BenchmarkRun, output_uri: str) -> dict[str, str]:
     storage.write_text(result_uri, run.model_dump_json(indent=2))
     storage.write_text(summary_uri, render_markdown_summary(run))
     return {"result": result_uri, "summary": summary_uri}
+
+
+def render_product_set_summary(result: ProductSetResult) -> str:
+    """Render a top-level summary: a per-product table plus the roll-up.
+
+    One row per product (object count, total, mean, tier fit) followed by the
+    pooled roll-up row, so a reader skimming a run sees the per-scene
+    distribution and the honest set-level distribution at a glance.
+    """
+    lines = [
+        f"# Benchmark result: {result.rollup.dataset_id} → {result.rollup.format_id}"
+        " (product set)",
+        "",
+        f"- **Timestamp:** {result.rollup.timestamp.isoformat()}",
+        f"- **Products:** {len(result.per_product)}",
+        "",
+        "## Per-product object-size profiles",
+        "",
+        "| Product | Objects | Total | Mean | Highest tier |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for run in result.per_product:
+        p = run.object_profile
+        product_id = run.params.get("product_id", run.dataset_id)
+        if p is None:  # pragma: no cover - profile always present here
+            lines.append(f"| {product_id} | 0 | - | - | - |")
+            continue
+        lines.append(
+            f"| {product_id} | {p.count} | {_format_bytes(p.total_bytes)} | "
+            f"{_format_bytes(p.mean)} | {p.highest_tier or 'none'} |"
+        )
+    roll = result.rollup.object_profile
+    if roll is not None:
+        lines.append(
+            f"| **roll-up** | **{roll.count}** | **{_format_bytes(roll.total_bytes)}** "
+            f"| **{_format_bytes(roll.mean)}** | **{roll.highest_tier or 'none'}** |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_product_set_artifacts(
+    result: ProductSetResult, output_uri: str
+) -> dict[str, str]:
+    """Write the product-set run tree under ``output_uri``.
+
+    Lays out ``product/<id>/{result.json,summary.md}`` per scene,
+    ``rollup/{result.json,summary.md}`` for the pooled distribution, and a
+    top-level ``summary.md`` (per-product table + roll-up). Returns a map of the
+    artifact URIs written.
+    """
+    written: dict[str, str] = {}
+    for run in result.per_product:
+        product_id = run.params.get("product_id", run.dataset_id)
+        product_dir = storage.join(storage.join(output_uri, "product"), str(product_id))
+        paths = write_artifacts(run, product_dir)
+        written[f"product/{product_id}/result"] = paths["result"]
+        written[f"product/{product_id}/summary"] = paths["summary"]
+
+    rollup_paths = write_artifacts(result.rollup, storage.join(output_uri, "rollup"))
+    written["rollup/result"] = rollup_paths["result"]
+    written["rollup/summary"] = rollup_paths["summary"]
+
+    summary_uri = storage.join(output_uri, SUMMARY_FILENAME)
+    storage.write_text(summary_uri, render_product_set_summary(result))
+    written["summary"] = summary_uri
+    return written

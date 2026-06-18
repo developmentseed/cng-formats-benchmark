@@ -1,0 +1,20 @@
+# Example multi-component dataset descriptor: a Sentinel-2 L2A (MAJA) tile.
+#
+# Unlike a single-object descriptor, this names a *layout*: `reader` selects the
+# Sentinel2MajaDataset, which enumerates each scene (a `.zip` under `source`) and,
+# from the `options` below, the FRE/SRE reflectance bands plus the CLM/EDG/SAT/MG2
+# masks that make up the product. `source` is the tile root; scenes live under it.
+# Replace it with a reachable prefix; nothing here is provider-specific.
+id: example-sentinel2-l2a-maja
+description: Example Sentinel-2 L2A MAJA tile (reflectance + masks fan-out).
+source: s3://example-bucket/sentinel2-l2a/T31TCJ/
+baseline_format: geotiff
+reader: sentinel2-maja
+target_formats:
+  - cog
+options:
+  reflectance: [FRE]
+  bands: [B2, B3, B4, B8]
+  masks: [CLM, EDG, SAT, MG2]
+grouping_lever:
+  cog_block_size: [256, 512, 1024]

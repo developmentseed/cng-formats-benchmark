@@ -74,8 +74,13 @@ spec:
           args:
             - run
             - /configs/{{ .Values.runner.configFile }}
+            {{- if .Values.runner.datasetFile }}
+            - --dataset
+            - /configs/{{ .Values.runner.datasetFile }}
+            {{- else }}
             - --source
             - {{ .Values.runner.source | quote }}
+            {{- end }}
             - --output
             - {{ .Values.runner.output | quote }}
           env:
