@@ -80,7 +80,8 @@ docker compose down -v
   and **tier fitness** (which storage tiers the layout satisfies by mean object
   size).
 - `metrics` — the scalar measurements: `write_elapsed` / `write_throughput`,
-  `read_latency_*` / `read_decoded_throughput`, `display_latency_*`, etc.
+  `read_latency_*` / `read_decoded_throughput`, the per-chunk-bucket
+  `display_{1,2,4,9}chunk_latency_*`, etc.
 
 See [Configuration](configuration.md#the-result) for the full shape.
 

@@ -8,6 +8,12 @@ local file. The display collector talks HTTP, so it is tested with a fake
 import pytest
 
 from cng_benchmark.metrics import display
+from cng_benchmark.metrics.display import TileSpec
+
+_TILES = [
+    TileSpec("1chunk", 0, 0, 0, 1),
+    TileSpec("2chunk", 1, 0, 0, 2),
+]
 
 
 def test_display_measures_tiles_with_fake_titiler(monkeypatch):
@@ -30,16 +36,47 @@ def test_display_measures_tiles_with_fake_titiler(monkeypatch):
     monkeypatch.setattr(display.urllib.request, "urlopen", fake_urlopen)
 
     metrics = display.measure_display(
-        "http://titiler:8000/", "s3://bench/results/cog/cog.tif", samples=3
+        "http://titiler:8000/", "s3://bench/results/cog/cog.tif", _TILES, samples=3
     )
     names = {m.name for m in metrics}
-    assert {"display_tile_count", "display_latency_mean"} <= names
-    assert "display_latency_p50" in names
-    assert next(m.value for m in metrics if m.name == "display_tile_count") == 3
-    # First call validates via /cog/info, the rest fetch tiles; url is encoded.
+    # Flat per-scenario metrics, one mean+p50 per chunk bucket, plus a summary.
+    assert {
+        "display_1chunk_latency_mean",
+        "display_1chunk_latency_p50",
+        "display_2chunk_latency_mean",
+        "display_2chunk_latency_p50",
+        "display_scenarios",
+    } <= names
+    assert next(m.value for m in metrics if m.name == "display_scenarios") == 2
+    detail = next(m.detail for m in metrics if m.name == "display_1chunk_latency_mean")
+    assert detail["chunks"] == 1
+    assert "cold_s" in detail
+    # /cog/info once, then samples fetches per tile (1 + 2*3 = 7 calls).
     assert calls[0].startswith("http://titiler:8000/cog/info?url=")
+    assert len(calls) == 1 + len(_TILES) * 3
     assert "/cog/tiles/WebMercatorQuad/0/0/0.png?url=" in calls[1]
     assert "s3%3A%2F%2Fbench" in calls[1]
+
+
+def test_display_handles_no_reachable_scenarios(monkeypatch):
+    monkeypatch.setattr(
+        display.urllib.request, "urlopen", lambda url, timeout=None: _Resp()
+    )
+    metrics = display.measure_display("http://titiler:8000", "s3://b/k.tif", [])
+    names = {m.name for m in metrics}
+    assert names == {"display_scenarios"}
+    assert next(m.value for m in metrics if m.name == "display_scenarios") == 0
+
+
+class _Resp:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return b""
 
 
 def test_display_raises_clear_error_on_http_failure(monkeypatch):
@@ -50,12 +87,14 @@ def test_display_raises_clear_error_on_http_failure(monkeypatch):
 
     monkeypatch.setattr(display.urllib.request, "urlopen", boom)
     with pytest.raises(RuntimeError, match="HTTP 404"):
-        display.measure_display("http://titiler:8000", "s3://b/k.tif")
+        display.measure_display("http://titiler:8000", "s3://b/k.tif", _TILES)
 
 
 def test_display_rejects_zero_samples():
     with pytest.raises(ValueError, match="samples"):
-        display.measure_display("http://titiler:8000", "s3://b/k.tif", samples=0)
+        display.measure_display(
+            "http://titiler:8000", "s3://b/k.tif", _TILES, samples=0
+        )
 
 
 # --- write + read need rasterio -------------------------------------------------

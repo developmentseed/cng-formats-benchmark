@@ -27,6 +27,7 @@ s3 = [
 cog = [
     "rasterio>=1.3",
     "rio-cogeo>=5",
+    "matplotlib>=3.8",
 ]
 dev = [
     "pytest>=8",
