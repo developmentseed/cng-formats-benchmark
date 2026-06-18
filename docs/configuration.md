@@ -95,10 +95,18 @@ the coldest (highest) one — or none, if the objects are too small for any tier
 | `object_size` | `metrics/objects.py` | `object_count`, `total_bytes` + the `object_profile` |
 | `write` | `metrics/write.py` | `write_elapsed`, `write_throughput` (output bytes/s, source read included) |
 | `read` | `metrics/read.py` | `read_window_count`, `read_latency_mean/p50`, `read_decoded_throughput` |
-| `display` | `metrics/display.py` | `display_tile_count`, `display_latency_mean/p50/max` |
+| `display` | `metrics/display.py` (+ `display_tiles.py`) | per chunk-bucket `display_{1,2,4,9}chunk_latency_mean/p50`, `display_scenarios`, plus a `display_chunk_layout.png` artifact |
 
 `read` throughput is **decoded** bytes/s (a fair relative cross-format number),
 not bytes over the wire; latency reflects the full range-request round-trip.
+
+`display` does not time a single fixed tile. It inspects the produced COG's block
+size and overviews to pick WebMercator tiles that each touch a target number of
+internal blocks ("chunks") — 1, 2, 4 and 9+ — and times each, so latency can be
+read against chunk-crossing. Unreachable buckets (e.g. on a tiny raster) are
+skipped; the targets default to `(1, 2, 4, 9)` and can be overridden via
+`params.display_chunk_targets`. A `display_chunk_layout.png` overlaying each
+served tile on the block grid is written alongside the object.
 
 ## The result
 

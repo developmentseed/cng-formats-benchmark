@@ -138,7 +138,38 @@ def run_conversion_benchmark(
                 raise ValueError("the display metric requires a TiTiler endpoint")
             if not storage.is_s3(object_uri):
                 raise ValueError("the display metric requires an S3 output location")
-            metrics += measure_display(titiler_endpoint, object_uri)
+            from cng_benchmark.metrics.display_tiles import (
+                DEFAULT_TARGETS,
+                render_chunk_layout,
+                select_chunk_tiles,
+            )
+
+            targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
+            # Select against the *local* COG (cheap, no network); time the tiles
+            # against the uploaded S3 object via TiTiler.
+            tiles = select_chunk_tiles(local_target, targets=targets)
+            metrics += measure_display(titiler_endpoint, object_uri, tiles)
+
+            # Publish a chunk-grid + tile-footprint layout image alongside the
+            # object (best-effort: a missing matplotlib must not fail the run).
+            try:
+                local_layout = os.path.join(workdir, "display_chunk_layout.png")
+                render_chunk_layout(local_target, tiles, local_layout)
+                layout_uri = storage.join(
+                    output_uri, f"{chosen}/display_chunk_layout.png"
+                )
+                storage.upload_from_path(local_layout, layout_uri, role="sink")
+                for m in metrics:
+                    if m.name == "display_scenarios":
+                        m.detail["layout_uri"] = layout_uri
+            except RuntimeError as exc:
+                metrics.append(
+                    MetricResult(
+                        name="display_layout_skipped",
+                        value=0,
+                        detail={"reason": str(exc)},
+                    )
+                )
 
     params = {**config.params, "grouping_lever": adapter.describe_grouping_lever()}
     return BenchmarkRun(

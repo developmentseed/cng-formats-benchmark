@@ -35,7 +35,7 @@ Per format, per dataset:
 | **object size** | distribution + tier fitness — *first-class*, because a tiered object store makes object size a hard constraint, not a footnote |
 | **write** | conversion throughput (baseline → target), including the source read |
 | **read** | range-request-aware read latency / throughput (windowed `/vsis3` reads) |
-| **display** | TiTiler-served tile latency |
+| **display** | TiTiler tile latency per chunk-crossing scenario (tiles touching 1 / 2 / 4 / 9+ internal blocks), with a block-grid layout image |
 
 Processing benchmarks are out of scope, but the harness keeps an extension seam
 for them.
