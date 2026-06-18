@@ -196,3 +196,44 @@ def test_s3_list_uris_root_without_trailing_slash(s3_bucket):
     # so the prefix doesn't glue onto the last path segment.
     got = storage.list_uris(f"s3://{s3_bucket}/T31TCJ", prefix="2016", suffix=".zip")
     assert got == [f"s3://{s3_bucket}/T31TCJ/2016_b.zip"]
+
+
+def _zip_bytes(names: list[str]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in names:
+            zf.writestr(name, b"x" * 32)
+    return buf.getvalue()
+
+
+def test_open_seekable_s3_lists_zip_members_and_closes(s3_bucket):
+    # Regression: listing a remote zip's members reads only the central
+    # directory through a ranged seekable reader, and the caller closes it.
+    # The S3 reader must implement close() or zip-delivery datasets fail with
+    # AttributeError on every real (S3) archive.
+    import zipfile
+
+    members = ["A_FRE_B2.tif", "MASKS/A_CLM_R1.tif"]
+    storage.write_bytes(f"s3://{s3_bucket}/scenes/A.zip", _zip_bytes(members))
+
+    fileobj = storage.open_seekable(f"s3://{s3_bucket}/scenes/A.zip")
+    try:
+        with zipfile.ZipFile(fileobj) as zf:
+            assert sorted(zf.namelist()) == sorted(members)
+    finally:
+        fileobj.close()  # must not raise
+
+    # Also usable as a context manager.
+    with storage.open_seekable(f"s3://{s3_bucket}/scenes/A.zip") as f2:
+        assert zipfile.ZipFile(f2).namelist()
+
+
+def test_list_uris_s3_filters_by_suffix(s3_bucket):
+    storage.write_bytes(f"s3://{s3_bucket}/t/2015/a.zip", b"z")
+    storage.write_bytes(f"s3://{s3_bucket}/t/2015/a.xml", b"m")
+    storage.write_bytes(f"s3://{s3_bucket}/t/2016/b.zip", b"z")
+    uris = storage.list_uris(f"s3://{s3_bucket}/t/", suffix=".zip")
+    assert uris == [f"s3://{s3_bucket}/t/2015/a.zip", f"s3://{s3_bucket}/t/2016/b.zip"]

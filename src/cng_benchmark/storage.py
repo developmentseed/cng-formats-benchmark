@@ -290,6 +290,20 @@ class _S3SeekableReader:
         self._pos += len(body)
         return body
 
+    def close(self) -> None:
+        """Release the reader. A no-op: the boto3 client is shared and each
+        ``read`` is a self-contained ranged GET, so there is nothing to free.
+        Present because callers (and ``zipfile``) close the file object, and a
+        local file's object has ``close`` — the S3 reader must match the
+        protocol or remote archives fail with ``AttributeError``.
+        """
+
+    def __enter__(self) -> _S3SeekableReader:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
 
 def open_seekable(uri: str, role: str = "source"):
     """Open ``uri`` as a seekable binary file object (local file or S3 range).
