@@ -29,6 +29,24 @@ _MASK_RE = re.compile(
     r"(?:^|/)MASKS/[^/]*_(CLM|EDG|SAT|MG2)_(R\d+)\.tif$", re.IGNORECASE
 )
 
+#: The 10 m reflectance bands — the representative band a default read/display
+#: sample should land on (the masks are tiny and unrepresentative).
+_TEN_M_BANDS = frozenset({"B2", "B3", "B4", "B8"})
+_MASK_KINDS = frozenset({"CLM", "EDG", "SAT", "MG2"})
+
+
+def _component_sort_key(name: str) -> tuple[bool, bool, str]:
+    """Order components reflectance-first, 10 m bands first (see #13).
+
+    The sample selection in the runner takes the first ``samples`` components in
+    order, so a product's components must lead with a representative 10 m
+    reflectance band rather than alphabetically (``CLM_R1`` < ``FRE_B2``).
+    """
+    kind, _, rest = name.partition("_")
+    is_mask = kind.upper() in _MASK_KINDS
+    is_ten_m = not is_mask and rest.upper() in _TEN_M_BANDS
+    return (is_mask, not is_ten_m, name)
+
 
 class Sentinel2MajaOptions(DatasetOptions):
     """Component picks for a MAJA L2A product.
@@ -79,5 +97,5 @@ class Sentinel2MajaDataset(ZipDeliveryDataset):
                             uri=_member_vsi_uri(zip_uri, member),
                         )
                     )
-        selected.sort(key=lambda c: c.name)
+        selected.sort(key=lambda c: _component_sort_key(c.name))
         return selected

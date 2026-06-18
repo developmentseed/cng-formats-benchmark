@@ -44,11 +44,16 @@ class ZipDeliveryDataset(Dataset):
     def products(
         self, *, prefix: str | None = None, limit: int | None = None
     ) -> list[Product]:
-        zips = storage.list_uris(self.source_uri, role="source", suffix=".zip")
-        if prefix:
-            zips = [z for z in zips if prefix in z]
-        if limit is not None:
-            zips = zips[:limit]
+        # Bound enumeration server-side: ``prefix`` is a path prefix under the
+        # dataset root and ``limit`` caps the listing, so a huge tile root is
+        # never paginated in full to find a handful of scenes (see #14).
+        zips = storage.list_uris(
+            self.source_uri,
+            role="source",
+            prefix=prefix,
+            suffix=".zip",
+            limit=limit,
+        )
 
         products: list[Product] = []
         for zip_uri in zips:

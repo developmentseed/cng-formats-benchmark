@@ -115,6 +115,26 @@ def test_maja_fans_in_masks_and_both_reflectances():
     }
 
 
+def test_maja_orders_reflectance_then_10m_first():
+    # With a non-10 m band (B5) and masks fanned in, the first component must be
+    # a 10 m reflectance band so the default read/display sample is representative
+    # (#13): 10 m FRE bands, then the 20 m FRE band, then masks.
+    ds = _maja(
+        reflectance=["FRE"],
+        bands=["B2", "B4", "B5"],
+        masks=["CLM", "EDG"],
+    )
+    components = ds._select_members(MAJA_MEMBERS, "s3://bucket/T31TCJ/scene.zip")
+    assert [c.name for c in components] == [
+        "FRE_B2",
+        "FRE_B4",
+        "FRE_B5",
+        "CLM_R1",
+        "CLM_R2",
+        "EDG_R1",
+    ]
+
+
 def test_maja_empty_masks_excludes_masks():
     ds = _maja(reflectance=["FRE"], bands=["B2"], masks=[])
     components = ds._select_members(MAJA_MEMBERS, "s3://bucket/T31TCJ/scene.zip")
@@ -148,11 +168,13 @@ def test_zip_delivery_enumerates_scenes_from_local_zips(tmp_path):
 
     products = ds.products()
     assert [p.id for p in products] == ["2015_sceneA", "2016_sceneB"]
+    # Reflectance-first so the default read/display sample lands on a 10 m band,
+    # not a tiny mask (#13); masks follow.
     names = [c.name for c in products[0].components]
-    assert names == ["CLM_R1", "CLM_R2", "FRE_B2", "FRE_B3"]
-    assert products[0].components[2].uri.startswith("/vsizip/")
-    assert products[0].components[2].uri.endswith("_FRE_B2.tif")
+    assert names == ["FRE_B2", "FRE_B3", "CLM_R1", "CLM_R2"]
+    assert products[0].components[0].uri.startswith("/vsizip/")
+    assert products[0].components[0].uri.endswith("_FRE_B2.tif")
 
-    # Prefix + limit bound a product-set enumeration.
+    # Prefix + limit bound a product-set enumeration (path-prefix match).
     bounded = ds.products(prefix="2016", limit=1)
     assert [p.id for p in bounded] == ["2016_sceneB"]
