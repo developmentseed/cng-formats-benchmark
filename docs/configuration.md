@@ -186,6 +186,12 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
 - run context — `timestamp`, `tool_versions`, `dataset_id`, `format_id`, `params`
 - `object_profile` — `count`, `total_bytes`, `mean`/`median`/`p50`/`p90`/`p95`/`p99`,
   `min_bytes`/`max_bytes`, a `histogram`, and `tier_fit` / `highest_tier`
+- `object_layouts` — per produced object, its **tiling layout**: `is_tiled`
+  (range-read friendly vs striped), `block_width`/`block_height`,
+  `overview_decimations`, `internal_tiles`. Captured for every object (no tile
+  server needed); `summary.md` renders a "Tiling layout" table and a tiled/striped
+  count. The chunk-aware `display` metric also publishes a `display_chunk_layout.png`
+  next to the sampled object.
 - `metrics` — a list of `{name, value, unit, detail}` scalars
 
 It is written as `result.json` and rendered to `summary.md`

@@ -62,6 +62,9 @@ def render_markdown_summary(run: BenchmarkRun) -> str:
             f" (highest: {profile.highest_tier or 'none'})",
         ]
 
+    if run.object_layouts:
+        lines += _render_tiling_layout(run.object_layouts)
+
     if run.metrics:
         lines += ["", "## Metrics", ""]
         lines += ["| Metric | Value | Unit |", "| --- | --- | --- |"]
@@ -70,6 +73,33 @@ def render_markdown_summary(run: BenchmarkRun) -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _render_tiling_layout(layouts: list) -> list[str]:
+    """Render the per-object tiling layout: a coverage line plus a table.
+
+    Leads with how many objects are internally tiled (range-read friendly) vs
+    striped, then one row per object (block size, overview levels, internal
+    tiles) — the structural side of the partial-access story, beside the sizes.
+    """
+    tiled = sum(1 for ly in layouts if ly.is_tiled)
+    lines = [
+        "",
+        "## Tiling layout",
+        "",
+        f"- **Internally tiled:** {tiled}/{len(layouts)} objects "
+        f"({len(layouts) - tiled} striped)",
+        "",
+        "| Object | Tiled | Block | Overviews | Internal tiles |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for ly in layouts:
+        ovr = len(ly.overview_decimations)
+        lines.append(
+            f"| {ly.name} | {'yes' if ly.is_tiled else 'no'} | "
+            f"{ly.block_width}×{ly.block_height} | {ovr} | {ly.internal_tiles} |"
+        )
+    return lines
 
 
 def write_artifacts(run: BenchmarkRun, output_uri: str) -> dict[str, str]:
@@ -101,24 +131,32 @@ def render_product_set_summary(result: ProductSetResult) -> str:
         "",
         "## Per-product object-size profiles",
         "",
-        "| Product | Objects | Total | Mean | Highest tier |",
-        "| --- | --- | --- | --- | --- |",
+        "| Product | Objects | Total | Mean | Highest tier | Tiled |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
+
+    def _tiled(run) -> str:
+        n = run.object_layouts
+        if not n:
+            return "-"
+        return f"{sum(1 for ly in n if ly.is_tiled)}/{len(n)}"
+
     for run in result.per_product:
         p = run.object_profile
         product_id = run.params.get("product_id", run.dataset_id)
         if p is None:  # pragma: no cover - profile always present here
-            lines.append(f"| {product_id} | 0 | - | - | - |")
+            lines.append(f"| {product_id} | 0 | - | - | - | - |")
             continue
         lines.append(
             f"| {product_id} | {p.count} | {_format_bytes(p.total_bytes)} | "
-            f"{_format_bytes(p.mean)} | {p.highest_tier or 'none'} |"
+            f"{_format_bytes(p.mean)} | {p.highest_tier or 'none'} | {_tiled(run)} |"
         )
     roll = result.rollup.object_profile
     if roll is not None:
         lines.append(
             f"| **roll-up** | **{roll.count}** | **{_format_bytes(roll.total_bytes)}** "
-            f"| **{_format_bytes(roll.mean)}** | **{roll.highest_tier or 'none'}** |"
+            f"| **{_format_bytes(roll.mean)}** | **{roll.highest_tier or 'none'}** "
+            f"| **{_tiled(result.rollup)}** |"
         )
     lines.append("")
     return "\n".join(lines)

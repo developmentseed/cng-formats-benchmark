@@ -61,6 +61,27 @@ class MetricResult(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
+class ObjectLayout(BaseModel):
+    """The internal tiling layout of one produced object.
+
+    Whether bytes are reachable by partial (range) reads is decided by the
+    object's *internal* structure, not only its size: a striped GeoTIFF forces a
+    reader to pull whole rows, a tiled COG lets it fetch a block. This records
+    that structure per produced object — tiled vs striped, the block size, the
+    overview decimations, and the internal tile (block) count — so the
+    partial-access story is in the result itself, independent of any tile server
+    (the display metric reads the same structure to bucket its tiles).
+    """
+
+    name: str
+    size_bytes: int
+    is_tiled: bool
+    block_height: int
+    block_width: int
+    overview_decimations: list[int] = Field(default_factory=list)
+    internal_tiles: int
+
+
 class BenchmarkRun(BaseModel):
     """The full, serialisable record of one benchmark run.
 
@@ -76,4 +97,5 @@ class BenchmarkRun(BaseModel):
     format_id: str
     params: dict[str, Any] = Field(default_factory=dict)
     object_profile: ObjectSizeProfile | None = None
+    object_layouts: list[ObjectLayout] = Field(default_factory=list)
     metrics: list[MetricResult] = Field(default_factory=list)
