@@ -198,6 +198,8 @@ def list_uris(
     relies on the API's lexical key order so the full listing is never
     materialised before the bound is applied.
     """
+    if limit is not None and limit <= 0:
+        return []
     if is_s3(uri):
         loc = _parse_s3(uri)
         client = _s3_client(role)
