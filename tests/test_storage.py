@@ -148,3 +148,51 @@ def test_s3_write_to_prefix_rejected(s3_bucket):
 def test_s3_read_from_prefix_rejected(s3_bucket):
     with pytest.raises(ValueError, match="object key"):
         storage.read_bytes(f"s3://{s3_bucket}/prefix/")
+
+
+def test_list_uris_local_prefix_suffix_limit(tmp_path):
+    root = tmp_path / "T31TCJ"
+    root.mkdir()
+    for name in ("2015_a.zip", "2016_b.zip", "2016_c.zip", "2016_note.txt"):
+        (root / name).write_bytes(b"")
+
+    # suffix narrows to zips; prefix is a path-prefix under the root.
+    assert [p.split("/")[-1] for p in storage.list_uris(str(root), suffix=".zip")] == [
+        "2015_a.zip",
+        "2016_b.zip",
+        "2016_c.zip",
+    ]
+    got = storage.list_uris(str(root), prefix="2016", suffix=".zip")
+    assert [p.split("/")[-1] for p in got] == ["2016_b.zip", "2016_c.zip"]
+    # limit stops early in sorted order.
+    bounded = storage.list_uris(str(root), prefix="2016", suffix=".zip", limit=1)
+    assert [p.split("/")[-1] for p in bounded] == ["2016_b.zip"]
+
+
+def test_s3_list_uris_prefix_is_server_side_and_path_prefix(s3_bucket):
+    for key in (
+        "T31TCJ/2015_a.zip",
+        "T31TCJ/2016_b.zip",
+        "T31TCJ/2016_c.zip",
+        "T31TCJ/2016_note.txt",
+        "T31TCJ/x2016_decoy.zip",  # substring "2016" but not a path prefix
+    ):
+        storage.write_bytes(f"s3://{s3_bucket}/{key}", b"x")
+
+    got = storage.list_uris(f"s3://{s3_bucket}/T31TCJ/", prefix="2016", suffix=".zip")
+    assert got == [
+        f"s3://{s3_bucket}/T31TCJ/2016_b.zip",
+        f"s3://{s3_bucket}/T31TCJ/2016_c.zip",
+    ]
+    bounded = storage.list_uris(
+        f"s3://{s3_bucket}/T31TCJ/", prefix="2016", suffix=".zip", limit=1
+    )
+    assert bounded == [f"s3://{s3_bucket}/T31TCJ/2016_b.zip"]
+
+
+def test_s3_list_uris_root_without_trailing_slash(s3_bucket):
+    storage.write_bytes(f"s3://{s3_bucket}/T31TCJ/2016_b.zip", b"x")
+    # A root key with no trailing slash is still treated as a directory root,
+    # so the prefix doesn't glue onto the last path segment.
+    got = storage.list_uris(f"s3://{s3_bucket}/T31TCJ", prefix="2016", suffix=".zip")
+    assert got == [f"s3://{s3_bucket}/T31TCJ/2016_b.zip"]

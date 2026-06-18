@@ -133,7 +133,7 @@ params:
 | Param | Meaning |
 | --- | --- |
 | `scope` | `product` (one product) or `product-set` (the bounded set) |
-| `products.prefix` / `products.limit` | bound which/how many products a set covers |
+| `products.prefix` / `products.limit` | bound which/how many products a set covers — `prefix` is a path prefix **under** `source` (applied server-side for S3), `limit` caps the count |
 | `samples.read` / `samples.display` | how many components per product to sample for read/display (default 1) |
 
 `object_size` and `write` cover **every** component; `read` and `display` run on

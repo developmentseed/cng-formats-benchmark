@@ -177,21 +177,39 @@ def list_object_sizes(uri: str, role: str = "sink") -> list[int]:
 
 
 def list_uris(
-    uri: str, role: str = "source", *, suffix: str | None = None
+    uri: str,
+    role: str = "source",
+    *,
+    prefix: str | None = None,
+    suffix: str | None = None,
+    limit: int | None = None,
 ) -> list[str]:
     """List the object URIs under ``uri`` (a local dir or ``s3://prefix``).
 
     Returns each object as a URI of the same scheme as ``uri`` (a plain local
-    path for a local input, an ``s3://`` URI for an S3 prefix), filtered to
-    those ending in ``suffix`` when given. Sorted for deterministic
-    enumeration. Used to find the scenes/granules under a dataset root.
+    path for a local input, an ``s3://`` URI for an S3 prefix), in sorted order.
+    Used to find the scenes/granules under a dataset root.
+
+    ``prefix`` narrows enumeration to keys whose path *under* ``uri`` starts with
+    it: for S3 it is folded into the ``list_objects_v2`` ``Prefix`` so the bound
+    is applied server-side (a root-level list of a huge bucket never happens),
+    and it is a path-prefix match, not a substring one. ``suffix`` keeps only
+    keys ending in it. ``limit`` stops after that many matches — for S3 this
+    relies on the API's lexical key order so the full listing is never
+    materialised before the bound is applied.
     """
+    if limit is not None and limit <= 0:
+        return []
     if is_s3(uri):
         loc = _parse_s3(uri)
         client = _s3_client(role)
+        base = loc.key
+        if base and not base.endswith("/"):
+            base += "/"
+        s3_prefix = base + (prefix or "")
         paginator = client.get_paginator("list_objects_v2")
         uris: list[str] = []
-        for page in paginator.paginate(Bucket=loc.bucket, Prefix=loc.key):
+        for page in paginator.paginate(Bucket=loc.bucket, Prefix=s3_prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 if key.endswith("/"):
@@ -199,18 +217,31 @@ def list_uris(
                 if suffix is not None and not key.endswith(suffix):
                     continue
                 uris.append(f"s3://{loc.bucket}/{key}")
-        return sorted(uris)
+                if limit is not None and len(uris) >= limit:
+                    return uris
+        return uris
 
     path = _local_path(uri)
     if not path.exists():
         raise FileNotFoundError(f"no such path: {uri}")
     if path.is_file():
-        return [str(path)] if suffix is None or path.name.endswith(suffix) else []
-    return sorted(
-        str(p)
-        for p in path.rglob("*")
-        if p.is_file() and (suffix is None or p.name.endswith(suffix))
-    )
+        keep = (suffix is None or path.name.endswith(suffix)) and (
+            prefix is None or path.name.startswith(prefix)
+        )
+        return [str(path)] if keep else []
+    uris = []
+    for p in sorted(path.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(path).as_posix()
+        if prefix is not None and not rel.startswith(prefix):
+            continue
+        if suffix is not None and not p.name.endswith(suffix):
+            continue
+        uris.append(str(p))
+        if limit is not None and len(uris) >= limit:
+            break
+    return uris
 
 
 class _S3SeekableReader:
