@@ -18,9 +18,12 @@ image:
 # The benchmark the runner executes. `configFile` names a key in the `configs`
 # map below (mounted at /configs). `source` (baseline raster to convert) and
 # `output` are storage URIs handed to the runner as flags, keeping the config
-# itself portable.
+# itself portable. Set `datasetFile` (another `configs` key) to fan the run out
+# over a layout-aware dataset's product(s) via `--dataset` instead of the
+# single-source `--source` path; leave it empty for the single-object path.
 runner:
   configFile: synthetic_cog.yaml
+  datasetFile: ""
   source: s3://bench/fixtures/fixture.tif
   output: s3://bench/results/
   backoffLimit: 0

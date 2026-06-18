@@ -176,6 +176,106 @@ def list_object_sizes(uri: str, role: str = "sink") -> list[int]:
     return sizes
 
 
+def list_uris(
+    uri: str, role: str = "source", *, suffix: str | None = None
+) -> list[str]:
+    """List the object URIs under ``uri`` (a local dir or ``s3://prefix``).
+
+    Returns each object as a URI of the same scheme as ``uri`` (a plain local
+    path for a local input, an ``s3://`` URI for an S3 prefix), filtered to
+    those ending in ``suffix`` when given. Sorted for deterministic
+    enumeration. Used to find the scenes/granules under a dataset root.
+    """
+    if is_s3(uri):
+        loc = _parse_s3(uri)
+        client = _s3_client(role)
+        paginator = client.get_paginator("list_objects_v2")
+        uris: list[str] = []
+        for page in paginator.paginate(Bucket=loc.bucket, Prefix=loc.key):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+                if suffix is not None and not key.endswith(suffix):
+                    continue
+                uris.append(f"s3://{loc.bucket}/{key}")
+        return sorted(uris)
+
+    path = _local_path(uri)
+    if not path.exists():
+        raise FileNotFoundError(f"no such path: {uri}")
+    if path.is_file():
+        return [str(path)] if suffix is None or path.name.endswith(suffix) else []
+    return sorted(
+        str(p)
+        for p in path.rglob("*")
+        if p.is_file() and (suffix is None or p.name.endswith(suffix))
+    )
+
+
+class _S3SeekableReader:
+    """A minimal seekable, read-only file object over an S3 object.
+
+    ``zipfile`` reads an archive's end-of-central-directory by seeking to the
+    tail, so listing a remote zip's members needs only a seekable reader that
+    fetches byte ranges on demand — never the whole (multi-hundred-MB) archive.
+    Implements just enough of the IO protocol (``read``/``seek``/``tell``) for
+    that.
+    """
+
+    def __init__(self, client, bucket: str, key: str, size: int) -> None:
+        self._client = client
+        self._bucket = bucket
+        self._key = key
+        self._size = size
+        self._pos = 0
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        if whence == os.SEEK_SET:
+            self._pos = offset
+        elif whence == os.SEEK_CUR:
+            self._pos += offset
+        elif whence == os.SEEK_END:
+            self._pos = self._size + offset
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"invalid whence {whence!r}")
+        return self._pos
+
+    def read(self, size: int = -1) -> bytes:
+        if self._pos >= self._size:
+            return b""
+        end = self._size - 1 if size is None or size < 0 else self._pos + size - 1
+        end = min(end, self._size - 1)
+        rng = f"bytes={self._pos}-{end}"
+        body = self._client.get_object(Bucket=self._bucket, Key=self._key, Range=rng)[
+            "Body"
+        ].read()
+        self._pos += len(body)
+        return body
+
+
+def open_seekable(uri: str, role: str = "source"):
+    """Open ``uri`` as a seekable binary file object (local file or S3 range).
+
+    The caller is responsible for closing the returned object. For S3 the reader
+    fetches ranges lazily, so opening a large archive to read its directory is
+    cheap.
+    """
+    if is_s3(uri):
+        loc = _parse_s3(uri)
+        _require_object_key(loc, uri)
+        client = _s3_client(role)
+        size = int(client.head_object(Bucket=loc.bucket, Key=loc.key)["ContentLength"])
+        return _S3SeekableReader(client, loc.bucket, loc.key, size)
+    return _local_path(uri).open("rb")
+
+
 def _require_object_key(loc: _S3Uri, uri: str) -> None:
     """Reject an S3 URI that names a bucket root or prefix rather than an object.
 

@@ -23,12 +23,25 @@ from cng_benchmark.tiers import Tier, TierPolicy
 
 
 class DatasetConfig(BaseModel):
-    """Descriptor for one dataset."""
+    """Descriptor for one dataset.
+
+    ``reader`` names the layout-specific :class:`~cng_benchmark.datasets.base.Dataset`
+    subclass that knows how to enumerate this dataset's products and components
+    (e.g. ``sentinel2-maja`` for a MAJA L2A zip delivery); it defaults to
+    ``single-object`` — one product, one component = ``source`` — so existing
+    single-file descriptors are unchanged. ``options`` is a layout-specific,
+    free-form block validated against the selected reader's typed ``Options``
+    model at construction time (the core schema stays decoupled from every
+    reader). ``source`` names the dataset root: a single object for
+    ``single-object``, or the prefix scenes/granules live under otherwise.
+    """
 
     id: str
     source: str
     baseline_format: str
     target_formats: list[str]
+    reader: str = "single-object"
+    options: dict[str, Any] = Field(default_factory=dict)
     grouping_lever: dict[str, Any] = Field(default_factory=dict)
     description: str | None = None
 

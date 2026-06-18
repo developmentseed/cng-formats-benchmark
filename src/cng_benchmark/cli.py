@@ -16,9 +16,13 @@ from pathlib import Path
 import typer
 
 from cng_benchmark import __version__, storage
-from cng_benchmark.config import load_benchmark_config
-from cng_benchmark.report import write_artifacts
-from cng_benchmark.runner import run_benchmark, run_conversion_benchmark
+from cng_benchmark.config import load_benchmark_config, load_dataset_config
+from cng_benchmark.report import write_artifacts, write_product_set_artifacts
+from cng_benchmark.runner import (
+    run_benchmark,
+    run_conversion_benchmark,
+    run_dataset_benchmark,
+)
 
 app = typer.Typer(
     help="Benchmark cloud-native geospatial formats.",
@@ -69,6 +73,13 @@ def _emit(result, output_uri: str | None) -> None:
 @app.command()
 def run(
     config: str,
+    dataset: str | None = typer.Option(
+        None,
+        "--dataset",
+        help="Dataset config (DatasetConfig YAML). Selects the layout-aware "
+        "reader and fans the benchmark out over the dataset's product(s), "
+        "writing a product-set tree (product/<id>/ + rollup/).",
+    ),
     source: str | None = typer.Option(
         None,
         "--source",
@@ -123,6 +134,37 @@ def run(
     source_raster = source or cfg.source
     object_listing = objects_uri or cfg.object_source
     output_uri = output or cfg.output
+
+    if dataset is not None:
+        try:
+            ds_cfg = load_dataset_config(dataset)
+        except Exception as exc:  # noqa: BLE001 — surface load/validation cleanly
+            typer.echo(f"Invalid dataset config {dataset}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        if output_uri is None:
+            typer.echo(
+                "The dataset path requires --output (or config output).", err=True
+            )
+            raise typer.Exit(1)
+        try:
+            result = run_dataset_benchmark(
+                cfg, ds_cfg, output_uri, titiler_endpoint=titiler_endpoint
+            )
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            typer.echo(f"Dataset benchmark failed for {ds_cfg.id}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(result.rollup.model_dump_json(indent=2))
+        try:
+            written = write_product_set_artifacts(result, output_uri)
+        except (OSError, ValueError, RuntimeError) as exc:
+            typer.echo(f"Cannot write artifacts to {output_uri}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(
+            f"Wrote {len(result.per_product)} per-product run(s) + roll-up under "
+            f"{written['summary']}",
+            err=True,
+        )
+        return
 
     if source_raster is not None:
         if output_uri is None:

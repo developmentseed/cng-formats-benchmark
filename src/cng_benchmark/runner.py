@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import cng_benchmark.datasets  # noqa: F401  (registers the built-in readers)
 import cng_benchmark.formats  # noqa: F401  (registers the built-in adapters)
 from cng_benchmark import __version__, storage
-from cng_benchmark.config import BenchmarkConfig, tier_policy_from_config
+from cng_benchmark.config import BenchmarkConfig, DatasetConfig, tier_policy_from_config
+from cng_benchmark.datasets import Product, build_dataset
+from cng_benchmark.formats.base import FormatAdapter
 from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import measure_display
 from cng_benchmark.metrics.objects import profile_object_sizes
@@ -181,3 +185,238 @@ def run_conversion_benchmark(
         object_profile=profile,
         metrics=metrics,
     )
+
+
+@dataclass(frozen=True)
+class ProductSetResult:
+    """The fan-out result: one run per product plus a pooled roll-up.
+
+    ``per_product`` carries one :class:`BenchmarkRun` per scene (its profile is
+    the object-size distribution over that scene's components); ``rollup`` pools
+    every object across the set into one honest distribution. When the scope is a
+    single product the set is that one product and ``rollup`` mirrors it.
+    """
+
+    per_product: list[BenchmarkRun]
+    rollup: BenchmarkRun
+
+
+def _aggregate_write_metrics(
+    per_component: list[list[MetricResult]],
+) -> list[MetricResult]:
+    """Pool per-component write metrics into one product-level write result.
+
+    Elapsed times sum (the product's total conversion wall time) and throughput
+    is recomputed from the pooled output bytes over that total, so a product's
+    write metric is comparable to a single object's.
+    """
+    total_elapsed = 0.0
+    bytes_out = 0
+    bytes_in = 0
+    have_bytes_in = False
+    for metrics in per_component:
+        for m in metrics:
+            if m.name == "write_elapsed":
+                total_elapsed += m.value
+            elif m.name == "write_throughput":
+                bytes_out += int(m.detail.get("bytes_out", 0))
+                if "bytes_in" in m.detail:
+                    bytes_in += int(m.detail["bytes_in"])
+                    have_bytes_in = True
+    throughput = bytes_out / total_elapsed if total_elapsed > 0 else float("inf")
+    detail: dict = {"bytes_out": bytes_out, "components": len(per_component)}
+    if have_bytes_in:
+        detail["bytes_in"] = bytes_in
+    return [
+        MetricResult(name="write_elapsed", value=total_elapsed, unit="s"),
+        MetricResult(
+            name="write_throughput", value=throughput, unit="bytes/s", detail=detail
+        ),
+    ]
+
+
+def _run_product(
+    adapter: FormatAdapter,
+    product: Product,
+    config: BenchmarkConfig,
+    output_uri: str,
+    *,
+    titiler_endpoint: str | None,
+    requested: set[str],
+    samples: dict,
+) -> tuple[BenchmarkRun, list[int]]:
+    """Convert every component of ``product`` and assemble its BenchmarkRun.
+
+    ``object_size`` + ``write`` cover **all** components; ``read`` and
+    ``display`` run only on the first ``samples[...]`` components (a
+    representative sample, default 1). Each produced object is uploaded and its
+    local copy freed before the next component is converted, so local disk is
+    bounded by one component at a time regardless of product size. Returns the
+    run and the per-object sizes (for the roll-up to pool).
+    """
+    chosen = adapter.name
+    read_samples = int(samples.get("read", 1))
+    display_samples = int(samples.get("display", 1))
+
+    sizes: list[int] = []
+    write_per_component: list[list[MetricResult]] = []
+    extra_metrics: list[MetricResult] = []
+
+    with tempfile.TemporaryDirectory() as workdir:
+        for i, component in enumerate(product.components):
+            local_target = os.path.join(workdir, f"{component.name}.tif")
+            source_path = storage.to_gdal_path(component.uri)
+            with gdal_session("source"):
+                write_per_component.append(
+                    measure_write(
+                        adapter,
+                        source_path,
+                        local_target,
+                        config.params,
+                        source_size=storage.object_size(component.uri, "source"),
+                    )
+                )
+
+            object_uri = storage.join(
+                output_uri, f"objects/{product.id}/{component.name}/{chosen}.tif"
+            )
+            storage.upload_from_path(local_target, object_uri, role="sink")
+            sizes += adapter.enumerate_objects(local_target)
+
+            if "read" in requested and i < read_samples:
+                with gdal_session("sink"):
+                    extra_metrics += measure_read(object_uri)
+            if "display" in requested and i < display_samples:
+                extra_metrics += _measure_display_component(
+                    config, local_target, object_uri, titiler_endpoint
+                )
+
+            os.remove(local_target)
+
+    policy = tier_policy_from_config(config.tiers)
+    profile = profile_object_sizes(sizes, policy)
+
+    metrics: list[MetricResult] = []
+    if "write" in requested:
+        metrics += _aggregate_write_metrics(write_per_component)
+    if "object_size" in requested:
+        metrics += [
+            MetricResult(name="object_count", value=profile.count),
+            MetricResult(name="total_bytes", value=profile.total_bytes, unit="bytes"),
+        ]
+    metrics += extra_metrics
+
+    params = {
+        **config.params,
+        "grouping_lever": adapter.describe_grouping_lever(),
+        "product_id": product.id,
+        "scope": "product",
+    }
+    run = BenchmarkRun(
+        timestamp=datetime.now(UTC),
+        tool_versions={"cng_benchmark": __version__},
+        dataset_id=config.dataset,
+        format_id=chosen,
+        params=params,
+        object_profile=profile,
+        metrics=metrics,
+    )
+    return run, sizes
+
+
+def _measure_display_component(
+    config: BenchmarkConfig,
+    local_target: str,
+    object_uri: str,
+    titiler_endpoint: str | None,
+) -> list[MetricResult]:
+    """Run the display metric for one component (chunk-targeted TiTiler tiles)."""
+    if not titiler_endpoint:
+        raise ValueError("the display metric requires a TiTiler endpoint")
+    if not storage.is_s3(object_uri):
+        raise ValueError("the display metric requires an S3 output location")
+    from cng_benchmark.metrics.display_tiles import DEFAULT_TARGETS, select_chunk_tiles
+
+    targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
+    tiles = select_chunk_tiles(local_target, targets=targets)
+    return measure_display(titiler_endpoint, object_uri, tiles)
+
+
+def run_dataset_benchmark(
+    config: BenchmarkConfig,
+    dataset_config: DatasetConfig,
+    output_uri: str,
+    *,
+    titiler_endpoint: str | None = None,
+    format_id: str | None = None,
+) -> ProductSetResult:
+    """Fan out a benchmark over a dataset's product(s) and pool a roll-up.
+
+    The dataset's reader enumerates its products (``scope: product`` takes one,
+    ``scope: product-set`` takes the set bounded by ``params.products``'s prefix
+    + limit). Each product is converted component-by-component into one
+    :class:`BenchmarkRun` (its object-size distribution); the roll-up pools every
+    object across the set into one honest distribution. Reuses the result model
+    throughout — ``params`` carries ``product_id`` / ``scope`` to tell the runs
+    apart.
+    """
+    if not config.formats:
+        raise ValueError(f"benchmark {config.id!r} lists no formats")
+    chosen = format_id or config.formats[0]
+    adapter = FORMATS.get(chosen)()
+    requested = set(config.metrics)
+    samples = dict(config.params.get("samples", {}))
+
+    dataset = build_dataset(dataset_config)
+    scope = config.params.get("scope", "product")
+    bound = dict(config.params.get("products", {}))
+    prefix = bound.get("prefix")
+    limit = bound.get("limit")
+    if scope == "product" and limit is None:
+        limit = 1
+    products = dataset.products(prefix=prefix, limit=limit)
+    if not products:
+        raise ValueError(
+            f"dataset {dataset_config.id!r} enumerated no products"
+            + (f" under prefix {prefix!r}" if prefix else "")
+        )
+
+    per_product: list[BenchmarkRun] = []
+    pooled_sizes: list[int] = []
+    for product in products:
+        run, sizes = _run_product(
+            adapter,
+            product,
+            config,
+            output_uri,
+            titiler_endpoint=titiler_endpoint,
+            requested=requested,
+            samples=samples,
+        )
+        per_product.append(run)
+        pooled_sizes += sizes
+
+    policy = tier_policy_from_config(config.tiers)
+    rollup_profile = profile_object_sizes(pooled_sizes, policy)
+    rollup = BenchmarkRun(
+        timestamp=datetime.now(UTC),
+        tool_versions={"cng_benchmark": __version__},
+        dataset_id=config.dataset,
+        format_id=chosen,
+        params={
+            **config.params,
+            "grouping_lever": adapter.describe_grouping_lever(),
+            "scope": "rollup",
+            "product_count": len(per_product),
+            "product_ids": [p.id for p in products],
+        },
+        object_profile=rollup_profile,
+        metrics=[
+            MetricResult(name="object_count", value=rollup_profile.count),
+            MetricResult(
+                name="total_bytes", value=rollup_profile.total_bytes, unit="bytes"
+            ),
+            MetricResult(name="product_count", value=len(per_product)),
+        ],
+    )
+    return ProductSetResult(per_product=per_product, rollup=rollup)
