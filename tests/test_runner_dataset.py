@@ -86,6 +86,38 @@ def test_single_product_aggregates_all_objects(tmp_path):
     assert result.rollup.params["scope"] == "rollup"
 
 
+def test_object_layouts_captured_and_pooled(tmp_path):
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=3)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["object_size"], {"scope": "product"})
+    result = run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+    run = result.per_product[0]
+    # One layout per produced object, and the synthetic COGs are tiled.
+    assert len(run.object_layouts) == 3
+    assert all(ly.is_tiled for ly in run.object_layouts)
+    assert all(ly.internal_tiles >= 1 for ly in run.object_layouts)
+    # The roll-up pools every object's layout.
+    assert len(result.rollup.object_layouts) == 3
+
+
+def test_product_set_summary_shows_tiling(tmp_path):
+    from cng_benchmark.report import render_markdown_summary, render_product_set_summary
+
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=2)
+    output = tmp_path / "out"
+    cfg = _benchmark(["object_size"], {"scope": "product"})
+    result = run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+    per_product_md = render_markdown_summary(result.per_product[0])
+    assert "## Tiling layout" in per_product_md
+    assert "Internally tiled:" in per_product_md
+    assert "| Tiled |" in render_product_set_summary(result)
+
+
 def test_product_set_rollup_pools_all_products(tmp_path):
     src = tmp_path / "src"
     _write_product(src, "scene1", n_components=3)

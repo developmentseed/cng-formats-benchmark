@@ -30,11 +30,25 @@ from cng_benchmark.datasets import Product, build_dataset
 from cng_benchmark.formats.base import FormatAdapter
 from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import measure_display
+from cng_benchmark.metrics.layout import describe_object_layout
 from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.metrics.read import measure_read
 from cng_benchmark.metrics.write import measure_write
-from cng_benchmark.models import BenchmarkRun, MetricResult
+from cng_benchmark.models import BenchmarkRun, MetricResult, ObjectLayout
 from cng_benchmark.registry import FORMATS
+
+
+def _safe_object_layout(name: str, path: str) -> ObjectLayout | None:
+    """Describe the produced object's tiling layout, or ``None`` if unavailable.
+
+    The layout is a best-effort structural extra: a non-raster output (or a
+    missing geo stack) yields ``None`` rather than failing the run, the same way
+    the display layout image is best-effort.
+    """
+    try:
+        return describe_object_layout(name, path, os.path.getsize(path))
+    except Exception:  # noqa: BLE001 - structural extra; never fail the run for it
+        return None
 
 
 def run_benchmark(
@@ -123,6 +137,8 @@ def run_conversion_benchmark(
 
         policy = tier_policy_from_config(config.tiers)
         profile = profile_object_sizes(adapter.enumerate_objects(local_target), policy)
+        layout = _safe_object_layout(chosen, local_target)
+        object_layouts = [layout] if layout is not None else []
 
         metrics: list[MetricResult] = []
         if "write" in requested:
@@ -183,6 +199,7 @@ def run_conversion_benchmark(
         format_id=chosen,
         params=params,
         object_profile=profile,
+        object_layouts=object_layouts,
         metrics=metrics,
     )
 
@@ -259,6 +276,7 @@ def _run_product(
     display_samples = int(samples.get("display", 1))
 
     sizes: list[int] = []
+    layouts: list[ObjectLayout] = []
     write_per_component: list[list[MetricResult]] = []
     extra_metrics: list[MetricResult] = []
 
@@ -282,13 +300,20 @@ def _run_product(
             )
             storage.upload_from_path(local_target, object_uri, role="sink")
             sizes += adapter.enumerate_objects(local_target)
+            # Capture the produced object's tiling layout (structural, per object).
+            layout = _safe_object_layout(component.name, local_target)
+            if layout is not None:
+                layouts.append(layout)
 
             if "read" in requested and i < read_samples:
                 with gdal_session("sink"):
                     extra_metrics += measure_read(object_uri)
             if "display" in requested and i < display_samples:
+                component_dir = storage.join(
+                    output_uri, f"objects/{product.id}/{component.name}"
+                )
                 extra_metrics += _measure_display_component(
-                    config, local_target, object_uri, titiler_endpoint
+                    config, local_target, object_uri, component_dir, titiler_endpoint
                 )
 
             os.remove(local_target)
@@ -319,6 +344,7 @@ def _run_product(
         format_id=chosen,
         params=params,
         object_profile=profile,
+        object_layouts=layouts,
         metrics=metrics,
     )
     return run, sizes
@@ -328,18 +354,47 @@ def _measure_display_component(
     config: BenchmarkConfig,
     local_target: str,
     object_uri: str,
+    component_dir: str,
     titiler_endpoint: str | None,
 ) -> list[MetricResult]:
-    """Run the display metric for one component (chunk-targeted TiTiler tiles)."""
+    """Run the display metric for one component and publish its chunk layout.
+
+    Selects chunk-crossing tiles against the local COG, times them via TiTiler
+    against the uploaded object, and (best-effort, like the single-source path)
+    renders the block-grid + tile-footprint ``display_chunk_layout.png`` next to
+    the object so the produced object's tiling is visible alongside its metrics.
+    """
     if not titiler_endpoint:
         raise ValueError("the display metric requires a TiTiler endpoint")
     if not storage.is_s3(object_uri):
         raise ValueError("the display metric requires an S3 output location")
-    from cng_benchmark.metrics.display_tiles import DEFAULT_TARGETS, select_chunk_tiles
+    from cng_benchmark.metrics.display_tiles import (
+        DEFAULT_TARGETS,
+        render_chunk_layout,
+        select_chunk_tiles,
+    )
 
     targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
     tiles = select_chunk_tiles(local_target, targets=targets)
-    return measure_display(titiler_endpoint, object_uri, tiles)
+    metrics = measure_display(titiler_endpoint, object_uri, tiles)
+
+    try:
+        import os as _os
+
+        local_layout = _os.path.join(_os.path.dirname(local_target), "_layout.png")
+        render_chunk_layout(local_target, tiles, local_layout)
+        layout_uri = storage.join(component_dir, "display_chunk_layout.png")
+        storage.upload_from_path(local_layout, layout_uri, role="sink")
+        for m in metrics:
+            if m.name == "display_scenarios":
+                m.detail["layout_uri"] = layout_uri
+    except RuntimeError as exc:
+        metrics.append(
+            MetricResult(
+                name="display_layout_skipped", value=0, detail={"reason": str(exc)}
+            )
+        )
+    return metrics
 
 
 def run_dataset_benchmark(
@@ -411,6 +466,7 @@ def run_dataset_benchmark(
             "product_ids": [p.id for p in products],
         },
         object_profile=rollup_profile,
+        object_layouts=[ly for run in per_product for ly in run.object_layouts],
         metrics=[
             MetricResult(name="object_count", value=rollup_profile.count),
             MetricResult(
