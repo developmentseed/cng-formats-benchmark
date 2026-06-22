@@ -122,9 +122,13 @@ def _read_zarr_grid(store: str, role: str = "sink") -> _Grid:
     gt = [float(v) for v in str(ref.attrs.get("GeoTransform", "")).split()]
     # The adapter writes GeoTransform as c a b f d e (GDAL order).
     c, a, b, f, d, e = gt
-    inv = ~Affine(a, b, c, d, e, f)
-    xs = [c, c + a * width + b * height]
-    ys = [f, f + d * width + e * height]
+    transform = Affine(a, b, c, d, e, f)
+    inv = ~transform
+    # All four raster corners, so a rotated/sheared transform still bounds right.
+    corners = [(0, 0), (width, 0), (0, height), (width, height)]
+    pts = [transform * (cx, cy) for cx, cy in corners]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
     bounds = (min(xs), min(ys), max(xs), max(ys))
     decimations = [2**i for i in range(levels + 1)]
     return _Grid(block_w, block_h, decimations, crs, inv, width, height, bounds)

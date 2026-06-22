@@ -127,7 +127,9 @@ def test_product_set_summary_shows_tiling(tmp_path):
     per_product_md = render_markdown_summary(result.per_product[0])
     assert "## Tiling layout" in per_product_md
     assert "Internally tiled:" in per_product_md
-    assert "| Tiled |" in render_product_set_summary(result)
+    summary = render_product_set_summary(result)
+    assert "| Layout |" in summary
+    assert "tiled" in summary  # COG products report their tiled fraction
 
 
 def test_product_set_rollup_pools_all_products(tmp_path):

@@ -177,19 +177,20 @@ def render_product_set_summary(result: ProductSetResult) -> str:
         "",
         "## Per-product object-size profiles",
         "",
-        "| Product | Objects | Total | Mean | Highest tier | Tiled |",
+        "| Product | Objects | Total | Mean | Highest tier | Layout |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
 
-    def _tiled(run) -> str:
+    def _layout(run) -> str:
         layouts = run.object_layouts
         if not layouts:
             return "-"
-        # COG reports its range-read-friendly (tiled) fraction; GeoZarr has no
-        # striped/tiled axis, so it reports its shard-object count instead.
+        # A format-agnostic structural digest: COG reports its range-read-friendly
+        # (tiled) fraction; GeoZarr has no striped/tiled axis, so it reports its
+        # shard-object count instead.
         cog = [ly for ly in layouts if ly.kind == "cog"]
         if cog:
-            return f"{sum(1 for ly in cog if ly.is_tiled)}/{len(cog)}"
+            return f"{sum(1 for ly in cog if ly.is_tiled)}/{len(cog)} tiled"
         shards = sum(getattr(ly, "shard_count", 0) for ly in layouts)
         return f"{shards} shards"
 
@@ -201,14 +202,14 @@ def render_product_set_summary(result: ProductSetResult) -> str:
             continue
         lines.append(
             f"| {product_id} | {p.count} | {_format_bytes(p.total_bytes)} | "
-            f"{_format_bytes(p.mean)} | {p.highest_tier or 'none'} | {_tiled(run)} |"
+            f"{_format_bytes(p.mean)} | {p.highest_tier or 'none'} | {_layout(run)} |"
         )
     roll = result.rollup.object_profile
     if roll is not None:
         lines.append(
             f"| **roll-up** | **{roll.count}** | **{_format_bytes(roll.total_bytes)}** "
             f"| **{_format_bytes(roll.mean)}** | **{roll.highest_tier or 'none'}** "
-            f"| **{_tiled(result.rollup)}** |"
+            f"| **{_layout(result.rollup)}** |"
         )
     lines.append("")
     return "\n".join(lines)

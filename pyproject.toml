@@ -27,6 +27,7 @@ s3 = [
 cog = [
     "rasterio>=1.3",
     "rio-cogeo>=5",
+    "morecantile>=5",
     "matplotlib>=3.8",
 ]
 # GeoZarr v3 sharded writes need zarr v3; rioxarray reads the source raster into a
