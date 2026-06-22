@@ -6,7 +6,7 @@ pytest.importorskip("rasterio")
 pytest.importorskip("rio_cogeo")
 
 from cng_benchmark.fixtures import generate_cog_bytes  # noqa: E402
-from cng_benchmark.metrics.layout import describe_object_layout  # noqa: E402
+from cng_benchmark.metrics.layout import describe_cog_layout  # noqa: E402
 
 
 def _write(tmp_path, name: str, data: bytes):
@@ -17,7 +17,7 @@ def _write(tmp_path, name: str, data: bytes):
 
 def test_tiled_cog_layout(tmp_path):
     path = _write(tmp_path, "cog.tif", generate_cog_bytes(size=512, blocksize=128))
-    ly = describe_object_layout("cog", path, 123)
+    ly = describe_cog_layout("cog", path, 123)
     assert ly.is_tiled is True
     assert (ly.block_width, ly.block_height) == (128, 128)
     assert ly.size_bytes == 123
@@ -43,6 +43,6 @@ def test_striped_geotiff_is_not_tiled(tmp_path):
     ) as dst:
         dst.write(np.zeros((256, 256), dtype="uint8"), 1)
 
-    ly = describe_object_layout("striped", path, 999)
+    ly = describe_cog_layout("striped", path, 999)
     assert ly.is_tiled is False
     assert ly.block_width == 256  # block spans the full raster width

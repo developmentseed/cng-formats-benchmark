@@ -63,7 +63,7 @@ def render_markdown_summary(run: BenchmarkRun) -> str:
         ]
 
     if run.object_layouts:
-        lines += _render_tiling_layout(run.object_layouts)
+        lines += _render_object_layouts(run.object_layouts)
 
     if run.metrics:
         lines += ["", "## Metrics", ""]
@@ -75,8 +75,26 @@ def render_markdown_summary(run: BenchmarkRun) -> str:
     return "\n".join(lines)
 
 
+def _render_object_layouts(layouts: list) -> list[str]:
+    """Render the per-object partial-access layout, one table per format kind.
+
+    Each format answers "can a client fetch part without the whole" through its own
+    structure, so COG objects get a "Tiling layout" table (block size, overviews)
+    and GeoZarr arrays a "Chunk/shard layout" table (chunk, shard, codec,
+    multiscale levels) — the structural side of the comparison, beside the sizes.
+    """
+    cog = [ly for ly in layouts if ly.kind == "cog"]
+    geozarr = [ly for ly in layouts if ly.kind == "geozarr"]
+    lines: list[str] = []
+    if cog:
+        lines += _render_tiling_layout(cog)
+    if geozarr:
+        lines += _render_chunk_shard_layout(geozarr)
+    return lines
+
+
 def _render_tiling_layout(layouts: list) -> list[str]:
-    """Render the per-object tiling layout: a coverage line plus a table.
+    """Render the COG per-object tiling layout: a coverage line plus a table.
 
     Leads with how many objects are internally tiled (range-read friendly) vs
     striped, then one row per object (block size, overview levels, internal
@@ -98,6 +116,34 @@ def _render_tiling_layout(layouts: list) -> list[str]:
         lines.append(
             f"| {ly.name} | {'yes' if ly.is_tiled else 'no'} | "
             f"{ly.block_width}×{ly.block_height} | {ovr} | {ly.internal_tiles} |"
+        )
+    return lines
+
+
+def _render_chunk_shard_layout(layouts: list) -> list[str]:
+    """Render the GeoZarr per-array chunk/shard layout: a coverage line plus a table.
+
+    Leads with the total shard-object count (the stored, tier-judged objects), then
+    one row per array (chunk = addressable unit, shard = stored object,
+    chunks/shard, codec, multiscale levels) — the GeoZarr answer to the same
+    partial-access question COG answers with internal tiling.
+    """
+    shards = sum(ly.shard_count for ly in layouts)
+    lines = [
+        "",
+        "## Chunk/shard layout",
+        "",
+        f"- **Shard objects:** {shards} across {len(layouts)} array(s)",
+        "",
+        "| Array | Chunk | Shard | Chunks/shard | Codec | Levels | Shards |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for ly in layouts:
+        chunk = "×".join(str(v) for v in ly.chunk_shape)
+        shard = "×".join(str(v) for v in ly.shard_shape)
+        lines.append(
+            f"| {ly.name} | {chunk} | {shard} | {ly.chunks_per_shard} | "
+            f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} |"
         )
     return lines
 
@@ -136,10 +182,16 @@ def render_product_set_summary(result: ProductSetResult) -> str:
     ]
 
     def _tiled(run) -> str:
-        n = run.object_layouts
-        if not n:
+        layouts = run.object_layouts
+        if not layouts:
             return "-"
-        return f"{sum(1 for ly in n if ly.is_tiled)}/{len(n)}"
+        # COG reports its range-read-friendly (tiled) fraction; GeoZarr has no
+        # striped/tiled axis, so it reports its shard-object count instead.
+        cog = [ly for ly in layouts if ly.kind == "cog"]
+        if cog:
+            return f"{sum(1 for ly in cog if ly.is_tiled)}/{len(cog)}"
+        shards = sum(getattr(ly, "shard_count", 0) for ly in layouts)
+        return f"{shards} shards"
 
     for run in result.per_product:
         p = run.object_profile

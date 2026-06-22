@@ -29,11 +29,24 @@ cog = [
     "rio-cogeo>=5",
     "matplotlib>=3.8",
 ]
+# GeoZarr v3 sharded writes need zarr v3; rioxarray reads the source raster into a
+# georeferenced xarray array. zarr + xarray + numpy are also pulled into `dev`
+# (below) so the sharding-lever / enumerate / layout logic is unit-tested in CI on
+# synthetic in-memory arrays — only the rioxarray source-read path skips there.
+geozarr = [
+    "zarr>=3",
+    "xarray>=2024.1",
+    "rioxarray>=0.15",
+    "s3fs>=2024",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
     "boto3>=1.34",
     "moto[s3]>=5",
+    "zarr>=3",
+    "xarray>=2024.1",
+    "numpy>=1.26",
 ]
 docs = [
     "mkdocs-material>=9.5",

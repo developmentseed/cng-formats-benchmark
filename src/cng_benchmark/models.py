@@ -14,7 +14,7 @@ profile is a first-class result rather than an incidental statistic.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -62,24 +62,63 @@ class MetricResult(BaseModel):
 
 
 class ObjectLayout(BaseModel):
-    """The internal tiling layout of one produced object.
+    """Base record of one produced object's partial-access layout.
 
-    Whether bytes are reachable by partial (range) reads is decided by the
-    object's *internal* structure, not only its size: a striped GeoTIFF forces a
-    reader to pull whole rows, a tiled COG lets it fetch a block. This records
-    that structure per produced object — tiled vs striped, the block size, the
-    overview decimations, and the internal tile (block) count — so the
-    partial-access story is in the result itself, independent of any tile server
-    (the display metric reads the same structure to bucket its tiles).
+    Whether bytes are reachable by partial (range) reads is decided by an
+    object's *internal* structure, not only its size, and every candidate format
+    answers that "can a client fetch part without the whole" question through its
+    own structure (COG internal blocks + overviews, Zarr v3 chunks + shards +
+    multiscales). This base carries what every format shares — the object's
+    ``name`` and ``size_bytes`` — and ``kind`` discriminates the typed per-format
+    subclass below, so the structural side of the comparison is in the result
+    itself, uniformly, independent of any tile server.
     """
 
+    kind: str
     name: str
     size_bytes: int
+
+
+class CogLayout(ObjectLayout):
+    """A COG's internal tiling layout.
+
+    ``is_tiled`` is true when the block does not span the full raster width (a
+    tiled COG, range-read friendly) rather than striped; ``internal_tiles`` is the
+    full-resolution block-grid cell count, and ``overview_decimations`` the
+    overview levels. The chunk-aware display metric reads the same structure to
+    bucket its tiles.
+    """
+
+    kind: Literal["cog"] = "cog"
     is_tiled: bool
     block_height: int
     block_width: int
     overview_decimations: list[int] = Field(default_factory=list)
     internal_tiles: int
+
+
+class GeoZarrLayout(ObjectLayout):
+    """A GeoZarr v3 array's chunk/shard layout.
+
+    The addressable unit is the chunk; the stored object is the shard (one shard
+    packs ``chunks_per_shard`` chunks), which is the lever that lifts the mean
+    object size into a storage tier. ``multiscale_levels`` is the overview-pyramid
+    depth (the GeoZarr analogue of COG overviews) and ``shard_count`` the number of
+    shard objects the array produced.
+    """
+
+    kind: Literal["geozarr"] = "geozarr"
+    chunk_shape: list[int]
+    shard_shape: list[int]
+    chunks_per_shard: int
+    codec: str
+    multiscale_levels: int
+    shard_count: int
+
+
+#: Discriminated union over the per-format layouts, so a ``BenchmarkRun`` keeps
+#: each layout's subclass fields through pydantic validation and JSON round-trips.
+AnyObjectLayout = Annotated[CogLayout | GeoZarrLayout, Field(discriminator="kind")]
 
 
 class BenchmarkRun(BaseModel):
@@ -97,5 +136,5 @@ class BenchmarkRun(BaseModel):
     format_id: str
     params: dict[str, Any] = Field(default_factory=dict)
     object_profile: ObjectSizeProfile | None = None
-    object_layouts: list[ObjectLayout] = Field(default_factory=list)
+    object_layouts: list[AnyObjectLayout] = Field(default_factory=list)
     metrics: list[MetricResult] = Field(default_factory=list)

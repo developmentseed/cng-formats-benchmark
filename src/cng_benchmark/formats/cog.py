@@ -12,7 +12,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from cng_benchmark.formats.base import FormatAdapter
+from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+from cng_benchmark.models import CogLayout
 from cng_benchmark.registry import FORMATS
 
 #: Default internal tile (block) size when the config carries no lever value.
@@ -35,6 +36,7 @@ def _require_geo():
 @FORMATS.register("cog")
 class CogAdapter(FormatAdapter):
     name = "cog"
+    object_kind = ObjectKind.RASTER_FILE
 
     def convert(self, source: str, target: str, params: dict[str, Any]) -> None:
         """Convert ``source`` (a GDAL-readable raster) to a COG at ``target``.
@@ -62,3 +64,11 @@ class CogAdapter(FormatAdapter):
     def enumerate_objects(self, target: str) -> list[int]:
         """Return the size (bytes) of the produced COG — a single object."""
         return [os.path.getsize(target)]
+
+    def describe_layout(
+        self, target: str, *, name: str | None = None
+    ) -> list[CogLayout]:
+        """Return the produced COG's internal tiling layout (one object)."""
+        from cng_benchmark.metrics.layout import describe_cog_layout
+
+        return [describe_cog_layout(name or self.name, target, os.path.getsize(target))]

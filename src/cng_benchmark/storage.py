@@ -104,6 +104,33 @@ def s3_profile(role: str = "sink") -> S3Profile:
     )
 
 
+def fsspec_storage_options(role: str = "sink") -> dict:
+    """Build fsspec/s3fs ``storage_options`` for ``role`` from the environment.
+
+    The GeoZarr read path opens a sharded store with zarr-python over fsspec
+    (GDAL's Zarr driver cannot read the ``sharding_indexed`` codec), so it needs
+    the same per-role endpoint/CA/credentials the boto3 and GDAL paths use,
+    expressed in s3fs's shape (``key``/``secret`` plus ``client_kwargs``). Empty
+    for a local store.
+    """
+    p = s3_profile(role)
+    opts: dict = {}
+    if p.access_key:
+        opts["key"] = p.access_key
+    if p.secret_key:
+        opts["secret"] = p.secret_key
+    client_kwargs: dict = {}
+    if p.endpoint:
+        client_kwargs["endpoint_url"] = p.endpoint
+    if p.region:
+        client_kwargs["region_name"] = p.region
+    if p.ca_bundle:
+        client_kwargs["verify"] = p.ca_bundle
+    if client_kwargs:
+        opts["client_kwargs"] = client_kwargs
+    return opts
+
+
 def _local_path(uri: str) -> Path:
     """Map a local path or ``file://`` URI to a :class:`Path`."""
     if uri.startswith("file://"):
@@ -374,6 +401,35 @@ def upload_from_path(local_path: str, uri: str, role: str = "sink") -> None:
     dest = _local_path(uri)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(local_path, dest)
+
+
+def upload_tree(local_dir: str, uri: str, role: str = "sink") -> None:
+    """Upload every file under ``local_dir`` to ``uri`` (a prefix), preserving paths.
+
+    A store format (GeoZarr) produces a *directory* of many objects rather than a
+    single file, so the runner publishes it as a tree: each file is uploaded under
+    ``uri`` at its path relative to ``local_dir`` (POSIX-joined for S3, a recursive
+    copy locally). ``uri`` is treated as a prefix/directory, not an object key.
+    """
+    src = Path(local_dir)
+    files = sorted(p for p in src.rglob("*") if p.is_file())
+    if not files:
+        raise ValueError(f"no files to upload under {local_dir}")
+    if is_s3(uri):
+        loc = _parse_s3(uri)
+        base = loc.key.rstrip("/")
+        client = _s3_client(role)
+        for p in files:
+            rel = p.relative_to(src).as_posix()
+            key = f"{base}/{rel}" if base else rel
+            client.upload_file(str(p), loc.bucket, key)
+        return
+    dest = _local_path(uri)
+    for p in files:
+        rel = p.relative_to(src)
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(p, target)
 
 
 def read_bytes(uri: str, role: str = "sink") -> bytes:

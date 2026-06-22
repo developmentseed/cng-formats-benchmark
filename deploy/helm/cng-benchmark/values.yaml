@@ -88,6 +88,20 @@ titiler:
   port: 8000
   replicas: 1
 
+# Second tile-server surface for the GeoZarr display metric (xarray/Zarr v3).
+# Off by default; enable for runs whose benchmark is `geozarr` + `display`, and set
+# the benchmark's params.display_titiler_path to match this image's tiler router.
+titilerXarray:
+  enabled: false
+  image: ghcr.io/developmentseed/titiler-xarray:latest
+  port: 8001          # Service port; the container serves on 80.
+  replicas: 1
+  # Extra env for the object-store backend (e.g. a custom/HTTP sink endpoint):
+  #   extraEnv:
+  #     - {name: AWS_ENDPOINT, value: "https://s3.example.com"}
+  #     - {name: AWS_ALLOW_HTTP, value: "true"}   # only for a non-TLS endpoint
+  extraEnv: []
+
 # Optional PVC for results when not writing to S3. Off by default (S3 path).
 results:
   pvc:

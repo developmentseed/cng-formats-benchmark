@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from cng_benchmark.config import load_benchmark_config, tier_policy_from_config
 from cng_benchmark.metrics.objects import profile_object_sizes
-from cng_benchmark.models import BenchmarkRun, MetricResult
+from cng_benchmark.models import BenchmarkRun, CogLayout, GeoZarrLayout, MetricResult
 from cng_benchmark.report import (
     RESULT_FILENAME,
     SUMMARY_FILENAME,
@@ -36,6 +36,48 @@ def test_render_markdown_summary_includes_key_facts():
     assert "Object-size profile" in md
     assert "Tier fit" in md
     assert "| object_count |" in md
+
+
+def test_summary_renders_cog_tiling_layout():
+    run = _sample_run()
+    run.object_layouts = [
+        CogLayout(
+            name="FRE_B4",
+            size_bytes=100,
+            is_tiled=True,
+            block_height=512,
+            block_width=512,
+            overview_decimations=[2, 4],
+            internal_tiles=16,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "## Tiling layout" in md
+    assert "Internally tiled:" in md
+    assert "512×512" in md
+
+
+def test_summary_renders_geozarr_chunk_shard_layout():
+    run = _sample_run()
+    run.format_id = "geozarr"
+    run.object_layouts = [
+        GeoZarrLayout(
+            name="FRE_B4",
+            size_bytes=200,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=1,
+            shard_count=4,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "## Chunk/shard layout" in md
+    assert "Shard objects:" in md
+    assert "| 512×512 | 1024×1024 | 4 | zstd | 1 | 4 |" in md
+    # No COG-only table for a GeoZarr run.
+    assert "## Tiling layout" not in md
 
 
 def test_write_artifacts_writes_both_files(tmp_path):

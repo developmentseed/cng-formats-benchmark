@@ -135,6 +135,52 @@ def test_s3_write_list_read_round_trip(s3_bucket):
     assert storage.read_bytes(f"s3://{s3_bucket}/fixtures/a.tif") == b"a" * 100
 
 
+def test_upload_tree_local_preserves_paths(tmp_path):
+    src = tmp_path / "store.zarr"
+    (src / "c" / "0").mkdir(parents=True)
+    (src / "zarr.json").write_bytes(b"{}")
+    (src / "c" / "0" / "0").write_bytes(b"shard")
+    dest = tmp_path / "out"
+    storage.upload_tree(str(src), str(dest))
+    assert (dest / "zarr.json").read_bytes() == b"{}"
+    assert (dest / "c" / "0" / "0").read_bytes() == b"shard"
+
+
+def test_upload_tree_empty_dir_raises(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="no files to upload"):
+        storage.upload_tree(str(empty), str(tmp_path / "out"))
+
+
+def test_upload_tree_s3_preserves_paths(s3_bucket):
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "store.zarr"
+        (root / "c").mkdir(parents=True)
+        (root / "zarr.json").write_bytes(b"meta")
+        (root / "c" / "0").write_bytes(b"shard-bytes")
+        storage.upload_tree(str(root), f"s3://{s3_bucket}/objects/store.zarr")
+
+    sizes = storage.list_object_sizes(f"s3://{s3_bucket}/objects/store.zarr/")
+    assert sorted(sizes) == [len(b"meta"), len(b"shard-bytes")]
+    body = storage.read_bytes(f"s3://{s3_bucket}/objects/store.zarr/c/0")
+    assert body == b"shard-bytes"
+
+
+def test_fsspec_storage_options_shapes_role_profile(monkeypatch):
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://s3.example.com")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "k")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
+    monkeypatch.setenv("AWS_CA_BUNDLE", "/etc/ssl/ca.pem")
+    opts = storage.fsspec_storage_options("sink")
+    assert opts["key"] == "k" and opts["secret"] == "s"
+    assert opts["client_kwargs"]["endpoint_url"] == "https://s3.example.com"
+    assert opts["client_kwargs"]["verify"] == "/etc/ssl/ca.pem"
+
+
 def test_s3_list_empty_prefix_raises(s3_bucket):
     with pytest.raises(ValueError, match="no objects"):
         storage.list_object_sizes(f"s3://{s3_bucket}/empty/")

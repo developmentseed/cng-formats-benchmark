@@ -27,28 +27,61 @@ import cng_benchmark.formats  # noqa: F401  (registers the built-in adapters)
 from cng_benchmark import __version__, storage
 from cng_benchmark.config import BenchmarkConfig, DatasetConfig, tier_policy_from_config
 from cng_benchmark.datasets import Product, build_dataset
-from cng_benchmark.formats.base import FormatAdapter
+from cng_benchmark.formats.base import FormatAdapter, ObjectKind
 from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import measure_display
-from cng_benchmark.metrics.layout import describe_object_layout
 from cng_benchmark.metrics.objects import profile_object_sizes
-from cng_benchmark.metrics.read import measure_read
+from cng_benchmark.metrics.read import measure_read, measure_zarr_read
 from cng_benchmark.metrics.write import measure_write
 from cng_benchmark.models import BenchmarkRun, MetricResult, ObjectLayout
 from cng_benchmark.registry import FORMATS
 
 
-def _safe_object_layout(name: str, path: str) -> ObjectLayout | None:
-    """Describe the produced object's tiling layout, or ``None`` if unavailable.
+def _safe_object_layouts(
+    adapter: FormatAdapter, name: str, path: str
+) -> list[ObjectLayout]:
+    """Describe the produced object(s)' layout, or ``[]`` if unavailable.
 
-    The layout is a best-effort structural extra: a non-raster output (or a
-    missing geo stack) yields ``None`` rather than failing the run, the same way
+    Delegates to the adapter's per-format describer (a ``CogLayout`` per COG, a
+    ``GeoZarrLayout`` per array). Best-effort structural extra: a missing geo stack
+    or an unreadable output yields ``[]`` rather than failing the run, the same way
     the display layout image is best-effort.
     """
     try:
-        return describe_object_layout(name, path, os.path.getsize(path))
+        return list(adapter.describe_layout(path, name=name))
     except Exception:  # noqa: BLE001 - structural extra; never fail the run for it
-        return None
+        return []
+
+
+def _publish_object(adapter: FormatAdapter, local_target: str, object_uri: str) -> None:
+    """Upload the produced object to ``object_uri`` — a file, or a store tree."""
+    if adapter.object_kind is ObjectKind.ZARR_STORE:
+        storage.upload_tree(local_target, object_uri, role="sink")
+    else:
+        storage.upload_from_path(local_target, object_uri, role="sink")
+
+
+def _remove_target(local_target: str) -> None:
+    """Free a produced object's local copy — a single file or a store directory."""
+    import shutil
+
+    if os.path.isdir(local_target):
+        shutil.rmtree(local_target, ignore_errors=True)
+    else:
+        os.remove(local_target)
+
+
+def _measure_object_read(adapter: FormatAdapter, object_uri: str) -> list[MetricResult]:
+    """Read windows back from the produced object, per its object kind.
+
+    A zarr store is read zarr-natively over fsspec (GDAL cannot read the
+    ``sharding_indexed`` codec); a raster file is read with rasterio under the
+    sink role's ``/vsis3`` session.
+    """
+    if adapter.object_kind is ObjectKind.ZARR_STORE:
+        return measure_zarr_read(object_uri, role="sink")
+    with gdal_session("sink"):
+        return measure_read(object_uri)
 
 
 def run_benchmark(
@@ -118,7 +151,7 @@ def run_conversion_benchmark(
     requested = set(config.metrics)
 
     with tempfile.TemporaryDirectory() as workdir:
-        local_target = os.path.join(workdir, f"{chosen}.tif")
+        local_target = os.path.join(workdir, adapter.target_basename())
         # Read the source in place (network reads counted in the conversion).
         source_path = storage.to_gdal_path(source_uri)
         with gdal_session("source"):
@@ -131,14 +164,15 @@ def run_conversion_benchmark(
             )
 
         # Always publish the produced object under the output location: it is a
-        # first-class run artifact, and read/display address it on the store.
-        object_uri = storage.join(output_uri, f"{chosen}/{chosen}.tif")
-        storage.upload_from_path(local_target, object_uri, role="sink")
+        # first-class run artifact, and read/display address it on the store. A
+        # store format publishes a tree; a raster, a single file.
+        artifact_dir = storage.join(output_uri, chosen)
+        object_uri = storage.join(artifact_dir, adapter.target_basename())
+        _publish_object(adapter, local_target, object_uri)
 
         policy = tier_policy_from_config(config.tiers)
         profile = profile_object_sizes(adapter.enumerate_objects(local_target), policy)
-        layout = _safe_object_layout(chosen, local_target)
-        object_layouts = [layout] if layout is not None else []
+        object_layouts = _safe_object_layouts(adapter, chosen, local_target)
 
         metrics: list[MetricResult] = []
         if "write" in requested:
@@ -151,45 +185,16 @@ def run_conversion_benchmark(
                 ),
             ]
         if "read" in requested:
-            with gdal_session("sink"):
-                metrics += measure_read(object_uri)
+            metrics += _measure_object_read(adapter, object_uri)
         if "display" in requested:
-            if not titiler_endpoint:
-                raise ValueError("the display metric requires a TiTiler endpoint")
-            if not storage.is_s3(object_uri):
-                raise ValueError("the display metric requires an S3 output location")
-            from cng_benchmark.metrics.display_tiles import (
-                DEFAULT_TARGETS,
-                render_chunk_layout,
-                select_chunk_tiles,
+            metrics += _measure_display_object(
+                config,
+                adapter,
+                local_target,
+                object_uri,
+                artifact_dir,
+                titiler_endpoint,
             )
-
-            targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
-            # Select against the *local* COG (cheap, no network); time the tiles
-            # against the uploaded S3 object via TiTiler.
-            tiles = select_chunk_tiles(local_target, targets=targets)
-            metrics += measure_display(titiler_endpoint, object_uri, tiles)
-
-            # Publish a chunk-grid + tile-footprint layout image alongside the
-            # object (best-effort: a missing matplotlib must not fail the run).
-            try:
-                local_layout = os.path.join(workdir, "display_chunk_layout.png")
-                render_chunk_layout(local_target, tiles, local_layout)
-                layout_uri = storage.join(
-                    output_uri, f"{chosen}/display_chunk_layout.png"
-                )
-                storage.upload_from_path(local_layout, layout_uri, role="sink")
-                for m in metrics:
-                    if m.name == "display_scenarios":
-                        m.detail["layout_uri"] = layout_uri
-            except RuntimeError as exc:
-                metrics.append(
-                    MetricResult(
-                        name="display_layout_skipped",
-                        value=0,
-                        detail={"reason": str(exc)},
-                    )
-                )
 
     params = {**config.params, "grouping_lever": adapter.describe_grouping_lever()}
     return BenchmarkRun(
@@ -282,7 +287,9 @@ def _run_product(
 
     with tempfile.TemporaryDirectory() as workdir:
         for i, component in enumerate(product.components):
-            local_target = os.path.join(workdir, f"{component.name}.tif")
+            local_target = os.path.join(
+                workdir, f"{component.name}-{adapter.target_basename()}"
+            )
             source_path = storage.to_gdal_path(component.uri)
             with gdal_session("source"):
                 write_per_component.append(
@@ -295,28 +302,28 @@ def _run_product(
                     )
                 )
 
-            object_uri = storage.join(
-                output_uri, f"objects/{product.id}/{component.name}/{chosen}.tif"
+            component_dir = storage.join(
+                output_uri, f"objects/{product.id}/{component.name}"
             )
-            storage.upload_from_path(local_target, object_uri, role="sink")
+            object_uri = storage.join(component_dir, adapter.target_basename())
+            _publish_object(adapter, local_target, object_uri)
             sizes += adapter.enumerate_objects(local_target)
-            # Capture the produced object's tiling layout (structural, per object).
-            layout = _safe_object_layout(component.name, local_target)
-            if layout is not None:
-                layouts.append(layout)
+            # Capture the produced object's layout (structural, per object).
+            layouts += _safe_object_layouts(adapter, component.name, local_target)
 
             if "read" in requested and i < read_samples:
-                with gdal_session("sink"):
-                    extra_metrics += measure_read(object_uri)
+                extra_metrics += _measure_object_read(adapter, object_uri)
             if "display" in requested and i < display_samples:
-                component_dir = storage.join(
-                    output_uri, f"objects/{product.id}/{component.name}"
-                )
-                extra_metrics += _measure_display_component(
-                    config, local_target, object_uri, component_dir, titiler_endpoint
+                extra_metrics += _measure_display_object(
+                    config,
+                    adapter,
+                    local_target,
+                    object_uri,
+                    component_dir,
+                    titiler_endpoint,
                 )
 
-            os.remove(local_target)
+            _remove_target(local_target)
 
     policy = tier_policy_from_config(config.tiers)
     profile = profile_object_sizes(sizes, policy)
@@ -350,19 +357,23 @@ def _run_product(
     return run, sizes
 
 
-def _measure_display_component(
+def _measure_display_object(
     config: BenchmarkConfig,
+    adapter: FormatAdapter,
     local_target: str,
     object_uri: str,
-    component_dir: str,
+    artifact_dir: str,
     titiler_endpoint: str | None,
 ) -> list[MetricResult]:
-    """Run the display metric for one component and publish its chunk layout.
+    """Run the display metric for one produced object and publish its chunk layout.
 
-    Selects chunk-crossing tiles against the local COG, times them via TiTiler
-    against the uploaded object, and (best-effort, like the single-source path)
-    renders the block-grid + tile-footprint ``display_chunk_layout.png`` next to
-    the object so the produced object's tiling is visible alongside its metrics.
+    Selects chunk-crossing tiles against the *local* produced object (cheap, no
+    network), times them via TiTiler against the uploaded object, and (best-effort)
+    renders the block/chunk-grid + tile-footprint ``display_chunk_layout.png`` next
+    to it. Branches on the object kind: a raster file uses TiTiler's ``/cog``
+    endpoints + the rasterio grid; a zarr store uses the multidim/xarray router
+    (``display_titiler_path``, default ``md``) + the zarr chunk grid + the
+    ``variable`` query.
     """
     if not titiler_endpoint:
         raise ValueError("the display metric requires a TiTiler endpoint")
@@ -371,19 +382,34 @@ def _measure_display_component(
     from cng_benchmark.metrics.display_tiles import (
         DEFAULT_TARGETS,
         render_chunk_layout,
+        render_zarr_chunk_layout,
         select_chunk_tiles,
+        select_zarr_chunk_tiles,
     )
 
     targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
-    tiles = select_chunk_tiles(local_target, targets=targets)
-    metrics = measure_display(titiler_endpoint, object_uri, tiles)
+    if adapter.object_kind is ObjectKind.ZARR_STORE:
+        from cng_benchmark.formats.geozarr import DATA_VAR
+
+        tiles = select_zarr_chunk_tiles(local_target, targets=targets)
+        prefix = str(config.params.get("display_titiler_path", "md"))
+        metrics = measure_display(
+            titiler_endpoint,
+            object_uri,
+            tiles,
+            path_prefix=prefix,
+            extra_query={"variable": DATA_VAR},
+        )
+        render = render_zarr_chunk_layout
+    else:
+        tiles = select_chunk_tiles(local_target, targets=targets)
+        metrics = measure_display(titiler_endpoint, object_uri, tiles)
+        render = render_chunk_layout
 
     try:
-        import os as _os
-
-        local_layout = _os.path.join(_os.path.dirname(local_target), "_layout.png")
-        render_chunk_layout(local_target, tiles, local_layout)
-        layout_uri = storage.join(component_dir, "display_chunk_layout.png")
+        local_layout = os.path.join(os.path.dirname(local_target) or ".", "_layout.png")
+        render(local_target, tiles, local_layout)
+        layout_uri = storage.join(artifact_dir, "display_chunk_layout.png")
         storage.upload_from_path(local_layout, layout_uri, role="sink")
         for m in metrics:
             if m.name == "display_scenarios":

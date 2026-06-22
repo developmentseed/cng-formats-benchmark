@@ -1,0 +1,45 @@
+# Example benchmark arm: Sentinel-2 L2A MAJA -> GeoZarr v3 (per-component, 2D).
+#
+# The M2.5 second-format arm on the same mission as the COG arm. Each MAJA
+# reflectance band / mask (picked in the dataset `options`) is converted
+# independently to its own sharded 2D GeoZarr store, profiling the per-product
+# object-size distribution + a set-level roll-up — the head-to-head structural
+# comparison against the COG arm, from the same canonical source.
+#
+# Run with `--dataset configs/datasets/example_sentinel2_maja.yaml` (chart:
+# runner.datasetFile). The component picks are NOT here — they live in the dataset
+# descriptor. `output` (and the TiTiler endpoint for display) are supplied by the
+# deployment. Time-stacking the scenes into a 3D cube is a deferred follow-up; this
+# arm is the 2D per-component base case.
+id: example-sentinel2-l2a-maja-geozarr
+dataset: example-sentinel2-l2a-maja
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # Zarr v3 sharding is the object-grouping lever (chunk = addressable unit,
+  # shard = stored object); settled on real MAJA granularity by the
+  # parameter-discovery notebook before being codified.
+  chunk_shape: [1024, 1024]
+  shard_shape: [2048, 2048]
+  codec: zstd
+  multiscale_levels: 0
+  scope: product-set     # product (one scene) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1
+    display: 1
+  # GeoZarr display is served by a multidim/xarray TiTiler surface, not the COG
+  # endpoints; `display_titiler_path` selects that router (deploy-specific).
+  display_titiler_path: md
