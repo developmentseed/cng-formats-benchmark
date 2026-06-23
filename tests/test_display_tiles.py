@@ -102,3 +102,18 @@ def test_render_zarr_chunk_layout_writes_png(zarr_store, tmp_path):
     render_zarr_chunk_layout(zarr_store, tiles, str(out))
     assert out.exists()
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_ungeoreferenced_store_raises_clear_error(tmp_path):
+    """A store with no GeoTransform fails with a clear message, not an unpack error."""
+    pytest.importorskip("zarr")
+    pytest.importorskip("xarray")
+    import numpy as np
+
+    from cng_benchmark.formats.geozarr import _write_sharded
+
+    store = str(tmp_path / "plain.zarr")
+    data = (np.arange(512 * 512, dtype="uint16") % 1000).reshape(512, 512)
+    _write_sharded(store, data, chunk=(256, 256), shard=(512, 512), codec="none")
+    with pytest.raises(RuntimeError, match="not georeferenced for display"):
+        select_zarr_chunk_tiles(store)

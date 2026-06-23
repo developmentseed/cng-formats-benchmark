@@ -118,8 +118,17 @@ def _read_zarr_grid(store: str, role: str = "sink") -> _Grid:
     height, width = int(arr.shape[-2]), int(arr.shape[-1])
     block_h, block_w = int(arr.chunks[-2]), int(arr.chunks[-1])
     wkt = ref.attrs.get("crs_wkt") or ref.attrs.get("spatial_ref") or ""
-    crs = CRS.from_wkt(wkt) if wkt else None
     gt = [float(v) for v in str(ref.attrs.get("GeoTransform", "")).split()]
+    # Tile selection has to project the store into WebMercator, so both the CRS
+    # and a 6-value GDAL geotransform must be present; fail clearly if not (an
+    # ungeoreferenced store has no map tiles to time).
+    if not wkt or len(gt) != 6:
+        raise RuntimeError(
+            f"GeoZarr store {store!r} is not georeferenced for display "
+            f"(crs_wkt={'set' if wkt else 'missing'}, GeoTransform has "
+            f"{len(gt)} of 6 values); cannot select map tiles"
+        )
+    crs = CRS.from_wkt(wkt)
     # The adapter writes GeoTransform as c a b f d e (GDAL order).
     c, a, b, f, d, e = gt
     transform = Affine(a, b, c, d, e, f)

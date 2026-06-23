@@ -149,12 +149,14 @@ def _write_sharded(
 ) -> None:
     """Write a 2D array to ``store`` as a sharded GeoZarr v3 store.
 
-    The base array is written under :data:`DATA_VAR`; any coarsened pyramid levels
-    are written as ``data/<level>`` group arrays with a ``multiscales`` attribute
-    on the root, following the Zarr-v3 multiscale convention. CRS and the GDAL
-    geotransform travel in a CF ``spatial_ref`` grid-mapping variable so a reader
-    (rioxarray, GDAL, titiler-xarray) can georeference the array. Pure
-    ``xarray`` + ``zarr`` + ``numpy`` — no rioxarray — so it is CI-testable.
+    With no pyramid (``multiscale_levels <= 0``) the array is written under
+    :data:`DATA_VAR` at the store root. With a pyramid, each level is its own
+    integer-named group holding the array (``<level>/{DATA_VAR}``, finest at
+    ``0``), with a ``multiscales`` attribute on the root listing the level paths.
+    CRS and the GDAL geotransform travel in a CF ``spatial_ref`` grid-mapping
+    variable so a reader (rioxarray, GDAL, titiler-xarray) can georeference the
+    array. Pure ``xarray`` + ``zarr`` + ``numpy`` — no rioxarray — so it is
+    CI-testable.
     """
     import xarray as xr
 
@@ -207,17 +209,26 @@ def _write_sharded(
 
 
 def _shard_data_files(store: str) -> list[str]:
-    """Return the store's shard *data* file paths (chunk data under ``c/``).
+    """Return the data array's shard object paths (its chunk data under ``c/``).
 
-    Excludes ``zarr.json`` metadata, which is tiny and not the bytes the storage
-    tier judges. Zarr v3 lays chunk/shard data out under ``<array>/c/...``.
+    Zarr v3 lays an array's chunk/shard data out under ``<array>/c/...``. Only the
+    main :data:`DATA_VAR` array's shards are the tier-judged objects, so this keeps
+    files under ``.../{DATA_VAR}/c/`` — matching both the root array
+    (``{DATA_VAR}/c/...``) and each multiscale level (``<level>/{DATA_VAR}/c/...``)
+    — and excludes ``zarr.json`` metadata and the scalar ``spatial_ref``
+    grid-mapping variable, which would otherwise skew the size profile and
+    ``shard_count``.
     """
+    marker = f"/{DATA_VAR}/c/"
     files: list[str] = []
     for root, _dirs, names in os.walk(store):
         for n in names:
             if n == "zarr.json":
                 continue
-            files.append(os.path.join(root, n))
+            path = os.path.join(root, n)
+            rel = "/" + os.path.relpath(path, store).replace(os.sep, "/")
+            if marker in rel:
+                files.append(path)
     return files
 
 
