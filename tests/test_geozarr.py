@@ -32,11 +32,14 @@ def _store(tmp_path, name="g.zarr", **kw):
 
 
 def test_spatial_pair_normalises_shapes():
-    # swept list of shapes -> first; 3D -> trailing two; 2D -> as is; fallback.
+    # scalar -> square; swept list of shapes -> first; 3D -> trailing two;
+    # 2D -> as is; fallback for empty/None.
+    assert _spatial_pair(1024, (9, 9)) == (1024, 1024)
     assert _spatial_pair([[1, 2048, 2048], [1, 1024, 1024]], (9, 9)) == (2048, 2048)
     assert _spatial_pair([1, 2048, 1024], (9, 9)) == (2048, 1024)
     assert _spatial_pair([256, 512], (9, 9)) == (256, 512)
     assert _spatial_pair(None, (9, 9)) == (9, 9)
+    assert _spatial_pair([], (9, 9)) == (9, 9)
 
 
 def test_fit_shard_aligns_to_chunk_multiple_and_clamps():

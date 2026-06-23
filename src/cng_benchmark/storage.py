@@ -410,8 +410,17 @@ def upload_tree(local_dir: str, uri: str, role: str = "sink") -> None:
     single file, so the runner publishes it as a tree: each file is uploaded under
     ``uri`` at its path relative to ``local_dir`` (POSIX-joined for S3, a recursive
     copy locally). ``uri`` is treated as a prefix/directory, not an object key.
+
+    The destination prefix is cleared first, so re-publishing to a reused store
+    path (the runner's deterministic ``.../<format>/<basename>``) cannot leave
+    stale shard objects from a previous run alongside the new ones — which would
+    make the published store inconsistent with what was just produced.
     """
     src = Path(local_dir)
+    if not src.exists():
+        raise FileNotFoundError(f"no such directory: {local_dir}")
+    if not src.is_dir():
+        raise NotADirectoryError(f"not a directory: {local_dir}")
     files = sorted(p for p in src.rglob("*") if p.is_file())
     if not files:
         raise ValueError(f"no files to upload under {local_dir}")
@@ -419,17 +428,35 @@ def upload_tree(local_dir: str, uri: str, role: str = "sink") -> None:
         loc = _parse_s3(uri)
         base = loc.key.rstrip("/")
         client = _s3_client(role)
+        _clear_s3_prefix(client, loc.bucket, base)
         for p in files:
             rel = p.relative_to(src).as_posix()
             key = f"{base}/{rel}" if base else rel
             client.upload_file(str(p), loc.bucket, key)
         return
     dest = _local_path(uri)
+    if dest.exists():
+        shutil.rmtree(dest)
     for p in files:
         rel = p.relative_to(src)
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(p, target)
+
+
+def _clear_s3_prefix(client, bucket: str, base: str) -> None:
+    """Delete every object under ``base/`` in ``bucket`` (a store's own prefix)."""
+    prefix = f"{base}/" if base else ""
+    paginator = client.get_paginator("list_objects_v2")
+    batch: list[dict] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            batch.append({"Key": obj["Key"]})
+            if len(batch) == 1000:  # S3 delete_objects caps at 1000 keys
+                client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+                batch = []
+    if batch:
+        client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
 
 
 def read_bytes(uri: str, role: str = "sink") -> bytes:

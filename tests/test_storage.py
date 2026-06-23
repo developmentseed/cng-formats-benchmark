@@ -153,6 +153,43 @@ def test_upload_tree_empty_dir_raises(tmp_path):
         storage.upload_tree(str(empty), str(tmp_path / "out"))
 
 
+def test_upload_tree_missing_dir_raises_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        storage.upload_tree(str(tmp_path / "nope"), str(tmp_path / "out"))
+
+
+def test_upload_tree_local_clears_stale_destination(tmp_path):
+    src = tmp_path / "store.zarr"
+    (src / "c").mkdir(parents=True)
+    (src / "zarr.json").write_bytes(b"{}")
+    (src / "c" / "0").write_bytes(b"shard")
+    dest = tmp_path / "out"
+    storage.upload_tree(str(src), str(dest))
+    # A stale object from a previous run sitting under the reused prefix.
+    (dest / "c" / "stale").write_bytes(b"old")
+    storage.upload_tree(str(src), str(dest))
+    assert not (dest / "c" / "stale").exists()
+    assert (dest / "c" / "0").read_bytes() == b"shard"
+
+
+def test_upload_tree_s3_clears_stale_destination(s3_bucket):
+    import tempfile
+    from pathlib import Path
+
+    uri = f"s3://{s3_bucket}/objects/store.zarr"
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "store.zarr"
+        (root / "c").mkdir(parents=True)
+        (root / "zarr.json").write_bytes(b"meta")
+        (root / "c" / "0").write_bytes(b"shard")
+        storage.upload_tree(str(root), uri)
+        storage.write_bytes(f"{uri}/c/stale", b"old")  # leftover from a prior run
+        storage.upload_tree(str(root), uri)
+
+    keys = {u.rsplit("/", 1)[-1] for u in storage.list_uris(f"{uri}/", role="sink")}
+    assert "stale" not in keys
+
+
 def test_upload_tree_s3_preserves_paths(s3_bucket):
     import tempfile
     from pathlib import Path

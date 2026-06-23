@@ -58,11 +58,14 @@ class GeoZarrParams(BaseModel):
 def _spatial_pair(shape: Any, default: tuple[int, int]) -> tuple[int, int]:
     """Normalise a config shape to a spatial ``(y, x)`` pair.
 
-    Tolerates a swept *list of shapes* (takes the first), a 3D ``[t, y, x]`` shape
-    (takes the trailing two), and a 2D ``[y, x]`` shape; falls back to ``default``.
+    Tolerates a scalar ``1024`` (square, like COG's ``block_size``), a swept *list
+    of shapes* (takes the first), a 3D ``[t, y, x]`` shape (takes the trailing
+    two), and a 2D ``[y, x]`` shape; falls back to ``default``.
     """
-    if not shape:
+    if shape is None or shape == []:
         return default
+    if isinstance(shape, int | float):
+        return (int(shape), int(shape))
     if isinstance(shape[0], list | tuple):
         shape = shape[0]
     vals = [int(v) for v in shape]
