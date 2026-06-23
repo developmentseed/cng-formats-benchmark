@@ -1,0 +1,39 @@
+# Example benchmark arm: SWOT L2 HR LakeSP Prior -> GeoParquet (milestone SWOT-B).
+#
+# The cross-mission extensibility proof: a vector arm that reuses the runner end
+# to end with only a new reader (`swot-lakesp-prior`) and the GeoParquet adapter.
+# Each pass's shapefile is converted to one GeoParquet file; the object-grouping
+# lever is the row-group size + spatial partitioning. The `read` metric is a
+# bbox/row-group spatial query (partial access), NOT a raster window, and there is
+# NO `display` metric (a vector table is not a TiTiler raster tile). Profiles the
+# per-pass object-size distribution + a set-level roll-up.
+#
+# Run with `--dataset configs/datasets/example_swot_lakesp_prior.yaml` (chart:
+# runner.datasetFile). `output` is supplied by the deployment.
+id: example-swot-lakesp-geoparquet
+dataset: example-swot-lakesp-prior
+formats:
+  - geoparquet
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # GeoParquet row groups are the object-grouping lever (the addressable unit a
+  # bbox query fetches); spatial partitioning keeps each group's covering bbox
+  # tight. The passes are tiny (7 KB–37 MB), so per pass they sit below Tier 2 —
+  # the lever decides whether a useful grouping clears the floor.
+  row_group_rows: 50000
+  spatial_partitioning: true
+  compression: zstd
+  scope: product-set     # product (one pass) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1

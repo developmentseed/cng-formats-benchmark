@@ -31,7 +31,11 @@ from cng_benchmark.formats.base import FormatAdapter, ObjectKind
 from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import measure_display
 from cng_benchmark.metrics.objects import profile_object_sizes
-from cng_benchmark.metrics.read import measure_read, measure_zarr_read
+from cng_benchmark.metrics.read import (
+    measure_read,
+    measure_vector_read,
+    measure_zarr_read,
+)
 from cng_benchmark.metrics.write import measure_write
 from cng_benchmark.models import BenchmarkRun, MetricResult, ObjectLayout
 from cng_benchmark.registry import FORMATS
@@ -72,14 +76,17 @@ def _remove_target(local_target: str) -> None:
 
 
 def _measure_object_read(adapter: FormatAdapter, object_uri: str) -> list[MetricResult]:
-    """Read windows back from the produced object, per its object kind.
+    """Read part of the produced object back, per its object kind.
 
     A zarr store is read zarr-natively over fsspec (GDAL cannot read the
-    ``sharding_indexed`` codec); a raster file is read with rasterio under the
-    sink role's ``/vsis3`` session.
+    ``sharding_indexed`` codec); a GeoParquet file is read with a bbox/row-group
+    spatial query over fsspec; a raster file is read window-by-window with
+    rasterio under the sink role's ``/vsis3`` session.
     """
     if adapter.object_kind is ObjectKind.ZARR_STORE:
         return measure_zarr_read(object_uri, role="sink")
+    if adapter.object_kind is ObjectKind.VECTOR_FILE:
+        return measure_vector_read(object_uri, role="sink")
     with gdal_session("sink"):
         return measure_read(object_uri)
 

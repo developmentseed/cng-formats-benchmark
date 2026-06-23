@@ -5,7 +5,13 @@ from datetime import UTC, datetime
 
 from cng_benchmark.config import load_benchmark_config, tier_policy_from_config
 from cng_benchmark.metrics.objects import profile_object_sizes
-from cng_benchmark.models import BenchmarkRun, CogLayout, GeoZarrLayout, MetricResult
+from cng_benchmark.models import (
+    BenchmarkRun,
+    CogLayout,
+    GeoParquetLayout,
+    GeoZarrLayout,
+    MetricResult,
+)
 from cng_benchmark.report import (
     RESULT_FILENAME,
     SUMMARY_FILENAME,
@@ -78,6 +84,29 @@ def test_summary_renders_geozarr_chunk_shard_layout():
     assert "| 512×512 | 1024×1024 | 4 | zstd | 1 | 4 |" in md
     # No COG-only table for a GeoZarr run.
     assert "## Tiling layout" not in md
+
+
+def test_summary_renders_geoparquet_row_group_layout():
+    run = _sample_run()
+    run.format_id = "geoparquet"
+    run.object_layouts = [
+        GeoParquetLayout(
+            name="LakeSP_048",
+            size_bytes=300,
+            geometry_column="geometry",
+            num_rows=200,
+            num_row_groups=4,
+            row_group_rows=50,
+            has_bbox_covering=True,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "## Row-group layout" in md
+    assert "Bbox covering:" in md
+    assert "| LakeSP_048 | geometry | 200 | 4 | 50 | yes |" in md
+    # No raster-only tables for a GeoParquet run.
+    assert "## Tiling layout" not in md
+    assert "## Chunk/shard layout" not in md
 
 
 def test_write_artifacts_writes_both_files(tmp_path):

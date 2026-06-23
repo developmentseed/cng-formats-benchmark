@@ -28,6 +28,7 @@ def test_builtin_readers_registered():
         "sentinel2-maja",
         "sentinel1-otb-rtc",
         "swot-raster100m",
+        "swot-lakesp-prior",
     ):
         assert name in DATASETS
 
@@ -285,6 +286,71 @@ def test_swot_enumerates_granules_from_local_files(tmp_path):
     # Prefix + limit bound a granule-set enumeration (path-prefix match).
     bounded = ds.products(prefix="SWOT_cycle048_UTM32N", limit=1)
     assert [p.id for p in bounded] == ["SWOT_cycle048_UTM32N"]
+
+
+# --- SWOT LakeSP Prior (zipped-shapefile vector granule) -------------------
+
+
+# A captured listing of a SWOT LakeSP Prior zip: one shapefile (its four members)
+# plus an XML metadata sidecar.
+LAKESP_MEMBERS = [
+    "SWOT_L2_HR_LakeSP_Prior_048_EU_001.shp",
+    "SWOT_L2_HR_LakeSP_Prior_048_EU_001.shx",
+    "SWOT_L2_HR_LakeSP_Prior_048_EU_001.dbf",
+    "SWOT_L2_HR_LakeSP_Prior_048_EU_001.prj",
+    "SWOT_L2_HR_LakeSP_Prior_048_EU_001.shp.xml",
+]
+
+
+def _lakesp(**options):
+    cfg = _dataset_config(
+        reader="swot-lakesp-prior",
+        source="s3://bucket/LakeSP_Prior_Nom_France/",
+        options=options,
+    )
+    return build_dataset(cfg)
+
+
+def test_lakesp_selects_the_shapefile_layer():
+    ds = _lakesp()
+    components = ds._select_members(
+        LAKESP_MEMBERS, "s3://bucket/LakeSP_Prior_Nom_France/pass048.zip"
+    )
+    # One component per pass: the .shp member, named for the layer; the sidecars
+    # and the .shp.xml metadata are never picked.
+    assert [c.name for c in components] == ["SWOT_L2_HR_LakeSP_Prior_048_EU_001"]
+    # The shapefile is read on the fly via /vsizip//vsis3 — the OGR driver finds
+    # the .shx/.dbf/.prj sidecars inside the same archive.
+    assert components[0].uri == (
+        "/vsizip//vsis3/bucket/LakeSP_Prior_Nom_France/pass048.zip/"
+        "SWOT_L2_HR_LakeSP_Prior_048_EU_001.shp"
+    )
+
+
+def test_lakesp_rejects_unknown_option():
+    with pytest.raises(ValidationError):
+        build_dataset(_dataset_config(reader="swot-lakesp-prior", options={"bogus": 1}))
+
+
+def test_lakesp_enumerates_passes_from_local_zips(tmp_path):
+    import zipfile
+
+    root = tmp_path / "LakeSP_Prior_Nom_France"
+    root.mkdir()
+    for pass_id in ("SWOT_pass048", "SWOT_pass049"):
+        with zipfile.ZipFile(root / f"{pass_id}.zip", "w") as zf:
+            for member in LAKESP_MEMBERS:
+                zf.writestr(member.replace("048", pass_id[-3:]), b"")
+
+    cfg = _dataset_config(
+        reader="swot-lakesp-prior",
+        source=str(root),
+    )
+    products = build_dataset(cfg).products()
+    assert [p.id for p in products] == ["SWOT_pass048", "SWOT_pass049"]
+    assert len(products[0].components) == 1
+    assert products[0].components[0].uri.startswith("/vsizip/")
+    assert products[0].components[0].uri.endswith(".shp")
 
 
 def test_zip_delivery_enumerates_scenes_from_local_zips(tmp_path):

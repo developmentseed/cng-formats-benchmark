@@ -85,11 +85,14 @@ def _render_object_layouts(layouts: list) -> list[str]:
     """
     cog = [ly for ly in layouts if ly.kind == "cog"]
     geozarr = [ly for ly in layouts if ly.kind == "geozarr"]
+    geoparquet = [ly for ly in layouts if ly.kind == "geoparquet"]
     lines: list[str] = []
     if cog:
         lines += _render_tiling_layout(cog)
     if geozarr:
         lines += _render_chunk_shard_layout(geozarr)
+    if geoparquet:
+        lines += _render_row_group_layout(geoparquet)
     return lines
 
 
@@ -148,6 +151,34 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
     return lines
 
 
+def _render_row_group_layout(layouts: list) -> list[str]:
+    """Render the GeoParquet per-file row-group layout: a coverage line plus a table.
+
+    Leads with whether the bbox covering is present (whether a bbox query can push
+    down to row groups at all), then one row per file (geometry column, feature
+    count, row groups, rows/group) — the GeoParquet answer to the same
+    partial-access question COG answers with internal tiling.
+    """
+    with_bbox = sum(1 for ly in layouts if ly.has_bbox_covering)
+    lines = [
+        "",
+        "## Row-group layout",
+        "",
+        f"- **Bbox covering:** {with_bbox}/{len(layouts)} file(s) "
+        "(spatial pushdown to row groups)",
+        "",
+        "| Object | Geometry | Features | Row groups | Rows/group | Bbox covering |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for ly in layouts:
+        lines.append(
+            f"| {ly.name} | {ly.geometry_column} | {ly.num_rows} | "
+            f"{ly.num_row_groups} | {ly.row_group_rows} | "
+            f"{'yes' if ly.has_bbox_covering else 'no'} |"
+        )
+    return lines
+
+
 def write_artifacts(run: BenchmarkRun, output_uri: str) -> dict[str, str]:
     """Write ``result.json`` and ``summary.md`` under ``output_uri``.
 
@@ -186,11 +217,16 @@ def render_product_set_summary(result: ProductSetResult) -> str:
         if not layouts:
             return "-"
         # A format-agnostic structural digest: COG reports its range-read-friendly
-        # (tiled) fraction; GeoZarr has no striped/tiled axis, so it reports its
-        # shard-object count instead.
+        # (tiled) fraction; GeoZarr reports its shard-object count; GeoParquet, the
+        # row-group count (its addressable units) — each format's own answer to the
+        # partial-access question.
         cog = [ly for ly in layouts if ly.kind == "cog"]
         if cog:
             return f"{sum(1 for ly in cog if ly.is_tiled)}/{len(cog)} tiled"
+        geoparquet = [ly for ly in layouts if ly.kind == "geoparquet"]
+        if geoparquet:
+            groups = sum(ly.num_row_groups for ly in geoparquet)
+            return f"{groups} row groups"
         shards = sum(getattr(ly, "shard_count", 0) for ly in layouts)
         return f"{shards} shards"
 

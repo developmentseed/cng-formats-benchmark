@@ -19,9 +19,9 @@ def test_grouping_lever_describes_the_format(name):
     assert EXPECTED_LEVERS[name] in adapter.describe_grouping_lever()
 
 
-# COG (test_cog.py) and GeoZarr (test_geozarr.py) are implemented; the rest are
-# stubs until their PRs.
-STUB_FORMATS = sorted(set(EXPECTED_LEVERS) - {"cog", "geozarr"})
+# COG (test_cog.py), GeoZarr (test_geozarr.py) and GeoParquet (test_geoparquet.py)
+# are implemented; the rest are stubs until their PRs.
+STUB_FORMATS = sorted(set(EXPECTED_LEVERS) - {"cog", "geozarr", "geoparquet"})
 
 
 @pytest.mark.parametrize("name", STUB_FORMATS)
@@ -39,3 +39,11 @@ def test_geozarr_is_a_zarr_store_adapter():
     adapter = FORMATS.get("geozarr")()
     assert adapter.object_kind is ObjectKind.ZARR_STORE
     assert adapter.target_basename() == "geozarr.zarr"
+
+
+def test_geoparquet_is_a_vector_file_adapter():
+    from cng_benchmark.formats.base import ObjectKind
+
+    adapter = FORMATS.get("geoparquet")()
+    assert adapter.object_kind is ObjectKind.VECTOR_FILE
+    assert adapter.target_basename() == "geoparquet.parquet"

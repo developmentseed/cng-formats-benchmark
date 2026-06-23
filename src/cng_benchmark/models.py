@@ -116,9 +116,31 @@ class GeoZarrLayout(ObjectLayout):
     shard_count: int
 
 
+class GeoParquetLayout(ObjectLayout):
+    """A GeoParquet file's row-group layout.
+
+    The addressable unit is the **row group**: a reader with a bbox predicate
+    fetches only the row groups whose covering bbox overlaps the query, so the row
+    group is the vector analogue of a COG block or a Zarr chunk. ``row_group_rows``
+    is the largest group's row count (the configured grouping lever),
+    ``num_row_groups`` how many the file holds, and ``has_bbox_covering`` whether
+    the GeoParquet 1.1 bbox covering column is present — the structure that lets a
+    bbox query push down to row groups rather than scan the whole file.
+    """
+
+    kind: Literal["geoparquet"] = "geoparquet"
+    geometry_column: str
+    num_rows: int
+    num_row_groups: int
+    row_group_rows: int
+    has_bbox_covering: bool
+
+
 #: Discriminated union over the per-format layouts, so a ``BenchmarkRun`` keeps
 #: each layout's subclass fields through pydantic validation and JSON round-trips.
-AnyObjectLayout = Annotated[CogLayout | GeoZarrLayout, Field(discriminator="kind")]
+AnyObjectLayout = Annotated[
+    CogLayout | GeoZarrLayout | GeoParquetLayout, Field(discriminator="kind")
+]
 
 
 class BenchmarkRun(BaseModel):
