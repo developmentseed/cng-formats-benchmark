@@ -96,8 +96,10 @@ titiler:
   replicas: 1
 
 # Second tile-server surface for the GeoZarr display metric (xarray/Zarr v3).
-# Off by default; enable for runs whose benchmark is `geozarr` + `display`, and set
-# the benchmark's params.display_titiler_path to match this image's tiler router.
+# Off by default; enable for runs whose benchmark is `geozarr` + `display`. This
+# image serves its tiler at the root (`/info`, `/tiles/...`), so leave the
+# benchmark's params.display_titiler_path empty (the default); set it only if a
+# different image mounts the tiler router under a sub-path.
 titilerXarray:
   enabled: false
   image: ghcr.io/developmentseed/titiler-xarray:latest

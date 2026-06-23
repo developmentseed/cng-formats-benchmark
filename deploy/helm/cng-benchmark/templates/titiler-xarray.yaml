@@ -3,8 +3,9 @@
 # metric. The COG TiTiler (titiler.yaml) cannot serve a sharded Zarr store — GDAL
 # rejects the sharding_indexed codec — so GeoZarr display is served here, by a
 # titiler-xarray image that reads the store with zarr-python over fsspec. Off by
-# default; enable it for runs whose benchmark includes `geozarr` + `display`, and
-# point the benchmark's `params.display_titiler_path` at this router.
+# default; enable it for runs whose benchmark includes `geozarr` + `display`. This
+# image serves its tiler at the root, so the benchmark's
+# `params.display_titiler_path` stays empty (the default).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
