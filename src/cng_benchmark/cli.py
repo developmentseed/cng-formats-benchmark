@@ -37,6 +37,35 @@ def version() -> None:
     typer.echo(__version__)
 
 
+@app.command(name="check-drivers")
+def check_drivers() -> None:
+    """Verify the runner image provides every arm's GDAL/OGR drivers + libraries.
+
+    Checks the per-arm capability contract in :mod:`cng_benchmark.drivers` (the
+    netCDF GDAL driver for SWOT-A, the ESRI Shapefile OGR driver for the vector
+    arm, copclib/laspy for COPC, …) and exits non-zero if any is missing. The
+    runner image build runs this, so a dropped driver fails the *build* rather
+    than a production run.
+    """
+    from cng_benchmark.drivers import check_all
+
+    results = check_all()
+    missing = [cap for cap, present, _ in results if not present]
+    for cap, present, detail in results:
+        mark = "ok  " if present else "MISSING"
+        typer.echo(
+            f"[{mark}] {cap.arm:<16} {cap.kind:<12} {cap.name:<16} "
+            f"via {detail} — {cap.why}"
+        )
+    if missing:
+        names = ", ".join(f"{c.name} ({c.arm})" for c in missing)
+        typer.echo(
+            f"\n{len(missing)} required capability(ies) missing: {names}", err=True
+        )
+        raise typer.Exit(1)
+    typer.echo(f"\nAll {len(results)} runner-image capabilities present.")
+
+
 def _load_object_sizes(path: str) -> list[int]:
     """Read object sizes from a JSON listing.
 

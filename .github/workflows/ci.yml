@@ -51,6 +51,12 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Smoke-test the runner entry point
         run: docker run --rm cng-benchmark-runner:ci version
+      - name: Assert the per-arm GDAL/OGR drivers + libraries are in the image
+        # The image build already runs this (Dockerfile.runner), so a missing
+        # driver fails the build above; this is the explicit, named signal — e.g.
+        # the GDAL netCDF driver (SWOT-A) and the ESRI Shapefile OGR driver (vector
+        # arm) must be present, not incidentally bundled and silently droppable.
+        run: docker run --rm cng-benchmark-runner:ci check-drivers
 
   # Deployability proves the stack STANDS UP and runs end-to-end against a tiny
   # synthetic fixture in a disposable MinIO — never a benchmark on real data.
