@@ -33,5 +33,12 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN uv sync --no-dev --extra s3 --extra cog --extra geozarr --extra geoparquet --extra copc
 
+# Several per-arm capabilities are bundled, unpinned, inside a wheel — notably the
+# GDAL netCDF driver (in rasterio's wheel, for the SWOT Raster100m arm) and the
+# ESRI Shapefile OGR driver (in pyogrio's *own* bundled GDAL, for the vector arm).
+# Assert the full per-arm capability contract (cng_benchmark/drivers.py) at build
+# time so a dropped driver fails THIS build, not a production run on the cluster.
+RUN uv run cng-benchmark check-drivers
+
 ENTRYPOINT ["uv", "run", "cng-benchmark"]
 CMD ["--help"]
