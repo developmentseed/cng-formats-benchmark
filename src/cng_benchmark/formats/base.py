@@ -26,17 +26,20 @@ class ObjectKind(StrEnum):
     A COG is a single ``RASTER_FILE`` (one openable raster); a GeoZarr array is a
     ``ZARR_STORE`` (a directory tree of shard objects + metadata); a GeoParquet
     file is a single ``VECTOR_FILE`` (one openable table whose row groups are the
-    addressable byte ranges). The runner branches on this for the few things that
-    genuinely differ per kind — output naming, upload (single file vs tree), the
-    read collector (rasterio window vs zarr-native chunk vs vector bbox query) and
-    the display surface — while the conversion contract itself is shared. It
-    describes the *materialised object*; a future time-stacked cube is a separate
-    concern layered on top, not a change to this.
+    addressable byte ranges); a COPC file is a single ``POINT_CLOUD_FILE`` (one
+    openable LAZ whose octree nodes are the addressable byte ranges). The runner
+    branches on this for the few things that genuinely differ per kind — output
+    naming, upload (single file vs tree), the read collector (rasterio window vs
+    zarr-native chunk vs vector bbox query vs octree-node fetch) and the display
+    surface — while the conversion contract itself is shared. It describes the
+    *materialised object*; a future time-stacked cube is a separate concern layered
+    on top, not a change to this.
     """
 
     RASTER_FILE = "raster_file"
     ZARR_STORE = "zarr_store"
     VECTOR_FILE = "vector_file"
+    POINT_CLOUD_FILE = "point_cloud_file"
 
 
 class FormatAdapter(ABC):

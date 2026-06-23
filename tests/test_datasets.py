@@ -8,6 +8,7 @@ from cng_benchmark.datasets import Product, SourceObject, build_dataset
 from cng_benchmark.datasets.sentinel2 import Sentinel2MajaDataset
 from cng_benchmark.datasets.single_object import SingleObjectDataset
 from cng_benchmark.datasets.swot import DEFAULT_VARIABLES, SwotRaster100mDataset
+from cng_benchmark.datasets.swot_pixc import DEFAULT_GROUPS, SwotPixcDataset
 from cng_benchmark.registry import DATASETS
 
 
@@ -29,6 +30,7 @@ def test_builtin_readers_registered():
         "sentinel1-otb-rtc",
         "swot-raster100m",
         "swot-lakesp-prior",
+        "swot-pixc",
     ):
         assert name in DATASETS
 
@@ -351,6 +353,60 @@ def test_lakesp_enumerates_passes_from_local_zips(tmp_path):
     assert len(products[0].components) == 1
     assert products[0].components[0].uri.startswith("/vsizip/")
     assert products[0].components[0].uri.endswith(".shp")
+
+
+# --- SWOT PIXC (netCDF point-cloud granule) --------------------------------
+
+
+def _pixc(**options) -> SwotPixcDataset:
+    cfg = _dataset_config(
+        reader="swot-pixc",
+        source="s3://bucket/PIXC_Nom_France/",
+        options=options,
+    )
+    return build_dataset(cfg)
+
+
+def test_pixc_defaults_to_pixel_cloud_group():
+    ds = _pixc()
+    granule = "s3://bucket/PIXC_Nom_France/SWOT_L2_HR_PIXC_048.nc"
+    components = ds._select_components(granule)
+    assert [c.name for c in components] == DEFAULT_GROUPS
+    # The group is read in place via the PIXC point-source scheme, not extracted;
+    # the original granule URI is kept intact for the xarray/fsspec loader.
+    assert components[0].uri == (
+        "PIXC:s3://bucket/PIXC_Nom_France/SWOT_L2_HR_PIXC_048.nc::pixel_cloud"
+    )
+
+
+def test_pixc_selects_groups_in_configured_order():
+    ds = _pixc(groups=["pixel_cloud", "tvp"])
+    granule = "s3://bucket/PIXC_Nom_France/SWOT_L2_HR_PIXC_048.nc"
+    components = ds._select_components(granule)
+    assert [c.name for c in components] == ["pixel_cloud", "tvp"]
+
+
+def test_pixc_rejects_unknown_option():
+    with pytest.raises(ValidationError):
+        build_dataset(_dataset_config(reader="swot-pixc", options={"bogus": 1}))
+
+
+def test_pixc_enumerates_granules_from_local_files(tmp_path):
+    root = tmp_path / "PIXC_Nom_France"
+    root.mkdir()
+    for name in ("SWOT_L2_HR_PIXC_048_A", "SWOT_L2_HR_PIXC_048_B"):
+        (root / f"{name}.nc").write_bytes(b"")
+    (root / "manifest.json").write_bytes(b"{}")  # non-granule sibling ignored
+
+    cfg = _dataset_config(reader="swot-pixc", source=str(root))
+    products = build_dataset(cfg).products()
+    assert [p.id for p in products] == [
+        "SWOT_L2_HR_PIXC_048_A",
+        "SWOT_L2_HR_PIXC_048_B",
+    ]
+    assert [c.name for c in products[0].components] == ["pixel_cloud"]
+    uri = products[0].components[0].uri
+    assert uri.startswith("PIXC:") and uri.endswith(".nc::pixel_cloud")
 
 
 def test_zip_delivery_enumerates_scenes_from_local_zips(tmp_path):

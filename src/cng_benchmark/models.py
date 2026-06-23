@@ -136,10 +136,31 @@ class GeoParquetLayout(ObjectLayout):
     has_bbox_covering: bool
 
 
+class CopcLayout(ObjectLayout):
+    """A COPC file's octree-node layout.
+
+    The addressable unit is the **octree node**: a reader with a bbox/resolution
+    predicate fetches only the nodes that overlap, so the node is the point-cloud
+    analogue of a COG block or a Zarr chunk. ``num_nodes`` is how many nodes the
+    octree holds, ``max_depth`` its depth (the octree-depth lever), ``point_count``
+    the total points, and ``points_per_node`` the largest node's point count — the
+    realised per-node point budget (the span lever). A COPC is a single stored
+    object; its size already clears the cold tiers, so the lever is about
+    preserving range-addressable partial access, not reaching a size floor.
+    """
+
+    kind: Literal["copc"] = "copc"
+    num_nodes: int
+    max_depth: int
+    point_count: int
+    points_per_node: int
+
+
 #: Discriminated union over the per-format layouts, so a ``BenchmarkRun`` keeps
 #: each layout's subclass fields through pydantic validation and JSON round-trips.
 AnyObjectLayout = Annotated[
-    CogLayout | GeoZarrLayout | GeoParquetLayout, Field(discriminator="kind")
+    CogLayout | GeoZarrLayout | GeoParquetLayout | CopcLayout,
+    Field(discriminator="kind"),
 ]
 
 

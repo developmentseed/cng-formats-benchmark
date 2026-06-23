@@ -8,6 +8,7 @@ from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.models import (
     BenchmarkRun,
     CogLayout,
+    CopcLayout,
     GeoParquetLayout,
     GeoZarrLayout,
     MetricResult,
@@ -107,6 +108,28 @@ def test_summary_renders_geoparquet_row_group_layout():
     # No raster-only tables for a GeoParquet run.
     assert "## Tiling layout" not in md
     assert "## Chunk/shard layout" not in md
+
+
+def test_summary_renders_copc_octree_layout():
+    run = _sample_run()
+    run.format_id = "copc"
+    run.object_layouts = [
+        CopcLayout(
+            name="pixel_cloud",
+            size_bytes=400,
+            num_nodes=31,
+            max_depth=4,
+            point_count=40000,
+            points_per_node=2506,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "## Octree layout" in md
+    assert "Octree nodes:" in md
+    assert "| pixel_cloud | 31 | 4 | 40000 | 2506 |" in md
+    # No other-format tables for a COPC run.
+    assert "## Tiling layout" not in md
+    assert "## Row-group layout" not in md
 
 
 def test_write_artifacts_writes_both_files(tmp_path):

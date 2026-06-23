@@ -1,8 +1,9 @@
-"""Tests for the format adapter stubs."""
+"""Tests for the format adapter registry, levers, and object kinds."""
 
 import pytest
 
 import cng_benchmark.formats  # noqa: F401 — triggers adapter registration
+from cng_benchmark.formats.base import ObjectKind
 from cng_benchmark.registry import FORMATS
 
 EXPECTED_LEVERS = {
@@ -19,31 +20,19 @@ def test_grouping_lever_describes_the_format(name):
     assert EXPECTED_LEVERS[name] in adapter.describe_grouping_lever()
 
 
-# COG (test_cog.py), GeoZarr (test_geozarr.py) and GeoParquet (test_geoparquet.py)
-# are implemented; the rest are stubs until their PRs.
-STUB_FORMATS = sorted(set(EXPECTED_LEVERS) - {"cog", "geozarr", "geoparquet"})
+# Each adapter materialises a particular object kind, which the runner branches on
+# for upload, the read collector, and the display surface.
+EXPECTED_KINDS = {
+    "cog": (ObjectKind.RASTER_FILE, "cog.tif"),
+    "geozarr": (ObjectKind.ZARR_STORE, "geozarr.zarr"),
+    "geoparquet": (ObjectKind.VECTOR_FILE, "geoparquet.parquet"),
+    "copc": (ObjectKind.POINT_CLOUD_FILE, "copc.laz"),
+}
 
 
-@pytest.mark.parametrize("name", STUB_FORMATS)
-def test_convert_and_enumerate_not_implemented_yet(name):
+@pytest.mark.parametrize("name", sorted(EXPECTED_KINDS))
+def test_adapter_object_kind_and_basename(name):
+    kind, basename = EXPECTED_KINDS[name]
     adapter = FORMATS.get(name)()
-    with pytest.raises(NotImplementedError):
-        adapter.convert("src", "dst", {})
-    with pytest.raises(NotImplementedError):
-        adapter.enumerate_objects("dst")
-
-
-def test_geozarr_is_a_zarr_store_adapter():
-    from cng_benchmark.formats.base import ObjectKind
-
-    adapter = FORMATS.get("geozarr")()
-    assert adapter.object_kind is ObjectKind.ZARR_STORE
-    assert adapter.target_basename() == "geozarr.zarr"
-
-
-def test_geoparquet_is_a_vector_file_adapter():
-    from cng_benchmark.formats.base import ObjectKind
-
-    adapter = FORMATS.get("geoparquet")()
-    assert adapter.object_kind is ObjectKind.VECTOR_FILE
-    assert adapter.target_basename() == "geoparquet.parquet"
+    assert adapter.object_kind is kind
+    assert adapter.target_basename() == basename

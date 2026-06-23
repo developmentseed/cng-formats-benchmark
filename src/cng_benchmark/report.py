@@ -86,6 +86,7 @@ def _render_object_layouts(layouts: list) -> list[str]:
     cog = [ly for ly in layouts if ly.kind == "cog"]
     geozarr = [ly for ly in layouts if ly.kind == "geozarr"]
     geoparquet = [ly for ly in layouts if ly.kind == "geoparquet"]
+    copc = [ly for ly in layouts if ly.kind == "copc"]
     lines: list[str] = []
     if cog:
         lines += _render_tiling_layout(cog)
@@ -93,6 +94,8 @@ def _render_object_layouts(layouts: list) -> list[str]:
         lines += _render_chunk_shard_layout(geozarr)
     if geoparquet:
         lines += _render_row_group_layout(geoparquet)
+    if copc:
+        lines += _render_octree_layout(copc)
     return lines
 
 
@@ -179,6 +182,31 @@ def _render_row_group_layout(layouts: list) -> list[str]:
     return lines
 
 
+def _render_octree_layout(layouts: list) -> list[str]:
+    """Render the COPC per-file octree layout: a coverage line plus a table.
+
+    Leads with the total octree-node count (the range-addressable units), then one
+    row per file (node count, octree depth, total points, largest node) — the COPC
+    answer to the same partial-access question COG answers with internal tiling.
+    """
+    nodes = sum(ly.num_nodes for ly in layouts)
+    lines = [
+        "",
+        "## Octree layout",
+        "",
+        f"- **Octree nodes:** {nodes} across {len(layouts)} file(s)",
+        "",
+        "| Object | Nodes | Depth | Points | Points/node |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for ly in layouts:
+        lines.append(
+            f"| {ly.name} | {ly.num_nodes} | {ly.max_depth} | "
+            f"{ly.point_count} | {ly.points_per_node} |"
+        )
+    return lines
+
+
 def write_artifacts(run: BenchmarkRun, output_uri: str) -> dict[str, str]:
     """Write ``result.json`` and ``summary.md`` under ``output_uri``.
 
@@ -227,6 +255,9 @@ def render_product_set_summary(result: ProductSetResult) -> str:
         if geoparquet:
             groups = sum(ly.num_row_groups for ly in geoparquet)
             return f"{groups} row groups"
+        copc = [ly for ly in layouts if ly.kind == "copc"]
+        if copc:
+            return f"{sum(ly.num_nodes for ly in copc)} octree nodes"
         shards = sum(getattr(ly, "shard_count", 0) for ly in layouts)
         return f"{shards} shards"
 

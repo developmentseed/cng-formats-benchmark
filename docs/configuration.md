@@ -56,6 +56,7 @@ one registry line; the core config and runner are untouched.
 | `sentinel1-otb-rtc` | a `.zip`-per-scene S1Tiling (OTB) RTC gamma0 delivery under `source` | `polarizations` (VV/VH) |
 | `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`) |
 | `swot-lakesp-prior` | a `.zip`-per-pass shapefile delivery under `source` (SWOT L2 HR LakeSP Prior) | none (one `.shp` member = one component) |
+| `swot-pixc` | one netCDF point-cloud granule per file under `source` (SWOT L2 HR PIXC) | `groups` (netCDF groups read as points; default `pixel_cloud`) |
 
 ```yaml
 id: sentinel2-l2a-maja
@@ -87,6 +88,13 @@ shape as the S1/S2 readers, but each pass's zip holds an ESRI Shapefile: every
 `.shp` member becomes one component (one pass = one layer), read on the fly via
 `/vsizip//vsis3` (the OGR driver finds the `.shx`/`.dbf`/`.prj` sidecars inside
 the archive) and converted to a GeoParquet file by the GeoParquet adapter.
+
+The `swot-pixc` reader is the *point-cloud* arm — the same granule layout as
+`swot-raster100m`, but a component is a netCDF **group** read as points rather
+than a CF raster variable. Each selected `group` (default `pixel_cloud`) becomes
+one component, converted to a COPC file by the COPC adapter, whose point loader
+reads the group's lon/lat/height with xarray in place. The COPC adapter and this
+point-cloud path are reused by the CO3D CARS arm (tiled LAZ → COPC).
 
 ## Benchmark descriptor
 
@@ -134,6 +142,7 @@ name and reads what it needs, so adding a format never changes the schema:
 | `cog` | `block_size` (internal tiling), `compress` |
 | `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels`; `display_titiler_path` selects the multidim/xarray TiTiler router for display |
 | `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` |
+| `copc` | `span` (per-node voxel-grid edge — the per-node point budget ≈ `span**3`), `max_depth` (octree depth; `null` derives it from point density), `scale` (`null` derives LAS quantisation from the extent) |
 
 GeoZarr is a **per-component, 2D** adapter: each source raster becomes one sharded
 2D store (a directory of shard objects), the per-component analogue of the COG arm,
@@ -207,10 +216,13 @@ rasterio over `/vsis3` and served by TiTiler's `/cog` endpoints; a GeoZarr store
 is read zarr-natively over fsspec (GDAL cannot read the `sharding_indexed` codec)
 and served by a multidim/xarray TiTiler surface (`params.display_titiler_path`); a
 GeoParquet file is read with a bbox/row-group spatial query over fsspec (only the
-row groups whose covering bbox overlaps are fetched) and has **no `display`
-metric** — a vector table is not a TiTiler raster tile. All raster paths emit the
-same `read_*` / `display_*` names; the vector `read` swaps `read_window_count` for
-`read_query_count` and counts returned features rather than pixels.
+row groups whose covering bbox overlaps are fetched); a COPC file is read with an
+octree-node spatial query over fsspec (only the octree nodes that overlap the bbox
+are fetched). The vector and point-cloud arms have **no `display` metric** — a
+table or point cloud is not a TiTiler raster tile. All raster paths emit the same
+`read_*` / `display_*` names; the vector and point-cloud `read` swap
+`read_window_count` for `read_query_count` and count returned features / points
+rather than pixels.
 
 `read` throughput is **decoded** bytes/s (a fair relative cross-format number),
 not bytes over the wire; latency reflects the full range-request round-trip.
@@ -244,6 +256,9 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
   - `geoparquet` → a `GeoParquetLayout`: `geometry_column`, `num_rows`,
     `num_row_groups`, `row_group_rows` (the addressable unit a bbox query fetches),
     and `has_bbox_covering` (whether spatial pushdown to row groups is possible).
+  - `copc` → a `CopcLayout`: `num_nodes` (octree nodes — the addressable units),
+    `max_depth`, `point_count`, and `points_per_node` (the largest node, i.e. the
+    realised per-node point budget); `summary.md` renders an "Octree layout" table.
 
   Captured for every object (no tile server needed). The chunk-aware `display`
   metric also publishes a `display_chunk_layout.png` next to the sampled object

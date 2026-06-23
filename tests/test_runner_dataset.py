@@ -372,3 +372,96 @@ def test_vector_file_object_flows_through_per_component_path(tmp_path):
     assert "read_window_count" not in read_names
     # Published as a single file under each component dir, not a tree.
     assert (output / "objects" / "sceneZ" / "pass0" / "geoparquet.parquet").is_file()
+
+
+# --- point-cloud object kind flows through the per-component path -------------
+
+
+def _register_fake_copc():
+    """Register a point-cloud adapter that writes a tiny COPC per source.
+
+    Lets the runner's point-cloud branch (single-file target + publish, file-size
+    ``enumerate_objects``, a ``CopcLayout`` describer, the octree-node read
+    collector, file cleanup) be exercised with only copclib + laspy + numpy — no
+    netCDF source read.
+    """
+    import numpy as np
+
+    from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+    from cng_benchmark.formats.copc import _build_copc, describe_copc_layout
+    from cng_benchmark.registry import FORMATS
+
+    if "fake-copc" in FORMATS:
+        return
+
+    @FORMATS.register("fake-copc")
+    class _FakeCopcAdapter(FormatAdapter):
+        name = "fake-copc"
+        object_kind = ObjectKind.POINT_CLOUD_FILE
+
+        def target_basename(self):
+            return "copc.laz"
+
+        def convert(self, source, target, params):
+            rng = np.random.default_rng(0)
+            n = 40_000
+            _build_copc(
+                target,
+                rng.uniform(300000, 300500, n),
+                rng.uniform(4900000, 4900500, n),
+                rng.uniform(0, 100, n),
+                span=32,
+                max_depth=4,
+            )
+
+        def describe_grouping_lever(self):
+            return "COPC octree depth and per-node point budget"
+
+        def enumerate_objects(self, target):
+            import os
+
+            return [os.path.getsize(target)]
+
+        def describe_layout(self, target, *, name=None):
+            return [describe_copc_layout(target, name or self.name)]
+
+
+def test_point_cloud_object_flows_through_per_component_path(tmp_path):
+    pytest.importorskip("copclib")
+    pytest.importorskip("laspy")
+    # The runner reads every source through a GDAL session (rasterio) before the
+    # convert, regardless of object kind — like the other runner tests. The
+    # write/read logic itself is covered without rasterio in test_copc.py.
+    pytest.importorskip("rasterio")
+    _register_fake_copc()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(2):
+        (src / f"granule{i}.bin").write_bytes(b"x" * 1000)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["write", "object_size", "read"], {"scope": "product"}).model_copy(
+        update={"formats": ["fake-copc"]}
+    )
+    ds_cfg = DatasetConfig.model_validate(
+        {
+            "id": "pc",
+            "reader": "test-binfiles",
+            "source": str(src),
+            "baseline_format": "netcdf",
+            "target_formats": ["fake-copc"],
+        }
+    )
+    result = run_dataset_benchmark(cfg, ds_cfg, str(output))
+
+    run = result.per_product[0]
+    # One single-file object per component (2 granules).
+    assert run.object_profile.count == 2
+    assert [ly.kind for ly in run.object_layouts] == ["copc", "copc"]
+    # The COPC read metric ran (octree-node query, not a raster window).
+    read_names = {m.name for m in run.metrics}
+    assert "read_query_count" in read_names
+    assert "read_window_count" not in read_names
+    # Published as a single file under each component dir, not a tree.
+    assert (output / "objects" / "sceneZ" / "granule0" / "copc.laz").is_file()
