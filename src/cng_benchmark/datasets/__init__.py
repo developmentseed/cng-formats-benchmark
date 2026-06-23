@@ -17,9 +17,11 @@ from cng_benchmark.config import DatasetConfig
 
 # Import the built-in readers for their registration side effects.
 from cng_benchmark.datasets import (
+    granule,  # noqa: F401,E402
     sentinel1,  # noqa: F401,E402
     sentinel2,  # noqa: F401,E402
     single_object,  # noqa: F401,E402
+    swot,  # noqa: F401,E402
     zip_delivery,  # noqa: F401,E402
 )
 from cng_benchmark.datasets.base import Dataset, DatasetOptions, Product, SourceObject

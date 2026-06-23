@@ -54,6 +54,7 @@ one registry line; the core config and runner are untouched.
 | `single-object` (default) | one product, one component = `source` | none |
 | `sentinel2-maja` | a `.zip`-per-scene MAJA L2A delivery under `source` | `reflectance` (FRE/SRE), `bands`, `masks` (CLM/EDG/SAT/MG2) |
 | `sentinel1-otb-rtc` | a `.zip`-per-scene S1Tiling (OTB) RTC gamma0 delivery under `source` | `polarizations` (VV/VH) |
+| `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`) |
 
 ```yaml
 id: sentinel2-l2a-maja
@@ -71,6 +72,13 @@ MAJA members are read **on the fly** through GDAL's `/vsizip//vsis3` chain — n
 pre-extraction — so the write metric pays the real archive read cost. The
 member-name patterns (`…_FRE_B3.tif`, `MASKS/…_CLM_R1.tif`) live in the reader,
 never in config.
+
+Not every delivery is a zip. The `swot-raster100m` reader is the *granule*
+layout — one netCDF file per granule, flat under `source` — where each selected
+CF `variable` becomes one component, read in place via GDAL's CF subdataset
+syntax (`NETCDF:"<granule>":<variable>`) and converted to a sharded GeoZarr store
+by the existing GeoZarr adapter. `variables` defaults to the primary
+water-surface-elevation variable (`wse`).
 
 ## Benchmark descriptor
 
