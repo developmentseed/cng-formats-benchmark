@@ -52,3 +52,33 @@ in #32). So an arm PR is complete only when all three hold:
    `cnes-cng-study`, `deliverables/D3-benchmarks/`), linked from the PR. CI's
    `deploy-compose` / `deploy-k8s` only prove the stack *stands up* against a tiny
    synthetic fixture; they do not run the arm against its real source.
+
+## Running a SWOT arm on the lab cluster
+
+Each SWOT arm ships a self-contained lab values overlay — a single `helm install
+-f` against the samples staged on Scaleway (`s3://cnes-cng-study/…`). Source and
+sink are the same provider there, so `s3Source` stays off (the source role falls
+back to the Scaleway sink credentials); flip it on (as `values-lab.yaml` does) to
+read the source from the CNES Datalake instead.
+
+| Arm | Overlay | Target | Display |
+| --- | --- | --- | --- |
+| SWOT-A | `values-lab-swot-raster100m.yaml` | Raster100m → GeoZarr | yes (titiler-xarray) |
+| SWOT-B | `values-lab-swot-lakesp.yaml` | LakeSP Prior → GeoParquet | no |
+| SWOT-C | `values-lab-swot-pixc.yaml` | PIXC pixel cloud → COPC | no |
+
+Each overlay bundles its benchmark + dataset config into `configs` and points
+`runner.configFile` / `runner.datasetFile` at them, so the only prerequisite is
+the Scaleway sink-credentials secret:
+
+```bash
+kubectl create secret generic cng-benchmark-s3 \
+  --from-literal=AWS_ACCESS_KEY_ID=<key> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
+
+helm install swot-pixc helm/cng-benchmark \
+  -f helm/cng-benchmark/values-lab-swot-pixc.yaml
+```
+
+Adjust `runner.output` (the sink results prefix) and the dataset `source` in the
+overlay if your staged paths differ.

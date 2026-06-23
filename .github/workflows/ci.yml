@@ -126,10 +126,12 @@ jobs:
           curl -sL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
             | sudo tar xz -C /usr/local/bin kubeconform
       - name: Lint and validate the chart
+        # Validate every overlay, including the per-arm SWOT lab overlays, so a
+        # broken bundled config or display wiring fails the PR, not a lab install.
         run: |
-          helm lint deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/values-local.yaml
-          helm lint deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/values-lab.yaml
-          for v in values-local values-lab; do
+          for v in values-local values-lab \
+                   values-lab-swot-raster100m values-lab-swot-lakesp values-lab-swot-pixc; do
+            helm lint deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/$v.yaml
             helm template t deploy/helm/cng-benchmark \
               -f deploy/helm/cng-benchmark/$v.yaml | kubeconform -strict -summary
           done

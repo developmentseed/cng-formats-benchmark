@@ -1,0 +1,96 @@
+# Lab overlay: SWOT-A — Raster100m -> GeoZarr v3, on the Scaleway cluster.
+#
+# A single-command install of the SWOT Raster100m arm against the staged samples
+# (Scaleway `s3://cnes-cng-study/Raster100m_Nom_France/`). Source and sink are the
+# same provider, so the source role falls back to the sink's Scaleway credentials
+# (s3Source stays off). To read the source from the CNES Datalake instead, enable
+# `s3Source` as values-lab.yaml does.
+#
+# Unlike the LakeSP/PIXC arms this one has a `display` metric: a GeoZarr store
+# cannot be served by the COG TiTiler (GDAL rejects the sharding codec), so it is
+# served by titiler-xarray, enabled below and pointed at the Scaleway sink.
+#
+# Prerequisite — create the Scaleway sink credentials secret in the namespace:
+#   kubectl create secret generic cng-benchmark-s3 \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
+#
+# Install:
+#   helm install swot-raster100m deploy/helm/cng-benchmark \
+#     -f deploy/helm/cng-benchmark/values-lab-swot-raster100m.yaml
+
+image:
+  repository: ghcr.io/developmentseed/cng-benchmark-runner
+  tag: ""
+  pullPolicy: Always
+
+minio:
+  enabled: false
+seed:
+  enabled: false
+
+s3:
+  endpoint: https://s3.fr-par.scw.cloud
+  region: fr-par
+  existingSecret: cng-benchmark-s3
+
+# GeoZarr display is served by titiler-xarray, not the COG TiTiler.
+titiler:
+  enabled: false
+titilerXarray:
+  enabled: true
+  # Its object-store backend reads AWS_ENDPOINT (not AWS_ENDPOINT_URL); point it
+  # at the Scaleway sink where the produced GeoZarr store is published. Scaleway
+  # is TLS, so no AWS_ALLOW_HTTP.
+  extraEnv:
+    - name: AWS_ENDPOINT
+      value: https://s3.fr-par.scw.cloud
+
+nodeSelector:
+  k8s.scaleway.com/pool-name: pool-bench
+
+runner:
+  configFile: swot_raster100m_geozarr.yaml
+  datasetFile: swot_raster100m.yaml
+  output: s3://cnes-cng-study/benchmark-results/swot-raster100m-geozarr/
+  # Target the xarray tile surface for the GeoZarr display metric.
+  displaySurface: xarray
+
+configs:
+  swot_raster100m_geozarr.yaml: |
+    id: swot-raster100m-geozarr
+    dataset: swot-raster100m
+    formats:
+      - geozarr
+    metrics:
+      - write
+      - object_size
+      - read
+      - display
+    tiers:
+      - name: tier2-disk
+        min_object_bytes: 33554432
+      - name: tier3-tape
+        min_object_bytes: 104857600
+    params:
+      chunk_shape: [1024, 1024]
+      shard_shape: [2048, 2048]
+      codec: zstd
+      multiscale_levels: 0
+      scope: product-set
+      products:
+        prefix: ""
+        limit: 3
+      samples:
+        read: 1
+        display: 1
+  swot_raster100m.yaml: |
+    id: swot-raster100m
+    description: SWOT L2 HR Raster 100m granule (CF variable -> GeoZarr).
+    source: s3://cnes-cng-study/Raster100m_Nom_France/
+    baseline_format: netcdf
+    reader: swot-raster100m
+    target_formats:
+      - geozarr
+    options:
+      variables: [wse]
