@@ -151,3 +151,30 @@ single-endpoint path needs none of this.
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+Display tile server selected by runner.displaySurface (cog | xarray): the
+runner's TITILER_ENDPOINT and the readiness wait both target this one. The
+runner picks the tile *path* by object_kind; this picks the *service*.
+*/}}
+{{- define "cng-benchmark.displaySurface" -}}
+{{- default "cog" .Values.runner.displaySurface -}}
+{{- end }}
+
+{{/* True when the selected display surface's service is enabled. */}}
+{{- define "cng-benchmark.displayEnabled" -}}
+{{- if eq (include "cng-benchmark.displaySurface" .) "xarray" -}}
+{{- .Values.titilerXarray.enabled -}}
+{{- else -}}
+{{- .Values.titiler.enabled -}}
+{{- end -}}
+{{- end }}
+
+{{/* host:port of the selected display surface's in-cluster Service. */}}
+{{- define "cng-benchmark.displayHostPort" -}}
+{{- if eq (include "cng-benchmark.displaySurface" .) "xarray" -}}
+{{- printf "%s-titiler-xarray:%v" (include "cng-benchmark.fullname" .) .Values.titilerXarray.port -}}
+{{- else -}}
+{{- printf "%s-titiler:%v" (include "cng-benchmark.fullname" .) .Values.titiler.port -}}
+{{- end -}}
+{{- end }}

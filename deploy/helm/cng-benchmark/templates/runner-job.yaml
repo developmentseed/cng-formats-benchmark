@@ -48,24 +48,26 @@ spec:
           env:
             {{- include "cng-benchmark.s3Env" . | nindent 12 }}
         {{- end }}
-        {{- if .Values.titiler.enabled }}
-        # Gate the run on TiTiler readiness — the display metric calls it and
-        # does not retry, so the Job must not start before it serves /healthz.
-        - name: wait-titiler
+        {{- if eq (include "cng-benchmark.displayEnabled" .) "true" }}
+        # Gate the run on the selected display server's readiness — the display
+        # metric calls it and does not retry, so the Job must not start before the
+        # Service routes a ready endpoint. A TCP connect works for both surfaces
+        # (TiTiler /cog and titiler-xarray, whose readiness probe is tcpSocket).
+        - name: wait-display
           image: {{ include "cng-benchmark.runnerImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/.venv/bin/python", "-c"]
           args:
             - |
-              import time, urllib.request, sys
-              url = "http://{{ include "cng-benchmark.fullname" . }}-titiler:{{ .Values.titiler.port }}/healthz"
+              import socket, time, sys
+              host, _, port = "{{ include "cng-benchmark.displayHostPort" . }}".partition(":")
               for _ in range(120):
                   try:
-                      urllib.request.urlopen(url, timeout=3)
-                      print("titiler ready"); sys.exit(0)
-                  except Exception as e:  # noqa: BLE001
-                      print("waiting for titiler:", e); time.sleep(2)
-              print("titiler did not become ready"); sys.exit(1)
+                      socket.create_connection((host, int(port)), timeout=3).close()
+                      print("display server ready"); sys.exit(0)
+                  except OSError as e:
+                      print("waiting for display server:", e); time.sleep(2)
+              print("display server did not become ready"); sys.exit(1)
         {{- end }}
       containers:
         - name: runner
@@ -87,10 +89,12 @@ spec:
             {{- include "cng-benchmark.s3Env" . | nindent 12 }}
             {{- include "cng-benchmark.gdalEnv" . | nindent 12 }}
             {{- include "cng-benchmark.sourceEnv" . | nindent 12 }}
-            {{- if .Values.titiler.enabled }}
-            # TiTiler endpoint for the display metric (read via --titiler-endpoint envvar).
+            {{- if eq (include "cng-benchmark.displayEnabled" .) "true" }}
+            # Display endpoint for the runner (--titiler-endpoint envvar): the
+            # surface selected by runner.displaySurface (cog TiTiler or
+            # titiler-xarray). The runner picks the tile path by object_kind.
             - name: TITILER_ENDPOINT
-              value: {{ printf "http://%s-titiler:%v" (include "cng-benchmark.fullname" .) .Values.titiler.port | quote }}
+              value: {{ printf "http://%s" (include "cng-benchmark.displayHostPort" .) | quote }}
             {{- end }}
           volumeMounts:
             - name: configs
