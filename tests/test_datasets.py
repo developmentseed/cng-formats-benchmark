@@ -22,7 +22,7 @@ def _dataset_config(**overrides) -> DatasetConfig:
 
 
 def test_builtin_readers_registered():
-    for name in ("single-object", "sentinel2-maja"):
+    for name in ("single-object", "sentinel2-maja", "sentinel1-otb-rtc"):
         assert name in DATASETS
 
 
@@ -146,6 +146,77 @@ def test_maja_ignores_non_raster_members():
     components = ds._select_members(MAJA_MEMBERS, "s3://bucket/T31TCJ/scene.zip")
     # The QKL jpg and the MTD xml are never picked.
     assert all(c.uri.endswith(".tif") for c in components)
+
+
+# A captured listing of an S1 RTC (S1Tiling gamma0) zip: two band rasters per
+# polarisation plus a quicklook jpg and a GDAL .aux.xml sidecar.
+S1_MEMBERS = [
+    "S1A_L1ORT_31TCH_VH_GAM_ASC_030_20200101T060000.tif",
+    "S1A_L1ORT_31TCH_VH_GAM_ASC_030_20200101T060000_QKL_ALL.jpg",
+    "S1A_L1ORT_31TCH_VV_GAM_ASC_030_20200101T060000.tif",
+    "S1A_L1ORT_31TCH_VV_GAM_ASC_030_20200101T060000.tif.aux.xml",
+]
+
+
+def _s1(**options):
+    cfg = _dataset_config(
+        reader="sentinel1-otb-rtc",
+        source="s3://bucket/T31TCH/",
+        options=options,
+    )
+    return build_dataset(cfg)
+
+
+def test_s1_selects_both_polarizations_in_configured_order():
+    ds = _s1(polarizations=["VV", "VH"])
+    components = ds._select_members(S1_MEMBERS, "s3://bucket/T31TCH/scene.zip")
+    assert [c.name for c in components] == ["VV", "VH"]
+    # Members are addressed on the fly via /vsizip//vsis3, not pre-extracted.
+    assert components[0].uri == (
+        "/vsizip//vsis3/bucket/T31TCH/scene.zip/"
+        "S1A_L1ORT_31TCH_VV_GAM_ASC_030_20200101T060000.tif"
+    )
+
+
+def test_s1_order_follows_polarizations_option():
+    ds = _s1(polarizations=["VH", "VV"])
+    components = ds._select_members(S1_MEMBERS, "s3://bucket/T31TCH/scene.zip")
+    assert [c.name for c in components] == ["VH", "VV"]
+
+
+def test_s1_single_polarization():
+    ds = _s1(polarizations=["VV"])
+    components = ds._select_members(S1_MEMBERS, "s3://bucket/T31TCH/scene.zip")
+    assert [c.name for c in components] == ["VV"]
+
+
+def test_s1_ignores_quicklook_and_sidecar():
+    ds = _s1()  # default both polarisations
+    components = ds._select_members(S1_MEMBERS, "s3://bucket/T31TCH/scene.zip")
+    # Only the two .tif bands; the _QKL_ALL.jpg and .aux.xml are never picked.
+    assert {c.name for c in components} == {"VV", "VH"}
+    assert all(c.uri.endswith(".tif") for c in components)
+
+
+def test_s1_enumerates_scenes_from_local_zips(tmp_path):
+    import zipfile
+
+    tile_root = tmp_path / "T31TCH"
+    tile_root.mkdir()
+    for scene in ("2020_sceneA", "2021_sceneB"):
+        with zipfile.ZipFile(tile_root / f"{scene}.zip", "w") as zf:
+            for member in S1_MEMBERS:
+                zf.writestr(member, b"")
+
+    cfg = _dataset_config(
+        reader="sentinel1-otb-rtc",
+        source=str(tile_root),
+        options={"polarizations": ["VV", "VH"]},
+    )
+    products = build_dataset(cfg).products()
+    assert [p.id for p in products] == ["2020_sceneA", "2021_sceneB"]
+    assert [c.name for c in products[0].components] == ["VV", "VH"]
+    assert products[0].components[0].uri.startswith("/vsizip/")
 
 
 def test_zip_delivery_enumerates_scenes_from_local_zips(tmp_path):
