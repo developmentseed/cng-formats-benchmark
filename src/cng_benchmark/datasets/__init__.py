@@ -23,6 +23,7 @@ from cng_benchmark.datasets import (
     single_object,  # noqa: F401,E402
     swot,  # noqa: F401,E402
     swot_lakesp,  # noqa: F401,E402
+    swot_pixc,  # noqa: F401,E402
     zip_delivery,  # noqa: F401,E402
 )
 from cng_benchmark.datasets.base import Dataset, DatasetOptions, Product, SourceObject

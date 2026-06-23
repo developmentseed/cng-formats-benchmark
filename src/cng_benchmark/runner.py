@@ -32,6 +32,7 @@ from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import measure_display
 from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.metrics.read import (
+    measure_copc_read,
     measure_read,
     measure_vector_read,
     measure_zarr_read,
@@ -80,13 +81,16 @@ def _measure_object_read(adapter: FormatAdapter, object_uri: str) -> list[Metric
 
     A zarr store is read zarr-natively over fsspec (GDAL cannot read the
     ``sharding_indexed`` codec); a GeoParquet file is read with a bbox/row-group
-    spatial query over fsspec; a raster file is read window-by-window with
-    rasterio under the sink role's ``/vsis3`` session.
+    spatial query over fsspec; a COPC file is read with an octree-node spatial
+    query over fsspec; a raster file is read window-by-window with rasterio under
+    the sink role's ``/vsis3`` session.
     """
     if adapter.object_kind is ObjectKind.ZARR_STORE:
         return measure_zarr_read(object_uri, role="sink")
     if adapter.object_kind is ObjectKind.VECTOR_FILE:
         return measure_vector_read(object_uri, role="sink")
+    if adapter.object_kind is ObjectKind.POINT_CLOUD_FILE:
+        return measure_copc_read(object_uri, role="sink")
     with gdal_session("sink"):
         return measure_read(object_uri)
 

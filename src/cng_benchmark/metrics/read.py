@@ -228,6 +228,120 @@ def _vector_total_bounds(
     return (minx, miny, maxx, maxy)
 
 
+def _require_pointcloud():
+    try:
+        import laspy  # noqa: F401
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
+        raise RuntimeError(
+            "the COPC read metric requires the 'copc' extra; install with "
+            "`uv sync --extra copc` (or `pip install cng-benchmark[copc]`)"
+        ) from exc
+    import laspy
+
+    return laspy
+
+
+def measure_copc_read(
+    uri: str,
+    *,
+    role: str = "sink",
+    queries: int = 8,
+) -> list[MetricResult]:
+    """Run a grid of octree-node spatial queries against the COPC at ``uri``.
+
+    The point-cloud counterpart to :func:`measure_read`: each query passes a 3D
+    bbox to laspy's ``CopcReader.spatial_query``, which fetches only the octree
+    nodes that overlap (HTTP range requests against the file when ``uri`` is S3, via
+    an fsspec stream), so this measures the realistic partial-access pattern for a
+    COPC — an octree-node fetch — not a full-cloud scan. The file's extent (read
+    from the header, untimed) seeds the query grid. Emits the same
+    ``read_latency_*`` / ``read_decoded_throughput`` family as the other arms,
+    counting returned points rather than pixels.
+    """
+    if queries < 1:
+        raise ValueError("queries must be >= 1")
+    laspy = _require_pointcloud()
+    handle = _copc_handle(uri, role)
+    try:
+        reader = laspy.CopcReader.open(handle)
+        header = reader.header
+        mins = [float(v) for v in header.mins]
+        maxs = [float(v) for v in header.maxs]
+
+        latencies: list[float] = []
+        points = 0
+        decoded_bytes = 0
+        for box in _box_grid(mins, maxs, queries):
+            start = time.perf_counter()
+            sub = reader.spatial_query(box)
+            latencies.append(time.perf_counter() - start)
+            n = len(sub.x)
+            points += n
+            decoded_bytes += n * 3 * 8  # x, y, z as float64
+    finally:
+        close = getattr(handle, "close", None)
+        if callable(close):
+            close()
+    return _pointcloud_read_metrics(latencies, decoded_bytes, points)
+
+
+def _copc_handle(uri: str, role: str):
+    """Open ``uri`` as a laspy COPC source: a local path or an fsspec S3 stream."""
+    from cng_benchmark.storage import fsspec_storage_options, is_s3
+
+    if is_s3(uri):
+        import fsspec
+
+        return fsspec.open(uri, mode="rb", **fsspec_storage_options(role)).open()
+    if uri.startswith("file://"):
+        return uri[len("file://") :]
+    return uri
+
+
+def _box_grid(mins: list[float], maxs: list[float], count: int):
+    """Tile the X–Y extent into up to ``count`` 3D ``laspy.copc.Bounds`` (full Z)."""
+    from laspy.copc import Bounds
+
+    minx, miny, minz = mins
+    maxx, maxy, maxz = maxs
+    per_side = max(1, int(math.ceil(math.sqrt(count))))
+    dx = (maxx - minx) / per_side or 1.0
+    dy = (maxy - miny) / per_side or 1.0
+    boxes = [
+        Bounds(
+            [minx + i * dx, miny + j * dy, minz],
+            [minx + (i + 1) * dx, miny + (j + 1) * dy, maxz],
+        )
+        for j in range(per_side)
+        for i in range(per_side)
+    ]
+    return boxes[:count]
+
+
+def _pointcloud_read_metrics(
+    latencies: list[float], decoded_bytes: int, points: int
+) -> list[MetricResult]:
+    """Assemble the ``read_*`` metrics from per-query latencies (point-cloud path).
+
+    Mirrors :func:`_read_metrics` / :func:`_vector_read_metrics` so every arm
+    reports the same latency/throughput names; the partial-access unit is an
+    octree-node spatial query and throughput counts decoded point bytes.
+    """
+    total = sum(latencies)
+    throughput = decoded_bytes / total if total > 0 else float("inf")
+    return [
+        MetricResult(name="read_query_count", value=len(latencies)),
+        MetricResult(name="read_latency_mean", value=total / len(latencies), unit="s"),
+        MetricResult(name="read_latency_p50", value=float(median(latencies)), unit="s"),
+        MetricResult(
+            name="read_decoded_throughput",
+            value=throughput,
+            unit="decoded-bytes/s",
+            detail={"decoded_bytes": decoded_bytes, "points": points},
+        ),
+    ]
+
+
 def _vector_read_metrics(
     latencies: list[float], decoded_bytes: int, features: int
 ) -> list[MetricResult]:

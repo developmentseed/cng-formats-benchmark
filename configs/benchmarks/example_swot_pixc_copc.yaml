@@ -1,0 +1,38 @@
+# Example benchmark arm: SWOT L2 HR PIXC -> COPC (milestone SWOT-C).
+#
+# The heaviest SWOT arm, and the path the CO3D CARS arm reuses (tiled LAZ → COPC).
+# Each granule's pixel-cloud group is converted to one COPC file; the
+# object-grouping lever is the octree depth + per-node point budget (`span`). The
+# `read` metric is an octree-node spatial query (partial access), NOT a raster
+# window, and there is NO `display` metric (a point cloud is not a TiTiler raster
+# tile). Profiles the per-granule object-size distribution + a set-level roll-up.
+#
+# Run with `--dataset configs/datasets/example_swot_pixc.yaml` (chart:
+# runner.datasetFile). `output` is supplied by the deployment.
+id: example-swot-pixc-copc
+dataset: example-swot-pixc
+formats:
+  - copc
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # The COPC octree is the object-grouping lever: `span` is the per-node voxel grid
+  # (per-node point budget ≈ span**3) and `max_depth` bounds the octree depth
+  # (null = derive from point density). A PIXC granule already clears the cold
+  # tiers as a single object, so the lever preserves partial access rather than
+  # reaching a size floor.
+  span: 128
+  max_depth: null
+  scope: product-set     # product (one granule) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1

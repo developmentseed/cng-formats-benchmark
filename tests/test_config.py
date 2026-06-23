@@ -76,6 +76,21 @@ def test_example_swot_lakesp_configs_validate():
     assert "display" not in cfg.metrics
 
 
+def test_example_swot_pixc_configs_validate():
+    ds = load_dataset_config("configs/datasets/example_swot_pixc.yaml")
+    assert ds.reader == "swot-pixc"
+    assert ds.target_formats == ["copc"]
+    assert ds.options["groups"] == ["pixel_cloud"]
+
+    cfg = load_benchmark_config("configs/benchmarks/example_swot_pixc_copc.yaml")
+    assert cfg.formats == ["copc"]
+    assert cfg.params["span"] == 128
+    assert cfg.params["max_depth"] is None  # null -> derive from density
+    # A point-cloud arm: a read metric, but no display metric.
+    assert "read" in cfg.metrics
+    assert "display" not in cfg.metrics
+
+
 def test_example_benchmark_config_validates():
     cfg = load_benchmark_config(BENCHMARK_EXAMPLE)
     assert cfg.dataset == "example-raster"
