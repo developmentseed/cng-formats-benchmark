@@ -40,6 +40,18 @@ geozarr = [
     "rioxarray>=0.15",
     "s3fs>=2024",
 ]
+# GeoParquet writes need geopandas (1.0+, for the covering-bbox column and bbox
+# read filter) on pyarrow; pyogrio is the OGR driver that reads the source
+# shapefile. geopandas + pyarrow + shapely are also pulled into `dev` (below) so
+# the row-group lever / enumerate / layout / vector-read logic is unit-tested in
+# CI on a synthetic GeoDataFrame — only the pyogrio source-read path skips there.
+geoparquet = [
+    "geopandas>=1.0",
+    "pyarrow>=14",
+    "shapely>=2",
+    "pyogrio>=0.7",
+    "s3fs>=2024",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
@@ -48,6 +60,9 @@ dev = [
     "zarr>=3",
     "xarray>=2024.1",
     "numpy>=1.26",
+    "geopandas>=1.0",
+    "pyarrow>=14",
+    "shapely>=2",
 ]
 docs = [
     "mkdocs-material>=9.5",

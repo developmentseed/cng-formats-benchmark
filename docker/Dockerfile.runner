@@ -22,12 +22,14 @@ RUN apt-get update \
 
 # Install the project with the deployment extras: `s3` (boto3) so the runner can
 # list/read objects and persist artifacts to S3/MinIO, `cog` (rasterio + rio-cogeo)
-# to generate fixtures and convert GeoTIFF -> COG, and `geozarr` (zarr v3 + xarray
-# + rioxarray + s3fs) to convert GeoTIFF -> sharded GeoZarr and read it back.
-# rasterio ships manylinux wheels bundling GDAL, so no system GDAL is needed.
+# to generate fixtures and convert GeoTIFF -> COG, `geozarr` (zarr v3 + xarray
+# + rioxarray + s3fs) to convert GeoTIFF -> sharded GeoZarr and read it back, and
+# `geoparquet` (geopandas + pyarrow + shapely + pyogrio + s3fs) to convert a
+# shapefile -> GeoParquet and run the bbox/row-group read. rasterio and pyogrio
+# ship manylinux wheels bundling GDAL, so no system GDAL is needed.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN uv sync --no-dev --extra s3 --extra cog --extra geozarr
+RUN uv sync --no-dev --extra s3 --extra cog --extra geozarr --extra geoparquet
 
 ENTRYPOINT ["uv", "run", "cng-benchmark"]
 CMD ["--help"]

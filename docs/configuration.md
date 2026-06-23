@@ -55,6 +55,7 @@ one registry line; the core config and runner are untouched.
 | `sentinel2-maja` | a `.zip`-per-scene MAJA L2A delivery under `source` | `reflectance` (FRE/SRE), `bands`, `masks` (CLM/EDG/SAT/MG2) |
 | `sentinel1-otb-rtc` | a `.zip`-per-scene S1Tiling (OTB) RTC gamma0 delivery under `source` | `polarizations` (VV/VH) |
 | `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`) |
+| `swot-lakesp-prior` | a `.zip`-per-pass shapefile delivery under `source` (SWOT L2 HR LakeSP Prior) | none (one `.shp` member = one component) |
 
 ```yaml
 id: sentinel2-l2a-maja
@@ -79,6 +80,13 @@ CF `variable` becomes one component, read in place via GDAL's CF subdataset
 syntax (`NETCDF:"<granule>":<variable>`) and converted to a sharded GeoZarr store
 by the existing GeoZarr adapter. `variables` defaults to the primary
 water-surface-elevation variable (`wse`).
+
+The `swot-lakesp-prior` reader is the *vector* arm — a cross-mission proof that a
+non-raster delivery wires through config alone. It is the same `.zip`-per-scene
+shape as the S1/S2 readers, but each pass's zip holds an ESRI Shapefile: every
+`.shp` member becomes one component (one pass = one layer), read on the fly via
+`/vsizip//vsis3` (the OGR driver finds the `.shx`/`.dbf`/`.prj` sidecars inside
+the archive) and converted to a GeoParquet file by the GeoParquet adapter.
 
 ## Benchmark descriptor
 
@@ -125,6 +133,7 @@ name and reads what it needs, so adding a format never changes the schema:
 | --- | --- |
 | `cog` | `block_size` (internal tiling), `compress` |
 | `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels`; `display_titiler_path` selects the multidim/xarray TiTiler router for display |
+| `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` |
 
 GeoZarr is a **per-component, 2D** adapter: each source raster becomes one sharded
 2D store (a directory of shard objects), the per-component analogue of the COG arm,
@@ -190,14 +199,18 @@ the coldest (highest) one — or none, if the objects are too small for any tier
 | --- | --- | --- |
 | `object_size` | `metrics/objects.py` | `object_count`, `total_bytes` + the `object_profile` |
 | `write` | `metrics/write.py` | `write_elapsed`, `write_throughput` (output bytes/s, source read included) |
-| `read` | `metrics/read.py` | `read_window_count`, `read_latency_mean/p50`, `read_decoded_throughput` |
+| `read` | `metrics/read.py` | `read_window_count` (vector: `read_query_count`), `read_latency_mean/p50`, `read_decoded_throughput` |
 | `display` | `metrics/display.py` (+ `display_tiles.py`) | per chunk-bucket `display_{1,2,4,9}chunk_latency_mean/p50`, `display_scenarios`, plus a `display_chunk_layout.png` artifact |
 
 `read` and `display` adapt to the produced object kind: a COG is read with
 rasterio over `/vsis3` and served by TiTiler's `/cog` endpoints; a GeoZarr store
 is read zarr-natively over fsspec (GDAL cannot read the `sharding_indexed` codec)
-and served by a multidim/xarray TiTiler surface (`params.display_titiler_path`).
-Both emit the same `read_*` / `display_*` metric names.
+and served by a multidim/xarray TiTiler surface (`params.display_titiler_path`); a
+GeoParquet file is read with a bbox/row-group spatial query over fsspec (only the
+row groups whose covering bbox overlaps are fetched) and has **no `display`
+metric** — a vector table is not a TiTiler raster tile. All raster paths emit the
+same `read_*` / `display_*` names; the vector `read` swaps `read_window_count` for
+`read_query_count` and counts returned features rather than pixels.
 
 `read` throughput is **decoded** bytes/s (a fair relative cross-format number),
 not bytes over the wire; latency reflects the full range-request round-trip.
@@ -228,6 +241,9 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
     `shard_shape` (stored object), `chunks_per_shard`, `codec`,
     `multiscale_levels`, `shard_count`; `summary.md` renders a "Chunk/shard
     layout" table + a shard-object count.
+  - `geoparquet` → a `GeoParquetLayout`: `geometry_column`, `num_rows`,
+    `num_row_groups`, `row_group_rows` (the addressable unit a bbox query fetches),
+    and `has_bbox_covering` (whether spatial pushdown to row groups is possible).
 
   Captured for every object (no tile server needed). The chunk-aware `display`
   metric also publishes a `display_chunk_layout.png` next to the sampled object

@@ -59,6 +59,23 @@ def test_example_maja_geozarr_benchmark_config_validates():
     assert "geozarr" in ds.target_formats
 
 
+def test_example_swot_lakesp_configs_validate():
+    ds = load_dataset_config("configs/datasets/example_swot_lakesp_prior.yaml")
+    assert ds.reader == "swot-lakesp-prior"
+    assert ds.target_formats == ["geoparquet"]
+    # The vector reader takes no options.
+    assert ds.options == {}
+
+    cfg = load_benchmark_config(
+        "configs/benchmarks/example_swot_lakesp_geoparquet.yaml"
+    )
+    assert cfg.formats == ["geoparquet"]
+    assert cfg.params["row_group_rows"] == 50000
+    # A vector arm: a read metric, but no display metric.
+    assert "read" in cfg.metrics
+    assert "display" not in cfg.metrics
+
+
 def test_example_benchmark_config_validates():
     cfg = load_benchmark_config(BENCHMARK_EXAMPLE)
     assert cfg.dataset == "example-raster"

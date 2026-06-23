@@ -277,3 +277,98 @@ def test_zarr_store_object_flows_through_per_component_path(tmp_path):
     assert (
         output / "objects" / "sceneZ" / "band0" / "geozarr.zarr" / "zarr.json"
     ).exists()
+
+
+# --- vector-file object kind flows through the per-component path -------------
+
+
+def _register_fake_geoparquet():
+    """Register a vector-file adapter that writes a tiny GeoParquet per source.
+
+    Lets the runner's vector branch (single-file target + publish, file-size
+    ``enumerate_objects``, a ``GeoParquetLayout`` describer, the bbox/row-group
+    read collector, file cleanup) be exercised with only geopandas + pyarrow +
+    shapely — no OGR source read.
+    """
+    from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+    from cng_benchmark.formats.geoparquet import (
+        _write_geoparquet,
+        describe_geoparquet_layout,
+    )
+    from cng_benchmark.registry import FORMATS
+
+    if "fake-geoparquet" in FORMATS:
+        return
+
+    @FORMATS.register("fake-geoparquet")
+    class _FakeGeoParquetAdapter(FormatAdapter):
+        name = "fake-geoparquet"
+        object_kind = ObjectKind.VECTOR_FILE
+
+        def target_basename(self):
+            return "geoparquet.parquet"
+
+        def convert(self, source, target, params):
+            import geopandas as gpd
+            from shapely.geometry import Point
+
+            gdf = gpd.GeoDataFrame(
+                {"id": list(range(200))},
+                geometry=[Point(x % 50, x // 50) for x in range(200)],
+                crs="EPSG:4326",
+            )
+            _write_geoparquet(gdf, target, row_group_rows=50, spatial_partitioning=True)
+
+        def describe_grouping_lever(self):
+            return "GeoParquet row-group size and spatial partitioning"
+
+        def enumerate_objects(self, target):
+            import os
+
+            return [os.path.getsize(target)]
+
+        def describe_layout(self, target, *, name=None):
+            return [describe_geoparquet_layout(target, name or self.name)]
+
+
+def test_vector_file_object_flows_through_per_component_path(tmp_path):
+    pytest.importorskip("geopandas")
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("shapely")
+    # The runner reads every source through a GDAL session (rasterio) before the
+    # convert, regardless of object kind — so this integration test needs the geo
+    # stack, like the COG/GeoZarr runner tests. The write/read logic itself is
+    # covered without rasterio in test_geoparquet.py.
+    pytest.importorskip("rasterio")
+    _register_fake_geoparquet()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(2):
+        (src / f"pass{i}.bin").write_bytes(b"x" * 1000)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["write", "object_size", "read"], {"scope": "product"}).model_copy(
+        update={"formats": ["fake-geoparquet"]}
+    )
+    ds_cfg = DatasetConfig.model_validate(
+        {
+            "id": "v",
+            "reader": "test-binfiles",
+            "source": str(src),
+            "baseline_format": "shapefile",
+            "target_formats": ["fake-geoparquet"],
+        }
+    )
+    result = run_dataset_benchmark(cfg, ds_cfg, str(output))
+
+    run = result.per_product[0]
+    # One single-file object per component (2 passes).
+    assert run.object_profile.count == 2
+    assert [ly.kind for ly in run.object_layouts] == ["geoparquet", "geoparquet"]
+    # The vector read metric ran (bbox/row-group query, not a raster window).
+    read_names = {m.name for m in run.metrics}
+    assert "read_query_count" in read_names
+    assert "read_window_count" not in read_names
+    # Published as a single file under each component dir, not a tree.
+    assert (output / "objects" / "sceneZ" / "pass0" / "geoparquet.parquet").is_file()

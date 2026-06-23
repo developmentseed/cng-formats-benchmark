@@ -1,0 +1,21 @@
+# Example vector dataset descriptor: a SWOT L2 HR LakeSP Prior delivery.
+#
+# The cross-mission extensibility proof — a *vector* arm wired purely through
+# config. This is a zip-per-pass delivery (like the S1/S2 zip deliveries) but the
+# members are an ESRI Shapefile, not rasters: each `.shp` member becomes one
+# component (one pass = one layer), read on the fly via `/vsizip//vsis3` (the OGR
+# driver finds the .shx/.dbf/.prj sidecars inside the archive). `reader` selects
+# the SwotLakeSpPriorDataset; it takes no options. `source` is the pass root;
+# replace it with a reachable prefix — nothing here is provider-specific.
+id: example-swot-lakesp-prior
+description: Example SWOT L2 HR LakeSP Prior pass (zipped shapefile -> GeoParquet).
+source: s3://example-bucket/LakeSP_Prior_Nom_France/
+baseline_format: shapefile
+reader: swot-lakesp-prior
+target_formats:
+  - geoparquet
+grouping_lever:
+  # The object-grouping lever is the GeoParquet row-group size plus spatial
+  # partitioning: sweep the rows-per-group against the tiers (the passes are
+  # tiny, so this is the sub-Tier-2 fan-out story, like the S2 snow masks).
+  geoparquet_row_group_rows: [25000, 100000]
