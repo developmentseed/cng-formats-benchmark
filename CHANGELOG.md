@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.2.0...v0.3.0) (2026-06-23)
+
+
+### Features
+
+* Add sentinel1 RTC reader (S1Tiling/OTB gamma0 VV/VH bands) ([ffc4e88](https://github.com/developmentseed/cng-formats-benchmark/commit/ffc4e88250d47d7236c1473420ddf5e8bb211297))
+* GeoZarr v3 (2D, per-component) adapter + per-format layout describer ([ed80143](https://github.com/developmentseed/cng-formats-benchmark/commit/ed80143a80a93b0f85baa1b8932ee3bda1a51f84))
+* M2.5: GeoZarr v3 (2D, per-component) adapter + per-format layout describer ([0d4eed5](https://github.com/developmentseed/cng-formats-benchmark/commit/0d4eed52770bc297c869a68d38bbf0510ca18540))
+* sentinel1 RTC reader (S1Tiling/OTB gamma0 VV/VH bands) ([015bdca](https://github.com/developmentseed/cng-formats-benchmark/commit/015bdca5bd6e0fe099afd99197d93b020d2fd2e2))
+
+
+### Bug Fixes
+
+* address Copilot review on the GeoZarr PR ([5097282](https://github.com/developmentseed/cng-formats-benchmark/commit/5097282fbea851d1109c913c5ddd6c96ae777c63))
+* address second Copilot review pass on the GeoZarr PR ([117d56d](https://github.com/developmentseed/cng-formats-benchmark/commit/117d56d3a76e348f166671c728e19011e50b937a))
+* address third Copilot review pass on the GeoZarr PR ([3096f52](https://github.com/developmentseed/cng-formats-benchmark/commit/3096f5239e40cacb53358e90ba169f8f1c8a4c55))
+
 ## [0.2.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.1.0...v0.2.0) (2026-06-18)
 
 
