@@ -17,6 +17,7 @@ from cng_benchmark.config import DatasetConfig
 
 # Import the built-in readers for their registration side effects.
 from cng_benchmark.datasets import (
+    sentinel1,  # noqa: F401,E402
     sentinel2,  # noqa: F401,E402
     single_object,  # noqa: F401,E402
     zip_delivery,  # noqa: F401,E402

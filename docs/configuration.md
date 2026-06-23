@@ -53,6 +53,7 @@ one registry line; the core config and runner are untouched.
 | --- | --- | --- |
 | `single-object` (default) | one product, one component = `source` | none |
 | `sentinel2-maja` | a `.zip`-per-scene MAJA L2A delivery under `source` | `reflectance` (FRE/SRE), `bands`, `masks` (CLM/EDG/SAT/MG2) |
+| `sentinel1-otb-rtc` | a `.zip`-per-scene S1Tiling (OTB) RTC gamma0 delivery under `source` | `polarizations` (VV/VH) |
 
 ```yaml
 id: sentinel2-l2a-maja

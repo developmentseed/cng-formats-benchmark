@@ -37,6 +37,12 @@ def test_example_maja_dataset_config_validates():
     assert cfg.options["masks"] == ["CLM", "EDG", "SAT", "MG2"]
 
 
+def test_example_sentinel1_dataset_config_validates():
+    cfg = load_dataset_config("configs/datasets/example_sentinel1_rtc.yaml")
+    assert cfg.reader == "sentinel1-otb-rtc"
+    assert cfg.options["polarizations"] == ["VV", "VH"]
+
+
 def test_example_maja_benchmark_config_validates():
     cfg = load_benchmark_config(MAJA_BENCHMARK_EXAMPLE)
     assert cfg.params["scope"] == "product-set"

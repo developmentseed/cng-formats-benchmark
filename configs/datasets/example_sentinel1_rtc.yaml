@@ -1,0 +1,23 @@
+# Example multi-component dataset descriptor: a Sentinel-1 RTC (gamma0) tile.
+#
+# Like the MAJA example this names a *layout*: `reader` selects the
+# Sentinel1Dataset, which enumerates each scene (a `.zip` under `source`) and,
+# from the `options` below, the VV/VH gamma0 polarisation bands. An RTC zip is
+# simpler than MAJA — just the two band rasters per scene (plus quicklooks the
+# reader ignores). `source` is the tile root; scenes live under it. Replace it
+# with a reachable prefix; nothing here is provider-specific.
+id: example-sentinel1-rtc
+description: Example Sentinel-1 RTC tile (VV/VH gamma0 per-polarisation fan-out).
+source: s3://example-bucket/sentinel1-rtc/T31TCH/
+baseline_format: geotiff
+reader: sentinel1-otb-rtc
+target_formats:
+  - cog
+  - geozarr
+options:
+  polarizations: [VV, VH]
+grouping_lever:
+  # Each candidate format clears the object-size tiers with its own lever: COG
+  # internal tiling, Zarr v3 sharding. Both are swept against the tier thresholds.
+  cog_block_size: [256, 512, 1024]
+  zarr_shard_shape: [[1024, 1024], [2048, 2048]]
