@@ -41,4 +41,5 @@ params:
     display: 1
   # The raster GeoZarr is displayed by a multidim/xarray TiTiler surface, not the
   # COG endpoints; `display_titiler_path` selects that router (deploy-specific).
-  display_titiler_path: md
+  # The in-stack `titiler-xarray` serves at the root, so leave this empty.
+  display_titiler_path: ""
