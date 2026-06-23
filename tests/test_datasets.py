@@ -7,6 +7,7 @@ from cng_benchmark.config import DatasetConfig
 from cng_benchmark.datasets import Product, SourceObject, build_dataset
 from cng_benchmark.datasets.sentinel2 import Sentinel2MajaDataset
 from cng_benchmark.datasets.single_object import SingleObjectDataset
+from cng_benchmark.datasets.swot import DEFAULT_VARIABLES, SwotRaster100mDataset
 from cng_benchmark.registry import DATASETS
 
 
@@ -22,7 +23,12 @@ def _dataset_config(**overrides) -> DatasetConfig:
 
 
 def test_builtin_readers_registered():
-    for name in ("single-object", "sentinel2-maja", "sentinel1-otb-rtc"):
+    for name in (
+        "single-object",
+        "sentinel2-maja",
+        "sentinel1-otb-rtc",
+        "swot-raster100m",
+    ):
         assert name in DATASETS
 
 
@@ -217,6 +223,68 @@ def test_s1_enumerates_scenes_from_local_zips(tmp_path):
     assert [p.id for p in products] == ["2020_sceneA", "2021_sceneB"]
     assert [c.name for c in products[0].components] == ["VV", "VH"]
     assert products[0].components[0].uri.startswith("/vsizip/")
+
+
+# --- SWOT Raster100m (netCDF-raster granule) -------------------------------
+
+
+def _swot(**options) -> SwotRaster100mDataset:
+    cfg = _dataset_config(
+        reader="swot-raster100m",
+        source="s3://bucket/Raster100m_Nom_France/",
+        options=options,
+    )
+    return build_dataset(cfg)
+
+
+def test_swot_defaults_to_primary_variable():
+    ds = _swot()
+    granule = "s3://bucket/Raster100m_Nom_France/SWOT_L2_HR_Raster_100m_UTM31N.nc"
+    components = ds._select_components(granule)
+    assert [c.name for c in components] == DEFAULT_VARIABLES
+    # The variable is read in place via a GDAL CF subdataset path, not extracted.
+    assert components[0].uri == (
+        'NETCDF:"/vsis3/bucket/Raster100m_Nom_France/'
+        'SWOT_L2_HR_Raster_100m_UTM31N.nc":wse'
+    )
+
+
+def test_swot_selects_variables_in_configured_order():
+    ds = _swot(variables=["water_area", "wse", "sig0"])
+    granule = "s3://bucket/Raster100m_Nom_France/SWOT_L2_HR_Raster_100m_UTM31N.nc"
+    components = ds._select_components(granule)
+    assert [c.name for c in components] == ["water_area", "wse", "sig0"]
+
+
+def test_swot_rejects_unknown_option():
+    with pytest.raises(ValidationError):
+        build_dataset(_dataset_config(reader="swot-raster100m", options={"bogus": 1}))
+
+
+def test_swot_enumerates_granules_from_local_files(tmp_path):
+    root = tmp_path / "Raster100m_Nom_France"
+    root.mkdir()
+    for name in ("SWOT_cycle048_UTM31N", "SWOT_cycle048_UTM32N"):
+        (root / f"{name}.nc").write_bytes(b"")
+    # A non-granule sibling is ignored (suffix match only).
+    (root / "manifest.json").write_bytes(b"{}")
+
+    cfg = _dataset_config(
+        reader="swot-raster100m",
+        source=str(root),
+        options={"variables": ["wse"]},
+    )
+    ds = build_dataset(cfg)
+
+    products = ds.products()
+    assert [p.id for p in products] == ["SWOT_cycle048_UTM31N", "SWOT_cycle048_UTM32N"]
+    assert [c.name for c in products[0].components] == ["wse"]
+    uri = products[0].components[0].uri
+    assert uri.startswith('NETCDF:"') and uri.endswith('.nc":wse')
+
+    # Prefix + limit bound a granule-set enumeration (path-prefix match).
+    bounded = ds.products(prefix="SWOT_cycle048_UTM32N", limit=1)
+    assert [p.id for p in bounded] == ["SWOT_cycle048_UTM32N"]
 
 
 def test_zip_delivery_enumerates_scenes_from_local_zips(tmp_path):

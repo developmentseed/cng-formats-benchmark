@@ -1,0 +1,44 @@
+# Example benchmark arm: SWOT L2 HR Raster 100m -> GeoZarr v3 (per-component, 2D).
+#
+# The lowest-effort SWOT arm (milestone SWOT-A): each selected CF variable
+# (picked in the dataset `options`) is converted independently to its own sharded
+# 2D GeoZarr store, reusing the GeoZarr adapter and the titiler-xarray display
+# surface proven on S1/S2 — only the `swot-raster100m` reader is new. Profiles the
+# per-granule object-size distribution + a set-level roll-up.
+#
+# Run with `--dataset configs/datasets/example_swot_raster100m.yaml` (chart:
+# runner.datasetFile). The variable picks are NOT here — they live in the dataset
+# descriptor. `output` (and the TiTiler endpoint for display) are supplied by the
+# deployment.
+id: example-swot-raster100m-geozarr
+dataset: example-swot-raster100m
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # Zarr v3 sharding is the object-grouping lever (chunk = addressable unit,
+  # shard = stored object). Apply the scene-size lesson — one shard per granule —
+  # then sweep the source's `zarr_shard_shape` options.
+  chunk_shape: [1024, 1024]
+  shard_shape: [2048, 2048]
+  codec: zstd
+  multiscale_levels: 0
+  scope: product-set     # product (one granule) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1
+    display: 1
+  # The raster GeoZarr is displayed by a multidim/xarray TiTiler surface, not the
+  # COG endpoints; `display_titiler_path` selects that router (deploy-specific).
+  display_titiler_path: md

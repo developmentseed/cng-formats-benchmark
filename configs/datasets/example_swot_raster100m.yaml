@@ -1,0 +1,23 @@
+# Example granule dataset descriptor: a SWOT L2 HR Raster 100m delivery.
+#
+# Unlike the MAJA/S1 zip deliveries this is a *granule* layout: one netCDF file
+# per granule, flat under `source` (`SWOT_L2_HR_Raster_100m_UTM*_*.nc`). `reader`
+# selects the SwotRaster100mDataset, which enumerates the `.nc` granules and,
+# from the `options` below, the CF variables to profile — one sharded GeoZarr
+# store per variable. `variables` defaults to the primary water-surface-elevation
+# variable (`wse`); list more CF variables to fan them in. `source` is the
+# granule root; replace it with a reachable prefix — nothing here is
+# provider-specific.
+id: example-swot-raster100m
+description: Example SWOT L2 HR Raster 100m granule (CF variable -> GeoZarr).
+source: s3://example-bucket/Raster100m_Nom_France/
+baseline_format: netcdf
+reader: swot-raster100m
+target_formats:
+  - zarr
+options:
+  variables: [wse]
+grouping_lever:
+  # The object-grouping lever is the Zarr v3 shard shape: apply the scene-size
+  # lesson (one shard per granule) then sweep the shard shape against the tiers.
+  zarr_shard_shape: [[1024, 1024], [2048, 2048]]
