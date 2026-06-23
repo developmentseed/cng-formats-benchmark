@@ -49,3 +49,39 @@ def test_gdal_session_strips_path_from_endpoint(monkeypatch):
 
     with gdal_session("source"):
         assert rasterio.env.getenv()["AWS_S3_ENDPOINT"] == "host.example:9000"
+
+
+def test_gdal_session_overlays_os_environ_for_non_rasterio_bindings(monkeypatch):
+    # A binding with its own libgdal (e.g. pyogrio) does not honour rasterio.Env,
+    # so the per-role endpoint + credentials must also be on os.environ inside the
+    # block — and removed again on exit (they were absent before).
+    import os
+
+    monkeypatch.setenv("SOURCE_AWS_ENDPOINT_URL", "https://s3.fr-par.scw.cloud")
+    monkeypatch.setenv("SOURCE_AWS_ACCESS_KEY_ID", "k")
+    monkeypatch.setenv("SOURCE_AWS_SECRET_ACCESS_KEY", "s")
+    monkeypatch.delenv("AWS_S3_ENDPOINT", raising=False)
+
+    assert "AWS_S3_ENDPOINT" not in os.environ
+    with gdal_session("source"):
+        assert os.environ["AWS_S3_ENDPOINT"] == "s3.fr-par.scw.cloud"
+        assert os.environ["AWS_VIRTUAL_HOSTING"] == "FALSE"
+        assert os.environ["AWS_ACCESS_KEY_ID"] == "k"
+        assert os.environ["AWS_SECRET_ACCESS_KEY"] == "s"
+    # Restored on exit: the key absent before the block is gone again.
+    assert "AWS_S3_ENDPOINT" not in os.environ
+
+
+def test_gdal_session_restores_prior_os_environ_values(monkeypatch):
+    # A key present before the block is restored to its prior value, not dropped,
+    # so a sink-then-source sequence leaves the outer environment intact.
+    import os
+
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "sink-key")
+    monkeypatch.setenv("SOURCE_AWS_ENDPOINT_URL", "https://s3.fr-par.scw.cloud")
+    monkeypatch.setenv("SOURCE_AWS_ACCESS_KEY_ID", "source-key")
+    monkeypatch.setenv("SOURCE_AWS_SECRET_ACCESS_KEY", "s")
+
+    with gdal_session("source"):
+        assert os.environ["AWS_ACCESS_KEY_ID"] == "source-key"
+    assert os.environ["AWS_ACCESS_KEY_ID"] == "sink-key"
