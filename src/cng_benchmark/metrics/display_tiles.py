@@ -40,6 +40,26 @@ class _TileWindow(NamedTuple):
 DEFAULT_TARGETS: tuple[int, ...] = (1, 2, 4, 9)
 
 
+class _Grid(NamedTuple):
+    """The block/chunk grid of a produced object, in full-resolution pixel space.
+
+    The format-agnostic input to tile selection and the layout image: a COG yields
+    it from its internal block size + overviews, a GeoZarr store from its chunk
+    shape + multiscale levels. ``block_w``/``block_h`` is the addressable unit
+    (COG block / Zarr chunk); ``decimations`` the available overview/level
+    decimations (``[1, …]``); ``inv`` the inverse affine (world → pixel).
+    """
+
+    block_w: int
+    block_h: int
+    decimations: list[int]
+    crs: object
+    inv: object
+    width: int
+    height: int
+    bounds: tuple[float, float, float, float]
+
+
 def _require_geo():
     """Import the geo stack, raising a clear error if the ``cog`` extra is absent."""
     try:
@@ -52,6 +72,75 @@ def _require_geo():
             "`uv sync --extra cog` (or `pip install cng-benchmark[cog]`)"
         ) from exc
     return morecantile, rasterio, transform_bounds
+
+
+def _read_cog_grid(cog_path: str) -> _Grid:
+    """Read the block/overview grid of a COG with rasterio."""
+    _morecantile, rasterio, _tb = _require_geo()
+    with rasterio.open(cog_path) as src:
+        block_h, block_w = src.block_shapes[0]
+        return _Grid(
+            block_w=int(block_w),
+            block_h=int(block_h),
+            decimations=[1, *src.overviews(1)],
+            crs=src.crs,
+            inv=~src.transform,
+            width=src.width,
+            height=src.height,
+            bounds=tuple(src.bounds),
+        )
+
+
+def _read_zarr_grid(store: str, role: str = "sink") -> _Grid:
+    """Read the chunk/multiscale grid of a GeoZarr store (chunk = addressable unit).
+
+    Chunk shape is the partial-read unit; multiscale levels become the available
+    decimations ``[1, 2, 4, …]``; CRS and the affine come from the CF
+    ``spatial_ref`` grid-mapping variable the adapter writes.
+    """
+    import zarr
+    from affine import Affine
+    from rasterio.crs import CRS
+
+    from cng_benchmark.formats.geozarr import DATA_VAR
+    from cng_benchmark.storage import fsspec_storage_options, is_s3
+
+    so = fsspec_storage_options(role) if is_s3(store) else None
+    group = zarr.open_group(store, mode="r", storage_options=so)
+    if DATA_VAR in group:
+        arr, ref, levels = group[DATA_VAR], group["spatial_ref"], 0
+    else:
+        keys = sorted((k for k in group.group_keys()), key=lambda k: int(k))
+        levels = len(keys) - 1
+        sub = group[keys[0]]
+        arr, ref = sub[DATA_VAR], sub["spatial_ref"]
+
+    height, width = int(arr.shape[-2]), int(arr.shape[-1])
+    block_h, block_w = int(arr.chunks[-2]), int(arr.chunks[-1])
+    wkt = ref.attrs.get("crs_wkt") or ref.attrs.get("spatial_ref") or ""
+    gt = [float(v) for v in str(ref.attrs.get("GeoTransform", "")).split()]
+    # Tile selection has to project the store into WebMercator, so both the CRS
+    # and a 6-value GDAL geotransform must be present; fail clearly if not (an
+    # ungeoreferenced store has no map tiles to time).
+    if not wkt or len(gt) != 6:
+        raise RuntimeError(
+            f"GeoZarr store {store!r} is not georeferenced for display "
+            f"(crs_wkt={'set' if wkt else 'missing'}, GeoTransform has "
+            f"{len(gt)} of 6 values); cannot select map tiles"
+        )
+    crs = CRS.from_wkt(wkt)
+    # The adapter writes GeoTransform as c a b f d e (GDAL order).
+    c, a, b, f, d, e = gt
+    transform = Affine(a, b, c, d, e, f)
+    inv = ~transform
+    # All four raster corners, so a rotated/sheared transform still bounds right.
+    corners = [(0, 0), (width, 0), (0, height), (width, height)]
+    pts = [transform * (cx, cy) for cx, cy in corners]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    bounds = (min(xs), min(ys), max(xs), max(ys))
+    decimations = [2**i for i in range(levels + 1)]
+    return _Grid(block_w, block_h, decimations, crs, inv, width, height, bounds)
 
 
 def _blocks_spanned(lo: float, hi: float, block: float) -> int:
@@ -140,23 +229,58 @@ def select_chunk_tiles(
     targets: tuple[int, ...] = DEFAULT_TARGETS,
     max_tiles_per_zoom: int = 4000,
 ) -> list[TileSpec]:
-    """Select one tile per chunk-count bucket in ``targets`` for ``cog_path``.
+    """Select one tile per chunk-count bucket in ``targets`` for the COG."""
+    return _select_from_grid(
+        _read_cog_grid(cog_path),
+        tile_matrix_set=tile_matrix_set,
+        targets=targets,
+        max_tiles_per_zoom=max_tiles_per_zoom,
+    )
 
-    Scans WebMercator zooms from the COG's native zoom downward — finer zooms
+
+def select_zarr_chunk_tiles(
+    store: str,
+    *,
+    role: str = "sink",
+    tile_matrix_set: str = "WebMercatorQuad",
+    targets: tuple[int, ...] = DEFAULT_TARGETS,
+    max_tiles_per_zoom: int = 4000,
+) -> list[TileSpec]:
+    """Select one tile per chunk-count bucket for the GeoZarr ``store``.
+
+    The store counterpart to :func:`select_chunk_tiles`: a tile's cost is how many
+    Zarr *chunks* its footprint straddles, the same partial-access question COG
+    answers with internal blocks.
+    """
+    return _select_from_grid(
+        _read_zarr_grid(store, role),
+        tile_matrix_set=tile_matrix_set,
+        targets=targets,
+        max_tiles_per_zoom=max_tiles_per_zoom,
+    )
+
+
+def _select_from_grid(
+    grid: _Grid,
+    *,
+    tile_matrix_set: str = "WebMercatorQuad",
+    targets: tuple[int, ...] = DEFAULT_TARGETS,
+    max_tiles_per_zoom: int = 4000,
+) -> list[TileSpec]:
+    """Select one tile per chunk-count bucket in ``targets`` for ``grid``.
+
+    Scans WebMercator zooms from the object's native zoom downward — finer zooms
     expose small chunk counts (1/2/4); coarser-than-the-coarsest-overview zooms
     force larger reads (9+). Returns one :class:`TileSpec` per reachable target
     (label ``"{n}chunk"``); unreachable buckets are silently skipped. The ``9``
     bucket accepts the smallest count ``>= 9``.
     """
-    morecantile, rasterio, transform_bounds = _require_geo()
-
-    with rasterio.open(cog_path) as src:
-        block_h, block_w = src.block_shapes[0]
-        decimations = [1, *src.overviews(1)]
-        crs = src.crs
-        width, height = src.width, src.height
-        inv = ~src.transform
-        bounds = src.bounds
+    morecantile, _rasterio, transform_bounds = _require_geo()
+    block_w, block_h = grid.block_w, grid.block_h
+    decimations = grid.decimations
+    crs, inv = grid.crs, grid.inv
+    width, height = grid.width, grid.height
+    bounds = grid.bounds
 
     tms = morecantile.tms.get(tile_matrix_set)
     west, south, east, north = transform_bounds(crs, "EPSG:4326", *bounds)
@@ -245,22 +369,47 @@ def render_chunk_layout(
 ) -> str:
     """Render the block grid with each selected tile's footprint to ``out_path``.
 
-    One panel per scenario tile: the COG's internal block grid (at that tile's
-    overview resolution) over the dataset extent, with the tile's read footprint
-    highlighted and annotated with its chunk count — the "1 vs 2 vs 4 vs 9+
-    chunks per tile" picture, mirroring the reference notebook. Returns
+    One panel per scenario tile: the object's internal block/chunk grid (at that
+    tile's overview resolution) over the dataset extent, with the tile's read
+    footprint highlighted and annotated with its chunk count — the "1 vs 2 vs 4 vs
+    9+ chunks per tile" picture, mirroring the reference notebook. Returns
     ``out_path``. Requires matplotlib (the ``cog`` extra).
     """
-    morecantile, rasterio, transform_bounds = _require_geo()
+    return _render_from_grid(
+        _read_cog_grid(cog_path), tiles, out_path, tile_matrix_set=tile_matrix_set
+    )
+
+
+def render_zarr_chunk_layout(
+    store: str,
+    tiles: list[TileSpec],
+    out_path: str,
+    *,
+    role: str = "sink",
+    tile_matrix_set: str = "WebMercatorQuad",
+) -> str:
+    """Render the GeoZarr store's chunk grid with each tile's footprint."""
+    return _render_from_grid(
+        _read_zarr_grid(store, role), tiles, out_path, tile_matrix_set=tile_matrix_set
+    )
+
+
+def _render_from_grid(
+    grid: _Grid,
+    tiles: list[TileSpec],
+    out_path: str,
+    *,
+    tile_matrix_set: str = "WebMercatorQuad",
+) -> str:
+    """Render ``grid``'s block/chunk grid with each selected tile's footprint."""
+    morecantile, _rasterio, transform_bounds = _require_geo()
     plt, Rectangle = _require_viz()
 
-    with rasterio.open(cog_path) as src:
-        block_h, block_w = src.block_shapes[0]
-        decimations = [1, *src.overviews(1)]
-        crs = src.crs
-        width, height = src.width, src.height
-        inv = ~src.transform
-        bounds = src.bounds
+    block_w, block_h = grid.block_w, grid.block_h
+    decimations = grid.decimations
+    crs, inv = grid.crs, grid.inv
+    width, height = grid.width, grid.height
+    bounds = grid.bounds
 
     tms = morecantile.tms.get(tile_matrix_set)
     mleft, _, mright, _ = transform_bounds(crs, tms.crs, *bounds)

@@ -12,9 +12,13 @@ baseline_format: geotiff
 reader: sentinel2-maja
 target_formats:
   - cog
+  - geozarr
 options:
   reflectance: [FRE]
   bands: [B2, B3, B4, B8]
   masks: [CLM, EDG, SAT, MG2]
 grouping_lever:
+  # Each candidate format clears the object-size tiers with its own lever: COG
+  # internal tiling, Zarr v3 sharding. Both are swept against the tier thresholds.
   cog_block_size: [256, 512, 1024]
+  zarr_shard_shape: [[1024, 1024], [2048, 2048]]

@@ -16,6 +16,9 @@ BENCHMARK_EXAMPLE = "configs/benchmarks/example_cog.yaml"
 
 MAJA_DATASET_EXAMPLE = "configs/datasets/example_sentinel2_maja.yaml"
 MAJA_BENCHMARK_EXAMPLE = "configs/benchmarks/example_sentinel2_maja_cog.yaml"
+MAJA_GEOZARR_BENCHMARK_EXAMPLE = (
+    "configs/benchmarks/example_sentinel2_maja_geozarr.yaml"
+)
 
 
 def test_example_dataset_config_validates():
@@ -38,6 +41,16 @@ def test_example_maja_benchmark_config_validates():
     cfg = load_benchmark_config(MAJA_BENCHMARK_EXAMPLE)
     assert cfg.params["scope"] == "product-set"
     assert cfg.params["products"]["limit"] == 3
+
+
+def test_example_maja_geozarr_benchmark_config_validates():
+    cfg = load_benchmark_config(MAJA_GEOZARR_BENCHMARK_EXAMPLE)
+    assert cfg.formats == ["geozarr"]
+    assert cfg.params["shard_shape"] == [2048, 2048]
+    assert cfg.params["codec"] == "zstd"
+    # The MAJA dataset offers both candidate formats.
+    ds = load_dataset_config(MAJA_DATASET_EXAMPLE)
+    assert "geozarr" in ds.target_formats
 
 
 def test_example_benchmark_config_validates():

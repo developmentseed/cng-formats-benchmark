@@ -64,29 +64,40 @@ def measure_display(
     tile_matrix_set: str = "WebMercatorQuad",
     fmt: str = "png",
     timeout: float = 30.0,
+    path_prefix: str = "cog",
+    extra_query: dict[str, str] | None = None,
 ) -> list[MetricResult]:
     """Time TiTiler tile fetches per chunk-crossing scenario.
 
-    ``endpoint`` is the TiTiler base URL; ``cog_uri`` is the GDAL-readable URL
-    TiTiler serves from (e.g. ``s3://…``). ``tiles`` are the scenarios to time,
-    one per chunk bucket (see :func:`display_tiles.select_chunk_tiles`); each is
-    fetched ``samples`` times and reported as its own flat ``display_{label}_*``
-    metrics. Returns an empty-scenario summary if ``tiles`` is empty (e.g. no
-    bucket was reachable for this object).
+    ``endpoint`` is the TiTiler base URL; ``cog_uri`` is the URL TiTiler serves
+    from (e.g. ``s3://…``). ``tiles`` are the scenarios to time, one per chunk
+    bucket (see :func:`display_tiles.select_chunk_tiles`); each is fetched
+    ``samples`` times and reported as its own flat ``display_{label}_*`` metrics.
+    Returns an empty-scenario summary if ``tiles`` is empty (e.g. no bucket was
+    reachable for this object).
+
+    ``path_prefix`` selects the tiler router — ``"cog"`` for a COG against
+    TiTiler's COG endpoints, or the multidim/xarray router (e.g. a titiler-xarray
+    surface) for a GeoZarr store — and ``extra_query`` carries any extra query
+    parameters that router needs (e.g. ``{"variable": "data"}`` to pick the array).
     """
     if samples < 1:
         raise ValueError("samples must be >= 1")
     base = endpoint.rstrip("/")
     encoded = quote(cog_uri, safe="")
+    prefix = f"/{path_prefix.strip('/')}" if path_prefix.strip("/") else ""
+    extra = "".join(
+        f"&{quote(k)}={quote(str(v))}" for k, v in (extra_query or {}).items()
+    )
 
     # Validate the object is servable before timing tiles (clearer failures).
-    _fetch(f"{base}/cog/info?url={encoded}", timeout)
+    _fetch(f"{base}{prefix}/info?url={encoded}{extra}", timeout)
 
     metrics: list[MetricResult] = []
     for spec in tiles:
         tile_url = (
-            f"{base}/cog/tiles/{tile_matrix_set}/"
-            f"{spec.z}/{spec.x}/{spec.y}.{fmt}?url={encoded}"
+            f"{base}{prefix}/tiles/{tile_matrix_set}/"
+            f"{spec.z}/{spec.x}/{spec.y}.{fmt}?url={encoded}{extra}"
         )
         latencies: list[float] = []
         bytes_total = 0

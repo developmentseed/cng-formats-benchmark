@@ -1,0 +1,72 @@
+{{- if .Values.titilerXarray.enabled }}
+# A second tile-server surface that speaks xarray/Zarr v3 for the GeoZarr display
+# metric. The COG TiTiler (titiler.yaml) cannot serve a sharded Zarr store — GDAL
+# rejects the sharding_indexed codec — so GeoZarr display is served here, by a
+# titiler-xarray image that reads the store with zarr-python over fsspec. Off by
+# default; enable it for runs whose benchmark includes `geozarr` + `display`, and
+# point the benchmark's `params.display_titiler_path` at this router.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cng-benchmark.fullname" . }}-titiler-xarray
+  labels:
+    {{- include "cng-benchmark.labels" . | nindent 4 }}
+    app.kubernetes.io/component: titiler-xarray
+spec:
+  replicas: {{ .Values.titilerXarray.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}
+      app.kubernetes.io/component: titiler-xarray
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}
+        app.kubernetes.io/component: titiler-xarray
+    spec:
+      containers:
+        - name: titiler-xarray
+          image: {{ .Values.titilerXarray.image | quote }}
+          env:
+            # Reads the store over the boto3-style AWS_* environment. Its object
+            # store backend reads AWS_ENDPOINT (not AWS_ENDPOINT_URL) and needs
+            # AWS_ALLOW_HTTP=true for a plain-HTTP (non-TLS) sink endpoint.
+            {{- include "cng-benchmark.s3Env" . | nindent 12 }}
+            {{- with .Values.titilerXarray.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # The titiler-xarray image serves on port 80 inside the container.
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cng-benchmark.fullname" . }}-titiler-xarray
+  labels:
+    {{- include "cng-benchmark.labels" . | nindent 4 }}
+    app.kubernetes.io/component: titiler-xarray
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}
+    app.kubernetes.io/component: titiler-xarray
+  ports:
+    - name: http
+      port: {{ .Values.titilerXarray.port }}
+      targetPort: http
+{{- end }}

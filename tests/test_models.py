@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 
 from cng_benchmark.models import (
     BenchmarkRun,
+    CogLayout,
+    GeoZarrLayout,
     HistogramBin,
     MetricResult,
     ObjectSizeProfile,
@@ -54,3 +56,39 @@ def test_benchmark_run_defaults_are_empty():
     assert run.params == {}
     assert run.metrics == []
     assert run.object_profile is None
+    assert run.object_layouts == []
+
+
+def test_object_layouts_union_round_trips_subclass_fields():
+    run = BenchmarkRun(
+        timestamp=datetime(2026, 6, 17, tzinfo=UTC),
+        dataset_id="example-raster",
+        format_id="geozarr",
+        object_layouts=[
+            CogLayout(
+                name="FRE_B4",
+                size_bytes=100,
+                is_tiled=True,
+                block_height=512,
+                block_width=512,
+                overview_decimations=[2, 4],
+                internal_tiles=16,
+            ),
+            GeoZarrLayout(
+                name="FRE_B4",
+                size_bytes=200,
+                chunk_shape=[512, 512],
+                shard_shape=[1024, 1024],
+                chunks_per_shard=4,
+                codec="zstd",
+                multiscale_levels=1,
+                shard_count=4,
+            ),
+        ],
+    )
+    reloaded = BenchmarkRun.model_validate_json(run.model_dump_json())
+    assert reloaded == run
+    # The discriminator preserved each subclass's distinct fields.
+    cog, geozarr = reloaded.object_layouts
+    assert cog.kind == "cog" and cog.internal_tiles == 16
+    assert geozarr.kind == "geozarr" and geozarr.chunks_per_shard == 4

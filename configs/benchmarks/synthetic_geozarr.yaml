@@ -1,0 +1,30 @@
+# Synthetic GeoZarr benchmark descriptor used to prove the stack deploys.
+#
+# Mirrors synthetic_cog.yaml for the second format: the runner converts a
+# generated fixture raster (seeded with `cng-benchmark seed`, supplied via
+# --source) to a sharded 2D GeoZarr store and collects the full metric set, then
+# writes a result artifact. `source`, `output` and the TiTiler endpoint are
+# supplied by the deployment so the same config is portable. CI never runs a
+# benchmark on real data — this exercises the deployable path only.
+id: synthetic-geozarr-end-to-end
+dataset: synthetic-cog
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: warm
+    min_object_bytes: 33554432   # 32 MiB
+  - name: cold
+    min_object_bytes: 104857600  # 100 MiB
+params:
+  # Small chunk/shard so even a tiny fixture produces multiple shard objects.
+  chunk_shape: [128, 128]
+  shard_shape: [256, 256]
+  codec: zstd
+  # titiler-xarray (the compose `geozarr` profile) mounts its tiler at the root,
+  # so the display router prefix is empty; a multidim extension would use "md".
+  display_titiler_path: ""

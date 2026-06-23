@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 
-from cng_benchmark.models import ObjectLayout
+from cng_benchmark.models import CogLayout
 
 
 def _require_geo():
@@ -31,8 +31,8 @@ def _require_geo():
     return rasterio
 
 
-def describe_object_layout(name: str, path: str, size_bytes: int) -> ObjectLayout:
-    """Return the :class:`ObjectLayout` of the raster at ``path``.
+def describe_cog_layout(name: str, path: str, size_bytes: int) -> CogLayout:
+    """Return the :class:`CogLayout` of the raster at ``path``.
 
     ``is_tiled`` is true when the block does not span the full raster width —
     i.e. the file is internally tiled (a COG), not striped. ``internal_tiles`` is
@@ -47,7 +47,7 @@ def describe_object_layout(name: str, path: str, size_bytes: int) -> ObjectLayou
         tiled = bool(src.profile.get("tiled", False)) or block_w < width
         decimations = [int(d) for d in src.overviews(1)]
         internal_tiles = math.ceil(width / block_w) * math.ceil(height / block_h)
-    return ObjectLayout(
+    return CogLayout(
         name=name,
         size_bytes=size_bytes,
         is_tiled=tiled,

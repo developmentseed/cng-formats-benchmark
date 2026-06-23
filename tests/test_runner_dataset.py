@@ -32,6 +32,18 @@ class _MultiFileDataset(Dataset):
         return products
 
 
+@DATASETS.register("test-binfiles")
+class _BinFileDataset(Dataset):
+    """Test reader: one product whose components are the ``*.bin`` files in source."""
+
+    def products(self, *, prefix=None, limit=None):
+        root = Path(self.source_uri)
+        comps = [
+            SourceObject(name=f.stem, uri=str(f)) for f in sorted(root.glob("*.bin"))
+        ]
+        return [Product(id="sceneZ", components=comps)] if comps else []
+
+
 def _write_product(root: Path, product_id: str, n_components: int) -> None:
     pytest.importorskip("rasterio")
     pytest.importorskip("rio_cogeo")
@@ -115,7 +127,9 @@ def test_product_set_summary_shows_tiling(tmp_path):
     per_product_md = render_markdown_summary(result.per_product[0])
     assert "## Tiling layout" in per_product_md
     assert "Internally tiled:" in per_product_md
-    assert "| Tiled |" in render_product_set_summary(result)
+    summary = render_product_set_summary(result)
+    assert "| Layout |" in summary
+    assert "tiled" in summary  # COG products report their tiled fraction
 
 
 def test_product_set_rollup_pools_all_products(tmp_path):
@@ -173,3 +187,93 @@ def test_no_products_raises(tmp_path):
     cfg = _benchmark(["object_size"], {"scope": "product-set"})
     with pytest.raises(ValueError, match="no products"):
         run_dataset_benchmark(cfg, _dataset_config(src), str(tmp_path / "out"))
+
+
+# --- zarr-store object kind flows through the per-component path --------------
+
+
+def _register_fake_zarr():
+    """Register a store-kind adapter that writes a tiny sharded store per source.
+
+    Lets the runner's store branch (directory target, ``upload_tree``,
+    store-walking ``enumerate_objects``, a ``GeoZarrLayout`` describer, directory
+    cleanup) be exercised with only zarr + numpy — no rioxarray source read.
+    """
+    from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+    from cng_benchmark.formats.geozarr import (
+        describe_store_layout,
+        enumerate_store_objects,
+    )
+    from cng_benchmark.registry import FORMATS
+
+    if "fake-zarr" in FORMATS:
+        return
+
+    @FORMATS.register("fake-zarr")
+    class _FakeZarrAdapter(FormatAdapter):
+        name = "fake-zarr"
+        object_kind = ObjectKind.ZARR_STORE
+
+        def target_basename(self):
+            return "geozarr.zarr"
+
+        def convert(self, source, target, params):
+            import numpy as np
+
+            from cng_benchmark.formats.geozarr import _write_sharded
+
+            data = (np.arange(1024 * 1024, dtype="uint16") % 100).reshape(1024, 1024)
+            _write_sharded(
+                target, data, chunk=(512, 512), shard=(512, 512), codec="none"
+            )
+
+        def describe_grouping_lever(self):
+            return "Zarr v3 chunk and shard shape"
+
+        def enumerate_objects(self, target):
+            return enumerate_store_objects(target)
+
+        def describe_layout(self, target, *, name=None):
+            return [describe_store_layout(target, name or self.name)]
+
+
+def test_zarr_store_object_flows_through_per_component_path(tmp_path):
+    pytest.importorskip("zarr")
+    pytest.importorskip("xarray")
+    # The runner reads every source through a GDAL session (rasterio), regardless
+    # of the produced object kind — so this integration test needs the geo stack,
+    # exactly like the COG runner tests. The store-writing logic itself is covered
+    # without rasterio in test_geozarr.py.
+    pytest.importorskip("rasterio")
+    _register_fake_zarr()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(2):
+        (src / f"band{i}.bin").write_bytes(b"x" * 1000)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["write", "object_size"], {"scope": "product"}).model_copy(
+        update={"formats": ["fake-zarr"]}
+    )
+    ds_cfg = DatasetConfig.model_validate(
+        {
+            "id": "z",
+            "reader": "test-binfiles",
+            "source": str(src),
+            "baseline_format": "geotiff",
+            "target_formats": ["fake-zarr"],
+        }
+    )
+    result = run_dataset_benchmark(cfg, ds_cfg, str(output))
+
+    run = result.per_product[0]
+    # 2 components × 4 shards (1024/512 = 2 per side) = 8 stored objects.
+    assert run.object_profile.count == 8
+    # One GeoZarrLayout per component (per produced array), pooled into the roll-up.
+    assert [ly.kind for ly in run.object_layouts] == ["geozarr", "geozarr"]
+    assert len(result.rollup.object_layouts) == 2
+    # Published as a tree under each component dir, not a single file.
+    assert (
+        output / "objects" / "sceneZ" / "band0" / "geozarr.zarr" / "zarr.json"
+    ).exists()

@@ -106,8 +106,24 @@ params:
 | `formats` | target format(s); the first is used unless overridden |
 | `metrics` | any of `write`, `object_size`, `read`, `display` |
 | `tiers` | tier policy: a name + minimum recommended mean object size (bytes) |
-| `params` | format params, e.g. `block_size` (COG grouping lever) |
+| `params` | format params: the grouping lever + run shape (see below) |
 | `source` / `object_source` / `output` | location URIs; CLI flags override them |
+
+The grouping-lever params are format-specific — the runner resolves the adapter by
+name and reads what it needs, so adding a format never changes the schema:
+
+| Format | `params` levers |
+| --- | --- |
+| `cog` | `block_size` (internal tiling), `compress` |
+| `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels`; `display_titiler_path` selects the multidim/xarray TiTiler router for display |
+
+GeoZarr is a **per-component, 2D** adapter: each source raster becomes one sharded
+2D store (a directory of shard objects), the per-component analogue of the COG arm,
+so it flows through the same `--source` and `--dataset` paths. `chunk_shape` /
+`shard_shape` accept a 2D `[y, x]` or a 3D `[t, y, x]` shape (the trailing two,
+spatial, dims are used) and tolerate a swept list of shapes (the first is taken).
+Time-stacking the scenes into a 3D cube, and reading a set of objects as a cube,
+are deferred follow-ups.
 
 !!! note "Why URIs are usually omitted from the file"
     Keeping `source` / `output` out of the committed config makes it portable
@@ -168,16 +184,23 @@ the coldest (highest) one — or none, if the objects are too small for any tier
 | `read` | `metrics/read.py` | `read_window_count`, `read_latency_mean/p50`, `read_decoded_throughput` |
 | `display` | `metrics/display.py` (+ `display_tiles.py`) | per chunk-bucket `display_{1,2,4,9}chunk_latency_mean/p50`, `display_scenarios`, plus a `display_chunk_layout.png` artifact |
 
+`read` and `display` adapt to the produced object kind: a COG is read with
+rasterio over `/vsis3` and served by TiTiler's `/cog` endpoints; a GeoZarr store
+is read zarr-natively over fsspec (GDAL cannot read the `sharding_indexed` codec)
+and served by a multidim/xarray TiTiler surface (`params.display_titiler_path`).
+Both emit the same `read_*` / `display_*` metric names.
+
 `read` throughput is **decoded** bytes/s (a fair relative cross-format number),
 not bytes over the wire; latency reflects the full range-request round-trip.
 
-`display` does not time a single fixed tile. It inspects the produced COG's block
-size and overviews to pick WebMercator tiles that each touch a target number of
-internal blocks ("chunks") — 1, 2, 4 and 9+ — and times each, so latency can be
-read against chunk-crossing. Unreachable buckets (e.g. on a tiny raster) are
-skipped; the targets default to `(1, 2, 4, 9)` and can be overridden via
-`params.display_chunk_targets`. A `display_chunk_layout.png` overlaying each
-served tile on the block grid is written alongside the object.
+`display` does not time a single fixed tile. It inspects the produced object's
+block/chunk grid and overview/multiscale levels to pick WebMercator tiles that
+each touch a target number of internal blocks/chunks — 1, 2, 4 and 9+ — and times
+each, so latency can be read against chunk-crossing. Unreachable buckets (e.g. on
+a tiny raster) are skipped; the targets default to `(1, 2, 4, 9)` and can be
+overridden via `params.display_chunk_targets`. A `display_chunk_layout.png`
+overlaying each served tile on the block/chunk grid is written alongside the
+object.
 
 ## The result
 
@@ -186,12 +209,20 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
 - run context — `timestamp`, `tool_versions`, `dataset_id`, `format_id`, `params`
 - `object_profile` — `count`, `total_bytes`, `mean`/`median`/`p50`/`p90`/`p95`/`p99`,
   `min_bytes`/`max_bytes`, a `histogram`, and `tier_fit` / `highest_tier`
-- `object_layouts` — per produced object, its **tiling layout**: `is_tiled`
-  (range-read friendly vs striped), `block_width`/`block_height`,
-  `overview_decimations`, `internal_tiles`. Captured for every object (no tile
-  server needed); `summary.md` renders a "Tiling layout" table and a tiled/striped
-  count. The chunk-aware `display` metric also publishes a `display_chunk_layout.png`
-  next to the sampled object.
+- `object_layouts` — per produced object, its **partial-access layout**, typed per
+  format (discriminated by `kind`). Every format answers the same "can a client
+  fetch part without the whole" question through its own structure:
+  - `cog` → a `CogLayout`: `is_tiled` (range-read friendly vs striped),
+    `block_width`/`block_height`, `overview_decimations`, `internal_tiles`;
+    `summary.md` renders a "Tiling layout" table + a tiled/striped count.
+  - `geozarr` → a `GeoZarrLayout`: `chunk_shape` (addressable unit),
+    `shard_shape` (stored object), `chunks_per_shard`, `codec`,
+    `multiscale_levels`, `shard_count`; `summary.md` renders a "Chunk/shard
+    layout" table + a shard-object count.
+
+  Captured for every object (no tile server needed). The chunk-aware `display`
+  metric also publishes a `display_chunk_layout.png` next to the sampled object
+  (the block/chunk grid with each served tile's footprint).
 - `metrics` — a list of `{name, value, unit, detail}` scalars
 
 It is written as `result.json` and rendered to `summary.md`
