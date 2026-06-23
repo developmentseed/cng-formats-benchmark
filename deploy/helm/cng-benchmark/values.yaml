@@ -27,6 +27,13 @@ runner:
   source: s3://bench/fixtures/fixture.tif
   output: s3://bench/results/
   backoffLimit: 0
+  # Which tile server the display metric targets, by produced-object kind:
+  # `cog` -> the TiTiler /cog service (raster COGs); `xarray` -> the titiler-xarray
+  # service (GeoZarr sharded stores, the multidim/md router). The runner already
+  # picks the tile *path* by object_kind; this points its TITILER_ENDPOINT (and the
+  # readiness wait) at the matching service. Set `xarray` for a geozarr + display
+  # run and enable titilerXarray.
+  displaySurface: cog
 
 # Seed a synthetic fixture raster before the run. Local/CI only — for a real run
 # against real data, disable this and point runner.source at the real bucket.
