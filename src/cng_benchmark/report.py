@@ -190,19 +190,22 @@ def _render_octree_layout(layouts: list) -> list[str]:
     answer to the same partial-access question COG answers with internal tiling.
     """
     nodes = sum(ly.num_nodes for ly in layouts)
+    carried = sorted({d for ly in layouts for d in ly.extra_dimensions})
     lines = [
         "",
         "## Octree layout",
         "",
         f"- **Octree nodes:** {nodes} across {len(layouts)} file(s)",
+        f"- **Carried point variables:** {len(carried)} extra dimension(s)"
+        + (f" ({', '.join(carried)})" if carried else " — geometry only"),
         "",
-        "| Object | Nodes | Depth | Points | Points/node |",
-        "| --- | --- | --- | --- | --- |",
+        "| Object | Nodes | Depth | Points | Points/node | Extra dims |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         lines.append(
             f"| {ly.name} | {ly.num_nodes} | {ly.max_depth} | "
-            f"{ly.point_count} | {ly.points_per_node} |"
+            f"{ly.point_count} | {ly.points_per_node} | {len(ly.extra_dimensions)} |"
         )
     return lines
 

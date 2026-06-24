@@ -105,36 +105,111 @@ def test_octree_node_read_metric_round_trips(tmp_path):
     assert metrics["read_decoded_throughput"].detail["points"] == 40_000
 
 
-def test_convert_reads_a_pixc_group_and_writes_copc(tmp_path):
-    pytest.importorskip("xarray")
-    pytest.importorskip("h5netcdf")
-    pytest.importorskip("h5py")
+def _pixc_netcdf(tmp_path, n=20_000, *, nan_first=False):
+    """Write a synthetic PIXC pixel_cloud netCDF: geometry + a few point variables."""
     import xarray as xr
 
-    from cng_benchmark.formats.copc import CopcAdapter
-
-    n = 20_000
     lon, lat, height = _cloud(n)
-    # Geographic-ish coordinates in a pixel_cloud group, plus a NaN to be dropped.
     lon = lon / 1000.0
     lat = lat / 1000.0
-    height[0] = np.nan
+    if nan_first:
+        height = height.copy()
+        height[0] = np.nan
+    rng = np.random.default_rng(7)
     ds = xr.Dataset(
         {
             "longitude": ("points", lon),
             "latitude": ("points", lat),
-            "height": ("points", height),
+            "height": ("points", height.astype("float32")),
+            "sig0": ("points", rng.uniform(0, 1, n).astype("float32")),
+            "water_frac": ("points", rng.uniform(0, 1, n).astype("float64")),
+            # 'classification' collides with a standard LAS pf6 dimension name.
+            "classification": ("points", rng.integers(0, 5, n).astype("uint8")),
+            "geolocation_qual": ("points", rng.integers(-3, 3, n).astype("int16")),
         }
     )
     granule = str(tmp_path / "SWOT_L2_HR_PIXC_048.nc")
     ds.to_netcdf(granule, group="pixel_cloud", engine="h5netcdf")
+    return granule, ds
 
+
+def test_convert_carries_all_pixc_point_variables(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("h5py")
+    from cng_benchmark.formats.copc import CopcAdapter
+
+    n = 20_000
+    granule, _ = _pixc_netcdf(tmp_path, n, nan_first=True)
     target = str(tmp_path / "out.copc.laz")
-    source = f"{PIXC_SCHEME}{granule}::pixel_cloud"
-    CopcAdapter().convert(source, target, {"span": 32, "max_depth": 4})
+    CopcAdapter().convert(
+        f"{PIXC_SCHEME}{granule}::pixel_cloud", target, {"span": 32, "max_depth": 4}
+    )
 
     ly = describe_copc_layout(target, "pixel_cloud")
     assert ly.point_count == n - 1  # the NaN point was dropped
+    # Every non-geometry point variable is carried as an extra dimension; the
+    # 'classification' name collides with a standard LAS dim and is suffixed.
+    assert set(ly.extra_dimensions) == {
+        "sig0",
+        "water_frac",
+        "classification_1",
+        "geolocation_qual",
+    }
+
+
+def test_extra_dimension_values_and_dtypes_round_trip(tmp_path):
+    pytest.importorskip("laspy")
+    from cng_benchmark.formats.copc import _build_copc
+
+    n = 15_000
+    x, y, z = _cloud(n)
+    rng = np.random.default_rng(3)
+    extras = {
+        "sig0": rng.uniform(0, 1, n).astype("float32"),
+        "qual": rng.integers(-100, 100, n).astype("int16"),
+        "pid": np.arange(n, dtype="uint32"),  # unique id to pair points
+    }
+    target = str(tmp_path / "rt.copc.laz")
+    _build_copc(target, x, y, z, extras, span=32, max_depth=4)
+
+    import laspy
+
+    back = laspy.CopcReader.open(target).query()
+    order = np.argsort(np.asarray(back["pid"]))
+    assert np.array_equal(np.asarray(back["pid"])[order], np.arange(n))
+    # float32 stays float32 and int16 stays int16 — values preserved exactly.
+    assert np.asarray(back["sig0"]).dtype == np.float32
+    assert np.array_equal(np.asarray(back["sig0"])[order], extras["sig0"])
+    assert np.array_equal(
+        np.asarray(back["qual"])[order].astype("int16"), extras["qual"]
+    )
+
+
+def test_include_and_exclude_select_the_carried_set(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("h5py")
+    from cng_benchmark.formats.copc import CopcAdapter
+
+    granule, _ = _pixc_netcdf(tmp_path, 8_000)
+    inc = str(tmp_path / "inc.copc.laz")
+    CopcAdapter().convert(
+        f"{PIXC_SCHEME}{granule}::pixel_cloud?include=sig0,geolocation_qual",
+        inc,
+        {"span": 32},
+    )
+    assert set(describe_copc_layout(inc, "x").extra_dimensions) == {
+        "sig0",
+        "geolocation_qual",
+    }
+
+    exc = str(tmp_path / "exc.copc.laz")
+    CopcAdapter().convert(
+        f"{PIXC_SCHEME}{granule}::pixel_cloud?exclude=water_frac", exc, {"span": 32}
+    )
+    assert "water_frac" not in describe_copc_layout(exc, "x").extra_dimensions
+    assert "sig0" in describe_copc_layout(exc, "x").extra_dimensions
 
 
 def test_default_span_is_a_per_node_budget():

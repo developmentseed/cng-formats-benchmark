@@ -10,15 +10,27 @@ COG, with the read metric an octree-node spatial query
 (:func:`cng_benchmark.metrics.read.measure_copc_read`) rather than a raster
 window. There is no display surface (a point cloud is not a TiTiler raster tile).
 
-The COPC writer is :mod:`copclib` and the layout reader is its ``FileReader``;
-both are pip wheels, so the octree-builder / enumerate / layout logic is
-unit-testable in CI on a synthetic point cloud. The source read in
-:func:`_load_points` is the only part that needs the granule stack — ``xarray`` +
-``h5netcdf`` for a SWOT PIXC ``pixel_cloud`` group, or ``laspy`` for a LAS/LAZ
-tile (the CO3D CARS reuse) — imported lazily.
+A SWOT PIXC ``pixel_cloud`` group is **content-complete**: not just the geometry
+(lon/lat/height → x/y/z) but every other per-point variable (``sig0``,
+``water_frac``, ``classification``, the quality flags, …) is carried as a LAS
+**extra dimension**, preserving dtype — so the produced COPC's size is a
+like-for-like basis for comparison with the source netCDF, not a geometry-only
+fraction (issue #36). The carried set is configurable from the dataset ``options``
+(see :mod:`cng_benchmark.datasets.swot_pixc`); by default every variable on the
+point dimension is carried.
 
-A COPC granule is large (a SWOT PIXC pass is ~0.4–0.95 GB), so as a single object
-it already clears the cold tiers; the lever here is about preserving
+The point record is built with :mod:`laspy` (its extra-dimension API is
+numpy-native and lays out LAS ExtraBytes correctly), and the COPC octree container
+is written with :mod:`copclib`; the two are bridged by a one-point LAZ that hands
+copclib the matching ExtraBytes VLR, after which each octree node is filled by a
+vectorised :func:`copclib.Points.Unpack` of the laspy point bytes. Both are pip
+wheels, so the builder / enumerate / layout logic is unit-testable in CI on a
+synthetic cloud. The source read in :func:`_load_points` needs the granule stack —
+``xarray`` + ``h5netcdf`` for a PIXC group, or ``laspy`` for a LAS/LAZ tile (the
+CO3D CARS reuse) — imported lazily.
+
+A COPC granule is large (a content-complete PIXC pass is many hundred MB), so as a
+single object it already clears the cold tiers; the lever here is about preserving
 range-addressable partial access, not reaching a size floor.
 """
 
@@ -26,6 +38,7 @@ from __future__ import annotations
 
 import math
 import os
+import tempfile
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -35,8 +48,9 @@ from cng_benchmark.models import CopcLayout
 from cng_benchmark.registry import FORMATS
 
 #: Prefix marking a component URI as a netCDF group read as a point cloud:
-#: ``PIXC:<granule_uri>::<group>`` (see :func:`_load_points`). Passed through
-#: unchanged by ``storage.to_gdal_path`` (it is neither an ``s3://`` nor a
+#: ``PIXC:<granule_uri>::<group>`` with an optional ``?include=…&exclude=…`` query
+#: selecting the carried point variables (see :func:`_parse_pixc_uri`). Passed
+#: through unchanged by ``storage.to_gdal_path`` (it is neither an ``s3://`` nor a
 #: ``file://`` URI), like the SWOT raster reader's ``NETCDF:`` subdataset paths.
 PIXC_SCHEME = "PIXC:"
 
@@ -46,6 +60,9 @@ DEFAULT_SPAN = 128
 
 #: COPC point format (6 = the standard LAS 1.4 point with GPS time).
 POINT_FORMAT_ID = 6
+
+#: Max length of a LAS extra-dimension name (the ExtraBytes name field is 32 bytes).
+_MAX_EB_NAME = 32
 
 #: PIXC ``pixel_cloud`` coordinate variables, tried in order (X, Y, Z).
 _LON_NAMES = ("longitude", "lon")
@@ -94,21 +111,48 @@ def _derive_max_depth(n_points: int, span: int) -> int:
     return min(12, max(1, math.ceil(math.log(n_points / budget, 8)) + 1))
 
 
-def _load_points(source: str, *, role: str = "source"):
-    """Load ``(x, y, z)`` arrays from a point-cloud source.
+def _parse_pixc_uri(source: str) -> tuple[str, str, list[str] | None, list[str]]:
+    """Parse a ``PIXC:<granule>::<group>?include=…&exclude=…`` component URI.
 
-    Dispatches on the source form: a ``PIXC:<granule>::<group>`` URI reads the
-    netCDF group's lon/lat/height with ``xarray`` (the SWOT PIXC pixel cloud); a
-    ``.las``/``.laz``/``.copc.laz`` path reads its points with ``laspy`` (the CO3D
-    CARS reuse). Non-finite points are dropped.
+    Returns ``(granule_uri, group, include, exclude)`` where ``include`` is an
+    explicit allow-list of carried point variables (``None`` = carry all on the
+    point dimension) and ``exclude`` a deny-list. The granule URI (``s3://`` or
+    local) is kept intact for the xarray/fsspec loader.
+    """
+    rest = source[len(PIXC_SCHEME) :]
+    base, _, query = rest.partition("?")
+    granule_uri, _, group = base.rpartition("::")
+    include: list[str] | None = None
+    exclude: list[str] = []
+    for kv in query.split("&") if query else []:
+        key, _, val = kv.partition("=")
+        vals = [v for v in val.split(",") if v]
+        if key == "include":
+            include = vals
+        elif key == "exclude":
+            exclude = vals
+    return granule_uri, group or "pixel_cloud", include, exclude
+
+
+def _load_points(source: str, *, role: str = "source"):
+    """Load ``(x, y, z, extras)`` from a point-cloud source.
+
+    Dispatches on the source form: a ``PIXC:`` URI reads the netCDF group's
+    lon/lat/height plus its other point variables with ``xarray`` (the SWOT PIXC
+    pixel cloud); a ``.las``/``.laz`` path reads its geometry with ``laspy`` (the
+    CO3D CARS reuse). ``extras`` maps a variable name to its per-point array.
+    Points with a non-finite coordinate are dropped from every array together.
     """
     import numpy as np
 
     if source.startswith(PIXC_SCHEME):
-        granule_uri, _, group = source[len(PIXC_SCHEME) :].rpartition("::")
-        x, y, z = _read_pixc_group(granule_uri, group or "pixel_cloud", role=role)
+        granule_uri, group, include, exclude = _parse_pixc_uri(source)
+        x, y, z, extras = _read_pixc_group(
+            granule_uri, group, role=role, include=include, exclude=exclude
+        )
     elif source.lower().endswith((".las", ".laz")):
         x, y, z = _read_las(source)
+        extras = {}
     else:
         raise ValueError(
             f"COPC source {source!r} is neither a PIXC netCDF group "
@@ -119,11 +163,20 @@ def _load_points(source: str, *, role: str = "source"):
     y = np.asarray(y, dtype="float64").ravel()
     z = np.asarray(z, dtype="float64").ravel()
     finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-    return x[finite], y[finite], z[finite]
+    extras = {name: np.asarray(arr).ravel()[finite] for name, arr in extras.items()}
+    return x[finite], y[finite], z[finite], extras
 
 
-def _read_pixc_group(granule_uri: str, group: str, *, role: str):
-    """Read lon/lat/height from a netCDF ``group`` (local or S3) as point arrays."""
+def _read_pixc_group(
+    granule_uri: str,
+    group: str,
+    *,
+    role: str,
+    include: list[str] | None,
+    exclude: list[str],
+):
+    """Read geometry + the carried point variables from a netCDF ``group``."""
+    import numpy as np
     import xarray as xr
 
     from cng_benchmark import storage
@@ -141,12 +194,40 @@ def _read_pixc_group(granule_uri: str, group: str, *, role: str):
 
     ds = xr.open_dataset(handle, group=group, engine="h5netcdf")
     try:
-        x = ds[_pick_var(ds, _LON_NAMES)].values
-        y = ds[_pick_var(ds, _LAT_NAMES)].values
-        z = ds[_pick_var(ds, _HEIGHT_NAMES)].values
+        lon = _pick_var(ds, _LON_NAMES)
+        lat = _pick_var(ds, _LAT_NAMES)
+        height = _pick_var(ds, _HEIGHT_NAMES)
+        x = np.asarray(ds[lon].values)
+        y = np.asarray(ds[lat].values)
+        z = np.asarray(ds[height].values)
+        point_dim = ds[lon].dims[0]
+        geometry = {lon, lat, height}
+        carried = _select_point_vars(ds, point_dim, geometry, include, exclude)
+        extras = {name: np.asarray(ds[name].values) for name in carried}
     finally:
         ds.close()
-    return x, y, z
+    return x, y, z, extras
+
+
+def _select_point_vars(
+    ds, point_dim, geometry: set[str], include: list[str] | None, exclude: list[str]
+) -> list[str]:
+    """Pick the point-dimensioned variables to carry as LAS extra dimensions.
+
+    Candidates are the variables whose only dimension is the point dimension,
+    minus the geometry triplet. ``include`` (if given) restricts to that allow-list
+    in its order; ``exclude`` removes names. Default: every point variable.
+    """
+    candidates = [
+        str(v)
+        for v in ds.variables
+        if tuple(ds[v].dims) == (point_dim,) and str(v) not in geometry
+    ]
+    wanted = (
+        [v for v in include if v in candidates] if include is not None else candidates
+    )
+    excl = set(exclude)
+    return [v for v in wanted if v not in excl]
 
 
 def _pick_var(ds, names: tuple[str, ...]) -> str:
@@ -167,49 +248,114 @@ def _read_las(path: str):
     return las.x, las.y, las.z
 
 
+def _las_extra_dtype(dtype):
+    """Map a numpy dtype to the nearest LAS-ExtraBytes-supported numpy dtype.
+
+    LAS extra dimensions support 1/2/4/8-byte signed/unsigned integers and 4/8-byte
+    floats, so a variable of any of those types keeps its dtype exactly. A bool
+    becomes ``uint8`` and a half float widens to ``float32`` (both lossless; LAS has
+    neither type); a dtype LAS cannot represent at all (complex, datetime, …) falls
+    back to ``float64`` — so a variable's values are preserved without inventing an
+    unrepresentable on-disk type.
+    """
+    import numpy as np
+
+    dt = np.dtype(dtype)
+    if dt.kind == "b":
+        return np.dtype("u1")
+    if dt.kind == "f":
+        return dt if dt.itemsize in (4, 8) else np.dtype("f4")
+    if dt.kind in ("i", "u"):
+        return dt if dt.itemsize in (1, 2, 4, 8) else np.dtype("i8")
+    return np.dtype("f8")
+
+
+def _sanitize_eb_name(name: str, used: set[str]) -> str:
+    """Return a unique, length-bounded LAS extra-dimension name for ``name``."""
+    base = name[:_MAX_EB_NAME]
+    out = base
+    i = 1
+    while out in used:
+        suffix = f"_{i}"
+        out = base[: _MAX_EB_NAME - len(suffix)] + suffix
+        i += 1
+    used.add(out)
+    return out
+
+
 def _build_copc(
     path: str,
     x,
     y,
     z,
+    extras: dict | None = None,
     *,
     span: int,
     max_depth: int,
     scale: float | None = None,
 ) -> None:
-    """Write points to a COPC LAZ at ``path``, binning them into an octree.
+    """Write points (geometry + ``extras``) to a COPC LAZ at ``path``.
 
-    The root is the cubic bounds of the cloud. Each node voxel-downsamples its
-    points to a ``span``-per-edge grid (one representative per occupied voxel) and
-    passes the remainder down to the eight child octants, recursing until the
-    points are exhausted or ``max_depth`` is reached (a leaf then holds whatever
-    remains). Every point lands in exactly one node, so the cloud round-trips, and
-    the hierarchy is connected (a node's parent always holds its own
-    representatives). Pure ``copclib`` + ``numpy`` — CI-testable.
+    The point record — x/y/z plus one LAS extra dimension per ``extras`` variable,
+    dtype-mapped by :func:`_las_extra_dtype` — is assembled with laspy; a one-point
+    LAZ hands copclib the matching ExtraBytes VLR. The cloud is then binned into a
+    COPC octree (root = the cubic bounds; each node voxel-downsamples to a
+    ``span``-per-edge grid and passes the remainder to its child octants, to
+    ``max_depth``), each node filled by a vectorised ``Points.Unpack`` of the laspy
+    point bytes — so every extra value round-trips. Pure ``laspy`` + ``copclib`` +
+    ``numpy`` — CI-testable.
     """
     import copclib as copc
+    import laspy
     import numpy as np
 
-    xyz = np.stack(
-        [np.asarray(x, "float64"), np.asarray(y, "float64"), np.asarray(z, "float64")],
-        axis=1,
-    )
+    extras = extras or {}
+    x = np.asarray(x, "float64")
+    y = np.asarray(y, "float64")
+    z = np.asarray(z, "float64")
+    xyz = np.stack([x, y, z], axis=1)
     mn = xyz.min(axis=0)
     side = float((xyz.max(axis=0) - mn).max()) or 1.0
     if scale is None:
         # Keep quantised coordinates well within the LAS 32-bit grid (< 2**31).
         scale = max(side / 1e8, 1e-9)
 
-    cfg = copc.CopcConfigWriter(POINT_FORMAT_ID, scale=[scale] * 3, offset=list(mn))
-    cfg.las_header.min = list(mn)
-    cfg.las_header.max = list(mn + side)
+    header = laspy.LasHeader(point_format=POINT_FORMAT_ID)
+    header.global_encoding.wkt = 1  # required for a LAS 1.4 / pf6 file
+    header.offsets = mn
+    header.scales = [scale, scale, scale]
+    # Seed with the standard LAS dimension names (x/y/z, classification, …) so a
+    # source variable that collides with a reserved name is carried under a
+    # suffixed extra-dimension name rather than clashing with the point record.
+    used: set[str] = set(laspy.PointFormat(POINT_FORMAT_ID).standard_dimension_names)
+    fields: list[tuple[str, Any]] = []
+    for name, arr in extras.items():
+        eb_name = _sanitize_eb_name(str(name), used)
+        values = np.asarray(arr).astype(_las_extra_dtype(np.asarray(arr).dtype))
+        header.add_extra_dim(laspy.ExtraBytesParams(name=eb_name, type=values.dtype))
+        fields.append((eb_name, values))
+
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = x, y, z
+    for eb_name, values in fields:
+        las[eb_name] = values
+    records = las.points.array  # the packed LAS point records (incl. extra bytes)
+
+    # Hand copclib a header carrying the matching ExtraBytes VLR via a 1-point LAZ.
+    config, point_header = _copc_config_from_header(header, mn, scale)
+    config.las_header.min = list(mn)
+    config.las_header.max = list(mn + side)
     center = mn + side / 2.0
-    cfg.copc_info.center_x = center[0]
-    cfg.copc_info.center_y = center[1]
-    cfg.copc_info.center_z = center[2]
-    cfg.copc_info.halfsize = side / 2.0
-    cfg.copc_info.spacing = side / span
-    writer = copc.FileWriter(path, cfg)
+    config.copc_info.center_x = center[0]
+    config.copc_info.center_y = center[1]
+    config.copc_info.center_z = center[2]
+    config.copc_info.halfsize = side / 2.0
+    config.copc_info.spacing = side / span
+    writer = copc.FileWriter(path, config)
+
+    def node_points(idx):
+        raw = np.frombuffer(records[idx].tobytes(), dtype=np.int8)
+        return copc.Points.Unpack(copc.VectorChar(raw), point_header)
 
     # Iterative octree build: (key, point indices, depth, node-min corner, side).
     stack = [(copc.VoxelKey(0, 0, 0, 0), np.arange(len(xyz)), 0, mn.copy(), side)]
@@ -222,7 +368,7 @@ def _build_copc(
                 node_idx, rest = idx, np.empty(0, dtype=int)
             else:
                 node_idx, rest = _voxel_split(xyz, idx, nmin, nside, span)
-            _write_node(writer, key, xyz, node_idx)
+            writer.AddNode(key, node_points(node_idx))
             if len(rest):
                 half = nside / 2.0
                 octant = (xyz[rest] >= (nmin + half)).astype(int)
@@ -248,6 +394,35 @@ def _build_copc(
         writer.Close()
 
 
+def _copc_config_from_header(header, mn, scale: float):
+    """Return ``(CopcConfigWriter, LasHeader)`` carrying ``header``'s ExtraBytes.
+
+    copclib cannot build an ExtraBytes VLR from Python, so a one-point LAZ written
+    from the laspy ``header`` is read back with copclib to obtain the matching VLR
+    (for the COPC config) and the LAS header used to unpack point bytes.
+    """
+    import copclib as copc
+    import laspy
+
+    tiny = laspy.LasData(header)
+    tiny.x, tiny.y, tiny.z = [mn[0]], [mn[1]], [mn[2]]
+    with tempfile.NamedTemporaryFile(suffix=".laz", delete=False) as handle:
+        tiny_path = handle.name
+    try:
+        tiny.write(tiny_path)
+        laz_config = copc.LazReader(tiny_path).laz_config
+        config = copc.CopcConfigWriter(
+            POINT_FORMAT_ID,
+            scale=[scale, scale, scale],
+            offset=[mn[0], mn[1], mn[2]],
+            wkt=laz_config.wkt,
+            extra_bytes_vlr=laz_config.extra_bytes_vlr,
+        )
+        return config, laz_config.las_header
+    finally:
+        os.unlink(tiny_path)
+
+
 def _voxel_split(xyz, idx, nmin, nside, span):
     """Split a node's points into voxel representatives and the remainder.
 
@@ -265,24 +440,21 @@ def _voxel_split(xyz, idx, nmin, nside, span):
     return idx[keep], idx[~keep]
 
 
-def _write_node(writer, key, xyz, node_idx) -> None:
-    """Write one octree node's points (built from numpy) to the COPC writer."""
-    import copclib as copc
+def _copc_extra_dimensions(path: str) -> list[str]:
+    """Return the COPC file's LAS extra-dimension names (the carried variables)."""
+    import laspy
 
-    points = copc.Points(POINT_FORMAT_ID)
-    points.AddPoints([points.CreatePoint() for _ in range(len(node_idx))])
-    points.x = xyz[node_idx, 0]
-    points.y = xyz[node_idx, 1]
-    points.z = xyz[node_idx, 2]
-    writer.AddNode(key, points)
+    reader = laspy.CopcReader.open(path)
+    return list(reader.header.point_format.extra_dimension_names)
 
 
 def describe_copc_layout(path: str, name: str) -> CopcLayout:
     """Return the :class:`CopcLayout` of the COPC file at ``path``.
 
-    Reads the octree hierarchy with copclib's ``FileReader``: the node count, the
-    octree depth, the total point count, and the largest node's point count (the
-    realised per-node budget).
+    Reads the octree hierarchy with copclib's ``FileReader`` (node count, octree
+    depth, total points, the largest node's point count) and the carried point
+    variables from the LAS ExtraBytes schema with laspy — so the layout is
+    self-describing about *what content* the object holds, not only its structure.
     """
     import copclib as copc
 
@@ -296,6 +468,7 @@ def describe_copc_layout(path: str, name: str) -> CopcLayout:
         max_depth=reader.GetMaxDepth(),
         point_count=reader.copc_config.las_header.point_count,
         points_per_node=max(counts) if counts else 0,
+        extra_dimensions=_copc_extra_dimensions(path),
     )
 
 
@@ -308,14 +481,16 @@ class CopcAdapter(FormatAdapter):
         return "copc.laz"
 
     def convert(self, source: str, target: str, params: dict[str, Any]) -> None:
-        """Convert a point-cloud ``source`` to a COPC file at ``target``.
+        """Convert a point-cloud ``source`` to a content-complete COPC at ``target``.
 
-        Loads the source points (a PIXC netCDF group, or a LAS/LAZ tile) and bins
-        them into a COPC octree whose depth and per-node budget come from
-        :class:`CopcParams`.
+        Loads the source points — for a PIXC group, the geometry plus every carried
+        point variable — and bins them into a COPC octree whose depth and per-node
+        budget come from :class:`CopcParams`, carrying the variables as LAS extra
+        dimensions.
         """
         try:
             import copclib  # noqa: F401
+            import laspy  # noqa: F401
         except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
             raise RuntimeError(
                 "COPC conversion requires the 'copc' extra; install with "
@@ -323,7 +498,7 @@ class CopcAdapter(FormatAdapter):
             ) from exc
 
         opts = CopcParams.model_validate(params)
-        x, y, z = _load_points(source)
+        x, y, z, extras = _load_points(source)
         if len(x) == 0:
             raise ValueError(f"COPC source {source!r} yielded no finite points")
 
@@ -340,6 +515,7 @@ class CopcAdapter(FormatAdapter):
             x,
             y,
             z,
+            extras,
             span=span,
             max_depth=max_depth,
             scale=float(scale_value) if scale_value is not None else None,

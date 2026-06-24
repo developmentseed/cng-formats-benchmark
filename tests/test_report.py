@@ -121,12 +121,16 @@ def test_summary_renders_copc_octree_layout():
             max_depth=4,
             point_count=40000,
             points_per_node=2506,
+            extra_dimensions=["sig0", "water_frac", "classification_1"],
         )
     ]
     md = render_markdown_summary(run)
     assert "## Octree layout" in md
     assert "Octree nodes:" in md
-    assert "| pixel_cloud | 31 | 4 | 40000 | 2506 |" in md
+    # The carried point variables are reported (content-complete, self-describing).
+    assert "Carried point variables:** 3 extra dimension(s)" in md
+    assert "classification_1, sig0, water_frac" in md  # sorted
+    assert "| pixel_cloud | 31 | 4 | 40000 | 2506 | 3 |" in md
     # No other-format tables for a COPC run.
     assert "## Tiling layout" not in md
     assert "## Row-group layout" not in md
