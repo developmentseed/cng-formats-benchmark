@@ -56,7 +56,7 @@ one registry line; the core config and runner are untouched.
 | `sentinel1-otb-rtc` | a `.zip`-per-scene S1Tiling (OTB) RTC gamma0 delivery under `source` | `polarizations` (VV/VH) |
 | `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`) |
 | `swot-lakesp-prior` | a `.zip`-per-pass shapefile delivery under `source` (SWOT L2 HR LakeSP Prior) | none (one `.shp` member = one component) |
-| `swot-pixc` | one netCDF point-cloud granule per file under `source` (SWOT L2 HR PIXC) | `groups` (netCDF groups read as points; default `pixel_cloud`) |
+| `swot-pixc` | one netCDF point-cloud granule per file under `source` (SWOT L2 HR PIXC) | `groups` (default `pixel_cloud`); `point_variables` (allow-list of carried point vars; default all) / `exclude_variables` (deny-list) |
 
 ```yaml
 id: sentinel2-l2a-maja
@@ -93,7 +93,15 @@ The `swot-pixc` reader is the *point-cloud* arm — the same granule layout as
 `swot-raster100m`, but a component is a netCDF **group** read as points rather
 than a CF raster variable. Each selected `group` (default `pixel_cloud`) becomes
 one component, converted to a COPC file by the COPC adapter, whose point loader
-reads the group's lon/lat/height with xarray in place. The COPC adapter and this
+reads the group with xarray in place. The COPC is **content-complete**: the
+geometry (lon/lat/height → x/y/z) *and* every other per-point variable (`sig0`,
+`water_frac`, the quality flags, …) are carried — the geometry as the LAS point and
+the rest as LAS **extra dimensions**, each keeping its source dtype where LAS
+allows it (so the produced size is a like-for-like basis for comparison, not a
+geometry-only fraction). `point_variables` (allow-list) and `exclude_variables`
+(deny-list) choose the carried set; the default carries every point-dimensioned
+variable. A variable whose name collides with a reserved LAS dimension (e.g.
+`classification`) is carried under a suffixed name. The COPC adapter and this
 point-cloud path are reused by the CO3D CARS arm (tiled LAZ → COPC).
 
 ## Benchmark descriptor
@@ -257,8 +265,11 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
     `num_row_groups`, `row_group_rows` (the addressable unit a bbox query fetches),
     and `has_bbox_covering` (whether spatial pushdown to row groups is possible).
   - `copc` → a `CopcLayout`: `num_nodes` (octree nodes — the addressable units),
-    `max_depth`, `point_count`, and `points_per_node` (the largest node, i.e. the
-    realised per-node point budget); `summary.md` renders an "Octree layout" table.
+    `max_depth`, `point_count`, `points_per_node` (the largest node, i.e. the
+    realised per-node point budget), and `extra_dimensions` (the carried point
+    variables, recovered from the LAS ExtraBytes schema — so the run is
+    self-describing about its content); `summary.md` renders an "Octree layout"
+    table plus the carried-variable list.
 
   Captured for every object (no tile server needed). The chunk-aware `display`
   metric also publishes a `display_chunk_layout.png` next to the sampled object

@@ -28,28 +28,47 @@ from cng_benchmark.registry import DATASETS
 DEFAULT_GROUPS = ["pixel_cloud"]
 
 
-def _pixc_group_uri(granule_uri: str, group: str) -> str:
+def _pixc_group_uri(
+    granule_uri: str,
+    group: str,
+    *,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> str:
     """Compose a point-cloud source URI addressing ``group`` inside ``granule_uri``.
 
     The COPC adapter's point loader dispatches on the ``PIXC:`` scheme
     (:data:`~cng_benchmark.formats.copc.PIXC_SCHEME`), reading the netCDF group's
-    lon/lat/height in place. The original granule URI (``s3://`` or local) is kept
-    intact so the loader opens it with xarray/fsspec; ``storage.to_gdal_path``
-    passes the composed string through unchanged.
+    geometry and the carried point variables in place. ``include`` (an allow-list)
+    and ``exclude`` (a deny-list) travel as a ``?include=…&exclude=…`` query that
+    the loader applies; with neither, every point-dimensioned variable is carried.
+    The original granule URI (``s3://`` or local) is kept intact so the loader opens
+    it with xarray/fsspec; ``storage.to_gdal_path`` passes the string through.
     """
-    return f"{PIXC_SCHEME}{granule_uri}::{group}"
+    uri = f"{PIXC_SCHEME}{granule_uri}::{group}"
+    parts: list[str] = []
+    if include is not None:
+        parts.append("include=" + ",".join(include))
+    if exclude:
+        parts.append("exclude=" + ",".join(exclude))
+    return uri + ("?" + "&".join(parts) if parts else "")
 
 
 class SwotPixcOptions(DatasetOptions):
-    """Group picks for a SWOT PIXC granule.
+    """Group and carried-variable picks for a SWOT PIXC granule.
 
     ``groups`` selects which netCDF groups to read as point clouds, one component
-    each. ``None`` (the default) profiles the primary :data:`DEFAULT_GROUPS`; an
-    explicit list selects exactly those, in order, so the representative read
-    sample (the runner takes the first component) is deterministic.
+    each (default :data:`DEFAULT_GROUPS`, in order, so the runner's representative
+    sample is deterministic). ``point_variables`` and ``exclude_variables`` choose
+    which per-point variables the COPC carries as LAS extra dimensions:
+    ``point_variables`` is an allow-list (``None`` = carry **every** point variable,
+    the content-complete default) and ``exclude_variables`` a deny-list. The
+    geometry (lon/lat/height → x/y/z) is always carried.
     """
 
     groups: list[str] | None = None
+    point_variables: list[str] | None = None
+    exclude_variables: list[str] = []
 
 
 @DATASETS.register("swot-pixc")
@@ -63,6 +82,14 @@ class SwotPixcDataset(GranuleDataset):
         opts: SwotPixcOptions = self.options
         groups = opts.groups if opts.groups else DEFAULT_GROUPS
         return [
-            SourceObject(name=group, uri=_pixc_group_uri(granule_uri, group))
+            SourceObject(
+                name=group,
+                uri=_pixc_group_uri(
+                    granule_uri,
+                    group,
+                    include=opts.point_variables,
+                    exclude=opts.exclude_variables,
+                ),
+            )
             for group in groups
         ]

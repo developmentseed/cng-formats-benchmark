@@ -386,6 +386,20 @@ def test_pixc_selects_groups_in_configured_order():
     assert [c.name for c in components] == ["pixel_cloud", "tvp"]
 
 
+def test_pixc_carried_variables_travel_in_the_uri():
+    granule = "s3://bucket/PIXC_Nom_France/SWOT_L2_HR_PIXC_048.nc"
+    # An allow-list -> ?include; the geometry is always carried by the loader.
+    inc = _pixc(point_variables=["sig0", "water_frac"])._select_components(granule)
+    assert inc[0].uri.endswith("::pixel_cloud?include=sig0,water_frac")
+    # A deny-list -> ?exclude.
+    exc = _pixc(exclude_variables=["coherent_power"])._select_components(granule)
+    assert exc[0].uri.endswith("::pixel_cloud?exclude=coherent_power")
+    # Default (neither) -> no query: every point variable is carried.
+    base = _pixc()._select_components(granule)
+    assert base[0].uri.endswith("::pixel_cloud")
+    assert "?" not in base[0].uri
+
+
 def test_pixc_rejects_unknown_option():
     with pytest.raises(ValidationError):
         build_dataset(_dataset_config(reader="swot-pixc", options={"bogus": 1}))

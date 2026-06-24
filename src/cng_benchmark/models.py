@@ -154,6 +154,7 @@ class CopcLayout(ObjectLayout):
     max_depth: int
     point_count: int
     points_per_node: int
+    extra_dimensions: list[str] = Field(default_factory=list)
 
 
 #: Discriminated union over the per-format layouts, so a ``BenchmarkRun`` keeps
