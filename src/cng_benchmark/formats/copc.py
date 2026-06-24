@@ -182,11 +182,21 @@ def _read_pixc_group(
     from cng_benchmark import storage
 
     if storage.is_s3(granule_uri):
+        import io
+
         import fsspec
 
-        handle = fsspec.open(
+        # Read the whole granule in one sequential GET into memory, then open
+        # h5netcdf from the buffer. The content-complete read pulls every point
+        # variable; doing that as HDF5 random-access range reads over s3fs is
+        # pathologically slow and trips socket read timeouts (FSTimeoutError).
+        # The source netCDF is the conversion *input*, not the cloud-native
+        # partial-access path — that is benchmarked on the produced COPC
+        # (octree-node spatial query), so a one-shot read here loses no signal.
+        with fsspec.open(
             granule_uri, mode="rb", **storage.fsspec_storage_options(role)
-        ).open()
+        ) as handle_s3:
+            handle = io.BytesIO(handle_s3.read())
     elif granule_uri.startswith("file://"):
         handle = granule_uri[len("file://") :]
     else:
