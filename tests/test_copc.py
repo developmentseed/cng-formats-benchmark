@@ -170,6 +170,9 @@ def test_extra_dimension_values_and_dtypes_round_trip(tmp_path):
         "qual": rng.integers(-100, 100, n).astype("int16"),
         "pid": np.arange(n, dtype="uint32"),  # unique id to pair points
     }
+    # _build_copc consumes ``extras`` to keep peak memory down, so snapshot the
+    # expected values before the call.
+    expected = {k: v.copy() for k, v in extras.items()}
     target = str(tmp_path / "rt.copc.laz")
     _build_copc(target, x, y, z, extras, span=32, max_depth=4)
 
@@ -180,9 +183,9 @@ def test_extra_dimension_values_and_dtypes_round_trip(tmp_path):
     assert np.array_equal(np.asarray(back["pid"])[order], np.arange(n))
     # float32 stays float32 and int16 stays int16 — values preserved exactly.
     assert np.asarray(back["sig0"]).dtype == np.float32
-    assert np.array_equal(np.asarray(back["sig0"])[order], extras["sig0"])
+    assert np.array_equal(np.asarray(back["sig0"])[order], expected["sig0"])
     assert np.array_equal(
-        np.asarray(back["qual"])[order].astype("int16"), extras["qual"]
+        np.asarray(back["qual"])[order].astype("int16"), expected["qual"]
     )
 
 

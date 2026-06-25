@@ -163,7 +163,11 @@ def _load_points(source: str, *, role: str = "source"):
     y = np.asarray(y, dtype="float64").ravel()
     z = np.asarray(z, dtype="float64").ravel()
     finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-    extras = {name: np.asarray(arr).ravel()[finite] for name, arr in extras.items()}
+    # Filter in place, replacing each source array as we go. A content-complete
+    # granule carries ~50 point variables; building a second dict alongside the
+    # first would double peak memory on a multi-million-point cloud.
+    for name in list(extras):
+        extras[name] = np.asarray(extras[name]).ravel()[finite]
     return x[finite], y[finite], z[finite], extras
 
 
@@ -338,17 +342,27 @@ def _build_copc(
     # source variable that collides with a reserved name is carried under a
     # suffixed extra-dimension name rather than clashing with the point record.
     used: set[str] = set(laspy.PointFormat(POINT_FORMAT_ID).standard_dimension_names)
-    fields: list[tuple[str, Any]] = []
+    # Declare the extra dims on the header first (schema only — no value copies),
+    # so the LAS record can be allocated once.
+    eb_names: dict[str, str] = {}
     for name, arr in extras.items():
         eb_name = _sanitize_eb_name(str(name), used)
-        values = np.asarray(arr).astype(_las_extra_dtype(np.asarray(arr).dtype))
-        header.add_extra_dim(laspy.ExtraBytesParams(name=eb_name, type=values.dtype))
-        fields.append((eb_name, values))
+        eb_names[name] = eb_name
+        header.add_extra_dim(
+            laspy.ExtraBytesParams(
+                name=eb_name, type=_las_extra_dtype(np.asarray(arr).dtype)
+            )
+        )
 
     las = laspy.LasData(header)
     las.x, las.y, las.z = x, y, z
-    for eb_name, values in fields:
-        las[eb_name] = values
+    # Pack each variable into the record, then drop the source array. ``extras``
+    # is consumed so the full source set and the full LAS record never coexist —
+    # the peak that OOMs a content-complete, multi-million-point granule.
+    for name in list(extras):
+        arr = np.asarray(extras.pop(name))
+        las[eb_names[name]] = arr.astype(_las_extra_dtype(arr.dtype))
+        del arr
     records = las.points.array  # the packed LAS point records (incl. extra bytes)
 
     # Hand copclib a header carrying the matching ExtraBytes VLR via a 1-point LAZ.
