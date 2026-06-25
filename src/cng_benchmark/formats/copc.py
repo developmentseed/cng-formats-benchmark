@@ -36,7 +36,6 @@ range-addressable partial access, not reaching a size floor.
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 from typing import Any
@@ -61,6 +60,14 @@ DEFAULT_SPAN = 128
 #: COPC point format (6 = the standard LAS 1.4 point with GPS time).
 POINT_FORMAT_ID = 6
 
+#: Safety cap on octree depth. The per-node point budget (``span**3``) is the real
+#: terminator — a node is subdivided until it holds at most that many points — so
+#: no single node ever materialises the whole cloud (the bound that keeps peak
+#: memory under control). This cap only guards against non-separable (coincident)
+#: points recursing forever; it is deep enough never to fire for real, distinct
+#: point clouds.
+_SAFETY_MAX_DEPTH = 21
+
 #: Max length of a LAS extra-dimension name (the ExtraBytes name field is 32 bytes).
 _MAX_EB_NAME = 32
 
@@ -73,11 +80,13 @@ _HEIGHT_NAMES = ("height", "elevation", "z")
 class CopcParams(BaseModel):
     """COPC octree levers, parsed from ``config.params``.
 
-    ``max_depth`` bounds the octree depth (``None`` derives a depth from the point
-    count and ``span``, so a useful octree is built without a hand-tuned value).
-    ``span`` is the per-node voxel-grid edge (the per-node point budget ≈
-    ``span**3``). Both tolerate a swept *list* of values, taking the first so a
-    swept lever degrades to a single run, mirroring COG's ``block_size``.
+    ``span`` is the per-node voxel-grid edge and the **primary lever**: a node is
+    subdivided until it holds at most ``span**3`` points (the per-node budget), so
+    object grouping and peak build memory are both governed by ``span``.
+    ``max_depth`` is an optional hard cap on octree depth (``None`` uses a high
+    safety cap, :data:`_SAFETY_MAX_DEPTH`, letting the budget terminate the build).
+    Both tolerate a swept *list* of values, taking the first so a swept lever
+    degrades to a single run, mirroring COG's ``block_size``.
     ``scale`` is the LAS coordinate quantisation (``None`` derives it from the
     cloud extent so coordinates fit the LAS 32-bit grid without precision loss).
     """
@@ -96,19 +105,6 @@ def _first(value: Any, default: Any) -> Any:
     if isinstance(value, list | tuple):
         return value[0]
     return value
-
-
-def _derive_max_depth(n_points: int, span: int) -> int:
-    """Pick an octree depth from the point count and per-node budget (``span**3``).
-
-    Deep enough that the leaves are not overloaded — roughly ``log8(n / span**3)``
-    levels — clamped to a sane range so a tiny cloud stays shallow and a huge one
-    does not explode.
-    """
-    budget = max(1, span**3)
-    if n_points <= budget:
-        return 1
-    return min(12, max(1, math.ceil(math.log(n_points / budget, 8)) + 1))
 
 
 def _parse_pixc_uri(source: str) -> tuple[str, str, list[str] | None, list[str]]:
@@ -378,9 +374,14 @@ def _build_copc(
     writer = copc.FileWriter(path, config)
 
     def node_points(idx):
-        raw = np.frombuffer(records[idx].tobytes(), dtype=np.int8)
+        # View the selected records as raw bytes (no extra .tobytes() copy) and
+        # hand them to copclib; the transient is bounded by the per-node budget.
+        raw = records[idx].view(np.int8).reshape(-1)
         return copc.Points.Unpack(copc.VectorChar(raw), point_header)
 
+    # A node holds at most ``span**3`` points; above that it is subdivided, so no
+    # single node ever materialises a large fraction of the cloud.
+    budget = max(1, span**3)
     # Iterative octree build: (key, point indices, depth, node-min corner, side).
     stack = [(copc.VoxelKey(0, 0, 0, 0), np.arange(len(xyz)), 0, mn.copy(), side)]
     try:
@@ -388,7 +389,7 @@ def _build_copc(
             key, idx, depth, nmin, nside = stack.pop()
             if len(idx) == 0:
                 continue
-            if depth >= max_depth:
+            if len(idx) <= budget or depth >= max_depth:
                 node_idx, rest = idx, np.empty(0, dtype=int)
             else:
                 node_idx, rest = _voxel_split(xyz, idx, nmin, nside, span)
@@ -531,7 +532,7 @@ class CopcAdapter(FormatAdapter):
         max_depth = (
             int(max_depth_value)
             if max_depth_value is not None
-            else _derive_max_depth(len(x), span)
+            else _SAFETY_MAX_DEPTH
         )
         scale_value = _first(opts.scale, None)
         _build_copc(
