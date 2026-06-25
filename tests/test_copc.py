@@ -13,11 +13,11 @@ pytest.importorskip("laspy")
 np = pytest.importorskip("numpy")
 
 from cng_benchmark.formats.copc import (  # noqa: E402
+    _SAFETY_MAX_DEPTH,
     DEFAULT_SPAN,
     PIXC_SCHEME,
     CopcParams,
     _build_copc,
-    _derive_max_depth,
     _first,
     describe_copc_layout,
 )
@@ -46,16 +46,37 @@ def test_first_normalises():
     assert _first(3, 7) == 3
 
 
-def test_derive_max_depth_scales_with_density():
-    # A cloud below the per-node budget stays a single level; a big one goes deeper.
-    assert _derive_max_depth(10, span=128) == 1
-    assert _derive_max_depth(100_000_000, span=32) > 1
+def test_octree_bounds_node_size_on_a_skewed_cloud(tmp_path):
+    # Memory control: a heavily skewed cloud (most points in one small corner,
+    # like PIXC lon/lat clustered against a wide height axis) must still bin into
+    # nodes no larger than the per-node budget (span**3). That bound is what keeps
+    # the content-complete build from materialising a large fraction of the cloud
+    # in one node — the regression that OOM-killed the full-granule run.
+    pytest.importorskip("laspy")
+
+    rng = np.random.default_rng(0)
+    n, span = 50_000, 8
+    budget = span**3  # 512
+    # 90% of the (all-distinct) points in a small corner of a wide domain.
+    dense = rng.uniform(0.0, 0.1, size=(45_000, 3))
+    sparse = rng.uniform(0.0, 1.0, size=(n - 45_000, 3))
+    pts = np.vstack([dense, sparse])
+
+    target = str(tmp_path / "skewed.copc.laz")
+    _build_copc(
+        target, pts[:, 0], pts[:, 1], pts[:, 2], span=span, max_depth=_SAFETY_MAX_DEPTH
+    )
+
+    ly = describe_copc_layout(target, "skewed")
+    assert ly.point_count == n  # every point written, none dropped
+    assert ly.num_nodes > 1  # subdivided, not dumped into one bucket
+    assert ly.points_per_node <= budget  # no giant node -> bounded peak memory
 
 
 def test_params_default_and_tolerate_extra_keys():
     opts = CopcParams.model_validate({"span": 64, "scope": "product-set"})
     assert opts.span == 64
-    assert opts.max_depth is None  # None -> derived
+    assert opts.max_depth is None  # None -> high safety cap; span bounds nodes
     assert opts.scale is None
 
 
