@@ -322,6 +322,12 @@ def _run_product(
             # Capture the produced object's layout (structural, per object).
             layouts += _safe_object_layouts(adapter, component.name, local_target)
 
+            # A point cloud has no display tiles; its structural artifact is the
+            # octree level-of-detail figure (the COPC analogue of the COG chunk
+            # layout). Render it once per product, best-effort.
+            if adapter.object_kind is ObjectKind.POINT_CLOUD_FILE and i == 0:
+                extra_metrics += _publish_copc_lod(local_target, component_dir)
+
             if "read" in requested and i < read_samples:
                 extra_metrics += _measure_object_read(adapter, object_uri)
             if "display" in requested and i < display_samples:
@@ -366,6 +372,29 @@ def _run_product(
         metrics=metrics,
     )
     return run, sizes
+
+
+def _publish_copc_lod(local_target: str, artifact_dir: str) -> list[MetricResult]:
+    """Render + publish the COPC octree level-of-detail PNG next to the object.
+
+    The point-cloud structural artifact, mirroring how the display path publishes
+    ``display_chunk_layout.png`` for a raster. Best-effort: a missing matplotlib
+    (the ``cog`` extra) is reported as a skip, not a failure.
+    """
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    try:
+        local_lod = os.path.join(os.path.dirname(local_target) or ".", "_lod.png")
+        render_copc_lod(local_target, local_lod)
+        lod_uri = storage.join(artifact_dir, "copc_octree_lod.png")
+        storage.upload_from_path(local_lod, lod_uri, role="sink")
+        return [MetricResult(name="octree_lod", value=1, detail={"lod_uri": lod_uri})]
+    except RuntimeError as exc:
+        return [
+            MetricResult(
+                name="octree_lod_skipped", value=0, detail={"reason": str(exc)}
+            )
+        ]
 
 
 def _measure_display_object(

@@ -273,7 +273,11 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
 
   Captured for every object (no tile server needed). The chunk-aware `display`
   metric also publishes a `display_chunk_layout.png` next to the sampled object
-  (the block/chunk grid with each served tile's footprint).
+  (the block/chunk grid with each served tile's footprint). A **COPC** run, which
+  has no display tiles, instead publishes a `copc_octree_lod.png` — the
+  clustered-octree level-of-detail (coarse overview → full detail), the
+  point-cloud structural artifact; its sink URI is in the `octree_lod` metric
+  detail.
 - `metrics` — a list of `{name, value, unit, detail}` scalars
 
 It is written as `result.json` and rendered to `summary.md`
