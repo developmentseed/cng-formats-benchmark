@@ -101,6 +101,7 @@ def test_layout_reports_octree_and_preserves_all_points(tmp_path):
     assert ly.num_nodes > 1  # a real octree, not a single bucket
     assert 1 <= ly.max_depth <= 4
     assert 0 < ly.points_per_node <= 40_000
+    assert ly.compression_ratio > 1.0  # the LAS point block is LASzip-compressed
 
 
 def test_octree_lever_changes_node_structure(tmp_path):
@@ -238,3 +239,14 @@ def test_include_and_exclude_select_the_carried_set(tmp_path):
 
 def test_default_span_is_a_per_node_budget():
     assert DEFAULT_SPAN**3 > 1  # span**3 is the per-node point budget
+
+
+def test_object_size_resolves_pixc_scheme(tmp_path):
+    # The point-cloud component URI wraps the granule; object_size sizes the
+    # underlying granule so the write metric records bytes_in for the PIXC arm.
+    from cng_benchmark import storage
+
+    granule = tmp_path / "SWOT_L2_HR_PIXC_048.nc"
+    granule.write_bytes(b"x" * 4321)
+    uri = f"{PIXC_SCHEME}{granule}::pixel_cloud?include=sig0,water_frac"
+    assert storage.object_size(uri) == 4321

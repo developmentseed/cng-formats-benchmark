@@ -486,14 +486,18 @@ def describe_copc_layout(path: str, name: str) -> CopcLayout:
     reader = copc.FileReader(path)
     nodes = reader.GetAllNodes()
     counts = [n.point_count for n in nodes]
+    header = reader.copc_config.las_header
+    size_bytes = os.path.getsize(path)
+    uncompressed = header.point_count * header.point_record_length
     return CopcLayout(
         name=name,
-        size_bytes=os.path.getsize(path),
+        size_bytes=size_bytes,
         num_nodes=len(nodes),
         max_depth=reader.GetMaxDepth(),
-        point_count=reader.copc_config.las_header.point_count,
+        point_count=header.point_count,
         points_per_node=max(counts) if counts else 0,
         extra_dimensions=_copc_extra_dimensions(path),
+        compression_ratio=(uncompressed / size_bytes) if size_bytes else 0.0,
     )
 
 

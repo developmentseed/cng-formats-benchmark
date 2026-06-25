@@ -155,6 +155,10 @@ class CopcLayout(ObjectLayout):
     point_count: int
     points_per_node: int
     extra_dimensions: list[str] = Field(default_factory=list)
+    #: LASzip compression ratio: the uncompressed LAS point block (point count ×
+    #: record length, geometry + carried extra dims) over the stored file size.
+    #: Quantifies how much of the size is the format's compression vs the content.
+    compression_ratio: float = 0.0
 
 
 #: Discriminated union over the per-format layouts, so a ``BenchmarkRun`` keeps
