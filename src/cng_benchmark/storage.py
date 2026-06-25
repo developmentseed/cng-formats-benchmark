@@ -501,7 +501,12 @@ def object_size(uri: str, role: str = "sink") -> int | None:
     Used for the write metric's ``bytes_in`` detail. Returns the size for a
     local file or an S3 object (via ``head_object``); returns ``None`` for a
     path GDAL can read but that has no cheap stat (e.g. a ``/vsizip`` member).
+    A point-cloud ``PIXC:<granule>::<group>?…`` component is sized by its
+    underlying granule object, so the point-cloud arm reports ``bytes_in`` too.
     """
+    if uri.startswith("PIXC:"):
+        granule = uri[len("PIXC:") :].split("::", 1)[0]
+        return object_size(granule, role)
     if is_s3(uri):
         loc = _parse_s3(uri)
         if not loc.key or loc.key.endswith("/"):

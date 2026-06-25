@@ -191,6 +191,7 @@ def _render_octree_layout(layouts: list) -> list[str]:
     """
     nodes = sum(ly.num_nodes for ly in layouts)
     carried = sorted({d for ly in layouts for d in ly.extra_dimensions})
+    ratios = [ly.compression_ratio for ly in layouts if ly.compression_ratio]
     lines = [
         "",
         "## Octree layout",
@@ -198,14 +199,24 @@ def _render_octree_layout(layouts: list) -> list[str]:
         f"- **Octree nodes:** {nodes} across {len(layouts)} file(s)",
         f"- **Carried point variables:** {len(carried)} extra dimension(s)"
         + (f" ({', '.join(carried)})" if carried else " — geometry only"),
+    ]
+    if ratios:
+        lines.append(
+            "- **LASzip compression:** "
+            + ", ".join(f"{r:.2f}×" for r in ratios)
+            + " (uncompressed LAS point block / stored size)"
+        )
+    lines += [
         "",
-        "| Object | Nodes | Depth | Points | Points/node | Extra dims |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Object | Nodes | Depth | Points | Points/node | Extra dims | Compression |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
+        ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
         lines.append(
             f"| {ly.name} | {ly.num_nodes} | {ly.max_depth} | "
-            f"{ly.point_count} | {ly.points_per_node} | {len(ly.extra_dimensions)} |"
+            f"{ly.point_count} | {ly.points_per_node} | "
+            f"{len(ly.extra_dimensions)} | {ratio} |"
         )
     return lines
 
