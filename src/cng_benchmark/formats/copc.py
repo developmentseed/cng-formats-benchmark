@@ -181,22 +181,20 @@ def _read_pixc_group(
 
     from cng_benchmark import storage
 
+    tmp_download: str | None = None
     if storage.is_s3(granule_uri):
-        import io
-
-        import fsspec
-
-        # Read the whole granule in one sequential GET into memory, then open
-        # h5netcdf from the buffer. The content-complete read pulls every point
-        # variable; doing that as HDF5 random-access range reads over s3fs is
-        # pathologically slow and trips socket read timeouts (FSTimeoutError).
-        # The source netCDF is the conversion *input*, not the cloud-native
-        # partial-access path — that is benchmarked on the produced COPC
-        # (octree-node spatial query), so a one-shot read here loses no signal.
-        with fsspec.open(
-            granule_uri, mode="rb", **storage.fsspec_storage_options(role)
-        ) as handle_s3:
-            handle = io.BytesIO(handle_s3.read())
+        # Download the granule to a local file with boto3, then open h5netcdf
+        # from disk. The content-complete read pulls every point variable; doing
+        # that as h5netcdf random-access reads over s3fs trips socket read
+        # timeouts (FSTimeoutError) on a large granule over a slow endpoint.
+        # boto3's sync multipart transfer (generous timeouts + retries) is
+        # robust. The source netCDF is the conversion *input*, not the
+        # cloud-native partial-access path — that is benchmarked on the produced
+        # COPC (octree-node spatial query) — so reading it whole loses no signal.
+        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
+            tmp_download = tmp.name
+        storage.download_s3_object(granule_uri, tmp_download, role=role)
+        handle = tmp_download
     elif granule_uri.startswith("file://"):
         handle = granule_uri[len("file://") :]
     else:
@@ -216,6 +214,8 @@ def _read_pixc_group(
         extras = {name: np.asarray(ds[name].values) for name in carried}
     finally:
         ds.close()
+        if tmp_download is not None:
+            os.unlink(tmp_download)
     return x, y, z, extras
 
 

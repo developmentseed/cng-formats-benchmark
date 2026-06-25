@@ -138,7 +138,7 @@ def _local_path(uri: str) -> Path:
     return Path(uri)
 
 
-def _s3_client(role: str = "sink"):
+def _s3_client(role: str = "sink", *, extra_config: dict | None = None):
     """Build an S3 client for ``role`` from the resolved :class:`S3Profile`.
 
     Raises a clear, actionable error when the optional ``s3`` extra (boto3) is
@@ -156,7 +156,12 @@ def _s3_client(role: str = "sink"):
         ) from exc
 
     p = s3_profile(role)
-    config = Config(s3={"addressing_style": "path"}) if p.endpoint else None
+    cfg: dict = {}
+    if p.endpoint:
+        cfg["s3"] = {"addressing_style": "path"}
+    if extra_config:
+        cfg.update(extra_config)
+    config = Config(**cfg) if cfg else None
     return boto3.client(
         "s3",
         endpoint_url=p.endpoint,
@@ -166,6 +171,27 @@ def _s3_client(role: str = "sink"):
         config=config,
         verify=p.ca_bundle or None,
     )
+
+
+def download_s3_object(uri: str, dest_path, role: str = "source") -> None:
+    """Download a single S3 object to ``dest_path`` via boto3's transfer manager.
+
+    Used for granule sources that a library must read as a local file (the SWOT
+    PIXC netCDF, read with h5netcdf). boto3's sync multipart transfer with
+    generous timeouts and retries is robust where s3fs's async block reader trips
+    socket read timeouts on a large object over a slow endpoint. The ``source``
+    role resolves ``SOURCE_AWS_*`` (falling back to bare ``AWS_*``).
+    """
+    loc = _parse_s3(uri)
+    client = _s3_client(
+        role,
+        extra_config={
+            "read_timeout": 120,
+            "connect_timeout": 30,
+            "retries": {"max_attempts": 10, "mode": "standard"},
+        },
+    )
+    client.download_file(loc.bucket, loc.key, str(dest_path))
 
 
 def list_object_sizes(uri: str, role: str = "sink") -> list[int]:
