@@ -241,6 +241,20 @@ def test_default_span_is_a_per_node_budget():
     assert DEFAULT_SPAN**3 > 1  # span**3 is the per-node point budget
 
 
+def test_render_copc_lod_writes_png(tmp_path):
+    # The octree level-of-detail figure is a systematic structural artifact of a
+    # COPC run (the point-cloud analogue of the COG chunk-layout image).
+    pytest.importorskip("matplotlib")
+    import os
+
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    target = _copc(tmp_path, n=30_000, span=16, max_depth=6)
+    out = str(tmp_path / "lod.png")
+    assert render_copc_lod(target, out) == out
+    assert os.path.getsize(out) > 0
+
+
 def test_object_size_resolves_pixc_scheme(tmp_path):
     # The point-cloud component URI wraps the granule; object_size sizes the
     # underlying granule so the write metric records bytes_in for the PIXC arm.

@@ -501,6 +501,63 @@ def describe_copc_layout(path: str, name: str) -> CopcLayout:
     )
 
 
+def render_copc_lod(path: str, out_path: str, *, max_points: int = 120_000) -> str:
+    """Render the COPC clustered-octree level-of-detail to ``out_path`` (a PNG).
+
+    Three top-down panels — a coarse overview from the shallow octree levels, a
+    mid level, and the full cloud — illustrate how a reader fetches progressively
+    deeper octree nodes: the COPC analogue of COG overviews / the tile-footprint
+    diagram, and the point-cloud structural artifact of a run. Each panel
+    subsamples to ``max_points`` for a legible scatter. Requires matplotlib (the
+    ``cog`` extra); returns ``out_path``.
+    """
+    import copclib as copc
+    import laspy
+    import numpy as np
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")  # headless: no display in the runner
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
+        raise RuntimeError(
+            "the COPC level-of-detail image requires matplotlib (in the 'cog' "
+            "extra); install with `uv sync --extra cog`"
+        ) from exc
+
+    depth = copc.FileReader(path).GetMaxDepth()
+    reader = laspy.CopcReader.open(path)
+    cuts = sorted({max(1, depth // 3), max(2, 2 * depth // 3), max(2, depth)})
+    labels = ("coarse overview", "mid levels", "full detail")
+    rng = np.random.default_rng(0)
+    fig, axes = plt.subplots(
+        1, len(cuts), figsize=(4.5 * len(cuts), 4.6), constrained_layout=True
+    )
+    axes = np.atleast_1d(axes)
+    for ax, cut, label in zip(axes, cuts, labels, strict=False):
+        pts = reader.query(level=range(0, cut + 1))
+        x = np.asarray(pts.x)
+        y = np.asarray(pts.y)
+        if len(x) > max_points:
+            idx = rng.choice(len(x), max_points, replace=False)
+            x, y = x[idx], y[idx]
+        ax.scatter(x, y, s=0.4, c="#1d4ed8", alpha=0.5, linewidths=0)
+        ax.set_title(f"{label}\nlevels 0–{cut} · {len(pts):,} pts", fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal")
+    fig.suptitle(
+        "COPC clustered-octree level-of-detail — a reader fetches only the octree "
+        "nodes it needs:\ncoarse levels for an overview, deeper levels (or a bbox) "
+        "for detail (the source netCDF has no such index)",
+        fontsize=11,
+    )
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
+
+
 @FORMATS.register("copc")
 class CopcAdapter(FormatAdapter):
     name = "copc"
