@@ -17,6 +17,7 @@ new registered adapter, never a change here.
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ from cng_benchmark.metrics.read import (
 from cng_benchmark.metrics.write import measure_write
 from cng_benchmark.models import Artifact, BenchmarkRun, MetricResult, ObjectLayout
 from cng_benchmark.registry import FORMATS
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_object_layouts(
@@ -75,6 +78,19 @@ def _remove_target(local_target: str) -> None:
         shutil.rmtree(local_target, ignore_errors=True)
     else:
         os.remove(local_target)
+
+
+def _log_write_done(
+    metrics: list[MetricResult],
+    prefix: str = "",
+) -> None:
+    """Emit an INFO line with elapsed time and throughput from write metrics."""
+    elapsed = next((m.value for m in metrics if m.name == "write_elapsed"), None)
+    if elapsed is None:
+        return
+    tput = next((m.value for m in metrics if m.name == "write_throughput"), None)
+    tput_str = f", {tput / 1e6:.1f} MB/s" if tput else ""
+    logger.info("%swrite done (%.1fs%s)", prefix, elapsed, tput_str)
 
 
 def _measure_object_read(adapter: FormatAdapter, object_uri: str) -> list[MetricResult]:
@@ -162,6 +178,7 @@ def run_conversion_benchmark(
     adapter = FORMATS.get(chosen)()
     requested = set(config.metrics)
 
+    logger.info("convert %s → %s", source_uri, chosen)
     with tempfile.TemporaryDirectory() as workdir:
         local_target = os.path.join(workdir, adapter.target_basename())
         # Read the source in place (network reads counted in the conversion).
@@ -174,6 +191,7 @@ def run_conversion_benchmark(
                 config.params,
                 source_size=storage.object_size(source_uri, "source"),
             )
+        _log_write_done(write_metrics)
 
         # Always publish the produced object under the output location: it is a
         # first-class run artifact, and read/display address it on the store. A
@@ -181,6 +199,7 @@ def run_conversion_benchmark(
         artifact_dir = storage.join(output_uri, chosen)
         object_uri = storage.join(artifact_dir, adapter.target_basename())
         _publish_object(adapter, local_target, object_uri)
+        logger.info("uploaded to %s", object_uri)
 
         policy = tier_policy_from_config(config.tiers)
         profile = profile_object_sizes(adapter.enumerate_objects(local_target), policy)
@@ -198,8 +217,10 @@ def run_conversion_benchmark(
                 ),
             ]
         if "read" in requested:
+            logger.info("read metric")
             metrics += _measure_object_read(adapter, object_uri)
         if "display" in requested:
+            logger.info("display metric")
             display_metrics, display_artifacts = _measure_display_object(
                 config,
                 adapter,
@@ -310,9 +331,13 @@ def _run_product(
     _zip_source_size = (
         storage.object_size(_zip_uri, "source") if _zip_uri is not None else None
     )
+    n_comp = len(product.components)
 
     with tempfile.TemporaryDirectory() as workdir:
         for i, component in enumerate(product.components):
+            logger.info(
+                "  [%d/%d] %s: convert → %s", i + 1, n_comp, component.name, chosen
+            )
             local_target = os.path.join(
                 workdir, f"{component.name}-{adapter.target_basename()}"
             )
@@ -322,21 +347,22 @@ def _run_product(
             else:
                 source_size = storage.object_size(component.uri, "source")
             with gdal_session("source"):
-                write_per_component.append(
-                    measure_write(
-                        adapter,
-                        source_path,
-                        local_target,
-                        config.params,
-                        source_size=source_size,
-                    )
+                wm = measure_write(
+                    adapter,
+                    source_path,
+                    local_target,
+                    config.params,
+                    source_size=source_size,
                 )
+            write_per_component.append(wm)
+            _log_write_done(wm, prefix=f"  [{i + 1}/{n_comp}] {component.name}: ")
 
             component_dir = storage.join(
                 output_uri, f"objects/{product.id}/{component.name}"
             )
             object_uri = storage.join(component_dir, adapter.target_basename())
             _publish_object(adapter, local_target, object_uri)
+            logger.info("  [%d/%d] %s: uploaded", i + 1, n_comp, component.name)
             sizes += adapter.enumerate_objects(local_target)
             # Capture the produced object's layout (structural, per object).
             layouts += _safe_object_layouts(adapter, component.name, local_target)
@@ -348,8 +374,12 @@ def _run_product(
                 extra_artifacts += _publish_copc_lod(local_target, component_dir)
 
             if "read" in requested and i < read_samples:
+                logger.info("  [%d/%d] %s: read metric", i + 1, n_comp, component.name)
                 extra_metrics += _measure_object_read(adapter, object_uri)
             if "display" in requested and i < display_samples:
+                logger.info(
+                    "  [%d/%d] %s: display metric", i + 1, n_comp, component.name
+                )
                 display_metrics, display_artifacts = _measure_display_object(
                     config,
                     adapter,
@@ -616,9 +646,25 @@ def run_dataset_benchmark(
             + (f" matching pattern {pattern!r}" if pattern else "")
         )
 
+    n_products = len(products)
+    logger.info(
+        "dataset %s: %d product(s) [format: %s, metrics: %s]",
+        dataset_config.id,
+        n_products,
+        chosen,
+        sorted(requested),
+    )
+
     per_product: list[BenchmarkRun] = []
     pooled_sizes: list[int] = []
-    for product in products:
+    for i, product in enumerate(products):
+        logger.info(
+            "[%d/%d] %s — %d component(s)",
+            i + 1,
+            n_products,
+            product.id,
+            len(product.components),
+        )
         run, sizes = _run_product(
             adapter,
             product,
@@ -630,7 +676,13 @@ def run_dataset_benchmark(
         )
         per_product.append(run)
         pooled_sizes += sizes
+        logger.info("[%d/%d] %s done", i + 1, n_products, product.id)
 
+    logger.info(
+        "roll-up: pooling %d objects across %d product(s)",
+        len(pooled_sizes),
+        len(per_product),
+    )
     vrt_artifacts = _publish_rgb_vrts(dataset, products, adapter, output_uri)
 
     policy = tier_policy_from_config(config.tiers)
