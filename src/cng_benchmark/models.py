@@ -118,6 +118,8 @@ class CogLayout(ObjectLayout):
     block_width: int
     overview_decimations: list[int] = Field(default_factory=list)
     internal_tiles: int
+    codec: str = "none"
+    compression_ratio: float = 0.0
 
 
 class GeoZarrLayout(ObjectLayout):
@@ -137,6 +139,7 @@ class GeoZarrLayout(ObjectLayout):
     codec: str
     multiscale_levels: int
     shard_count: int
+    compression_ratio: float = 0.0
 
 
 class GeoParquetLayout(ObjectLayout):
@@ -157,6 +160,8 @@ class GeoParquetLayout(ObjectLayout):
     num_row_groups: int
     row_group_rows: int
     has_bbox_covering: bool
+    codec: str = "uncompressed"
+    compression_ratio: float = 0.0
 
 
 class CopcLayout(ObjectLayout):
@@ -178,6 +183,7 @@ class CopcLayout(ObjectLayout):
     point_count: int
     points_per_node: int
     extra_dimensions: list[str] = Field(default_factory=list)
+    codec: str = "laszip"
     #: LASzip compression ratio: the uncompressed LAS point block (point count ×
     #: record length, geometry + carried extra dims) over the stored file size.
     #: Quantifies how much of the size is the format's compression vs the content.
