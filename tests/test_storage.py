@@ -337,7 +337,7 @@ def test_zip_source_uri_no_zip_extension():
 def test_zip_source_uri_s3_size_via_object_size(s3_bucket):
     zip_data = b"fake zip content of known size"
     storage.write_bytes(f"s3://{s3_bucket}/scenes/A.zip", zip_data)
-    # zip_source_uri resolves the member path to the zip S3 URI, and object_size HEADs it.
+    # zip_source_uri resolves the member path to the zip S3 URI; object_size HEADs it.
     member_vsi = f"/vsizip//vsis3/{s3_bucket}/scenes/A.zip/A_FRE_B2.tif"
     zip_uri = storage.zip_source_uri(member_vsi)
     assert zip_uri == f"s3://{s3_bucket}/scenes/A.zip"

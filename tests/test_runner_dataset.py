@@ -554,7 +554,7 @@ def _write_ds_cfg(reader: str, source: Path) -> DatasetConfig:
 
 
 def test_flat_source_bytes_in_is_sum_of_component_sizes(tmp_path):
-    """bytes_in for flat (non-zip) sources equals the sum of per-component file sizes."""
+    """bytes_in for flat sources equals the sum of per-component file sizes."""
     pytest.importorskip("rasterio")
     _register_fake_passthrough()
 
@@ -568,7 +568,9 @@ def test_flat_source_bytes_in_is_sum_of_component_sizes(tmp_path):
     cfg = _benchmark(["write"], {"scope": "product"}).model_copy(
         update={"formats": ["fake-passthrough"]}
     )
-    result = run_dataset_benchmark(cfg, _write_ds_cfg("test-binfiles", src), str(output))
+    result = run_dataset_benchmark(
+        cfg, _write_ds_cfg("test-binfiles", src), str(output)
+    )
 
     run = result.per_product[0]
     throughput = next(m for m in run.metrics if m.name == "write_throughput")
@@ -583,7 +585,11 @@ def test_zip_delivered_bytes_in_equals_zip_size_once(tmp_path):
 
     src = tmp_path / "src"
     src.mkdir()
-    members = {"band1.bin": b"a" * 500, "band2.bin": b"b" * 500, "band3.bin": b"c" * 500}
+    members = {
+        "band1.bin": b"a" * 500,
+        "band2.bin": b"b" * 500,
+        "band3.bin": b"c" * 500,
+    }
     _make_zip(src / "scene.zip", members)
     zip_size = (src / "scene.zip").stat().st_size
     output = tmp_path / "out"

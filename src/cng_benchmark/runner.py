@@ -307,7 +307,9 @@ def _run_product(
     # size N times in _aggregate_write_metrics would give N×zip_size.
     _first_uri = product.components[0].uri if product.components else ""
     _zip_uri = storage.zip_source_uri(_first_uri)
-    _zip_source_size = storage.object_size(_zip_uri, "source") if _zip_uri is not None else None
+    _zip_source_size = (
+        storage.object_size(_zip_uri, "source") if _zip_uri is not None else None
+    )
 
     with tempfile.TemporaryDirectory() as workdir:
         for i, component in enumerate(product.components):
