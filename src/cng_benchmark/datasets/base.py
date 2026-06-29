@@ -119,13 +119,20 @@ class Dataset(ABC):
 
     @abstractmethod
     def products(
-        self, *, prefix: str | None = None, limit: int | None = None
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | None = None,
+        limit: int | None = None,
     ) -> list[Product]:
         """Enumerate the dataset's products, each with its components.
 
-        ``prefix`` and ``limit`` bound a product-set enumeration (the run-shape
-        ``params.products`` knob): only products under ``prefix`` are yielded,
-        and at most ``limit`` of them. Single-product readers ignore both.
+        ``prefix``, ``pattern`` and ``limit`` bound a product-set enumeration
+        (the run-shape ``params.products`` knob): only products whose key starts
+        with ``prefix`` and matches the ``pattern`` regex are yielded, and at
+        most ``limit`` of them. ``pattern`` lets one run select a set that is not
+        a single path-prefix (e.g. one date across adjacent tiles). Single-product
+        readers ignore all three.
         """
 
     def rgb_composites(self) -> list[RgbComposite]:

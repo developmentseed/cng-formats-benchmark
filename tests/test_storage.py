@@ -1,5 +1,7 @@
 """Tests for the URI-addressed storage layer (local + S3)."""
 
+from pathlib import Path
+
 import pytest
 
 from cng_benchmark import storage
@@ -133,6 +135,50 @@ def test_s3_write_list_read_round_trip(s3_bucket):
     sizes = storage.list_object_sizes(f"s3://{s3_bucket}/fixtures/")
     assert sorted(sizes) == [100, 200]
     assert storage.read_bytes(f"s3://{s3_bucket}/fixtures/a.tif") == b"a" * 100
+
+
+def test_list_uris_pattern_selects_across_tiles_local(tmp_path):
+    # Tile-first layout: a single path-prefix cannot select one date across
+    # adjacent tiles; a regex pattern can (the mosaic use case, #49).
+    for tile, date in [
+        ("T31TCJ", "2015/07/06"),
+        ("T31TDJ", "2015/07/06"),
+        ("T31TCJ", "2015/07/18"),
+        ("T31TZZ", "2015/07/06"),
+    ]:
+        f = tmp_path / tile / date / "scene.zip"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"z")
+
+    hits = storage.list_uris(
+        str(tmp_path),
+        suffix=".zip",
+        pattern=r"^T31T(CJ|DJ)/2015/07/06/",
+    )
+    rels = [Path(h).relative_to(tmp_path).as_posix() for h in hits]
+    assert rels == [
+        "T31TCJ/2015/07/06/scene.zip",
+        "T31TDJ/2015/07/06/scene.zip",
+    ]
+
+
+def test_list_uris_pattern_on_s3(s3_bucket):
+    for key in (
+        "T31TCJ/2015/07/06/scene.zip",
+        "T31TDJ/2015/07/06/scene.zip",
+        "T31TCJ/2015/07/18/scene.zip",
+    ):
+        storage.write_bytes(f"s3://{s3_bucket}/{key}", b"z")
+
+    hits = storage.list_uris(
+        f"s3://{s3_bucket}/",
+        suffix=".zip",
+        pattern=r"/2015/07/06/",
+    )
+    assert hits == [
+        f"s3://{s3_bucket}/T31TCJ/2015/07/06/scene.zip",
+        f"s3://{s3_bucket}/T31TDJ/2015/07/06/scene.zip",
+    ]
 
 
 def test_upload_tree_local_preserves_paths(tmp_path):

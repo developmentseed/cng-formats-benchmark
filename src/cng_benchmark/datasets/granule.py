@@ -52,16 +52,23 @@ class GranuleDataset(Dataset):
     granule_suffix: ClassVar[str] = ".nc"
 
     def products(
-        self, *, prefix: str | None = None, limit: int | None = None
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | None = None,
+        limit: int | None = None,
     ) -> list[Product]:
         # Bound enumeration server-side, like the zip-delivery base: ``prefix`` is
         # a path prefix under the dataset root and ``limit`` caps the listing, so a
         # huge granule root is never paginated in full to find a handful (see #14).
+        # ``pattern`` regex-filters the candidates (e.g. a UTM-zone subset for a
+        # SWOT-raster mosaic) where a single path-prefix is not enough.
         granules = storage.list_uris(
             self.source_uri,
             role="source",
             prefix=prefix,
             suffix=self.granule_suffix,
+            pattern=pattern,
             limit=limit,
         )
 

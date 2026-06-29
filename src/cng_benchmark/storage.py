@@ -26,6 +26,7 @@ apply the same per-role profile through :mod:`cng_benchmark.gdal_env`.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -235,6 +236,7 @@ def list_uris(
     *,
     prefix: str | None = None,
     suffix: str | None = None,
+    pattern: str | None = None,
     limit: int | None = None,
 ) -> list[str]:
     """List the object URIs under ``uri`` (a local dir or ``s3://prefix``).
@@ -247,12 +249,19 @@ def list_uris(
     it: for S3 it is folded into the ``list_objects_v2`` ``Prefix`` so the bound
     is applied server-side (a root-level list of a huge bucket never happens),
     and it is a path-prefix match, not a substring one. ``suffix`` keeps only
-    keys ending in it. ``limit`` stops after that many matches — for S3 this
-    relies on the API's lexical key order so the full listing is never
-    materialised before the bound is applied.
+    keys ending in it. ``pattern`` is a regular expression matched (``re.search``)
+    against the key *relative to* ``uri`` — a substring match by default, anchor
+    it with ``^``/``$`` to bound — which is how a single run selects a set that
+    is not a single path-prefix, e.g. one acquisition date across several
+    adjacent MGRS tiles (``^T31T(CJ|DJ|CH|DH|DG)/2015/07/06/``). Narrow the
+    listing server-side with ``prefix`` (the regex's literal head) so the regex
+    only filters the candidates it returns. ``limit`` stops after that many
+    matches — for S3 this relies on the API's lexical key order so the full
+    listing is never materialised before the bound is applied.
     """
     if limit is not None and limit <= 0:
         return []
+    rx = re.compile(pattern) if pattern is not None else None
     if is_s3(uri):
         loc = _parse_s3(uri)
         client = _s3_client(role)
@@ -269,6 +278,9 @@ def list_uris(
                     continue
                 if suffix is not None and not key.endswith(suffix):
                     continue
+                rel = key[len(base) :] if base else key
+                if rx is not None and not rx.search(rel):
+                    continue
                 uris.append(f"s3://{loc.bucket}/{key}")
                 if limit is not None and len(uris) >= limit:
                     return uris
@@ -278,8 +290,10 @@ def list_uris(
     if not path.exists():
         raise FileNotFoundError(f"no such path: {uri}")
     if path.is_file():
-        keep = (suffix is None or path.name.endswith(suffix)) and (
-            prefix is None or path.name.startswith(prefix)
+        keep = (
+            (suffix is None or path.name.endswith(suffix))
+            and (prefix is None or path.name.startswith(prefix))
+            and (rx is None or rx.search(path.name) is not None)
         )
         return [str(path)] if keep else []
     uris = []
@@ -290,6 +304,8 @@ def list_uris(
         if prefix is not None and not rel.startswith(prefix):
             continue
         if suffix is not None and not p.name.endswith(suffix):
+            continue
+        if rx is not None and not rx.search(rel):
             continue
         uris.append(str(p))
         if limit is not None and len(uris) >= limit:

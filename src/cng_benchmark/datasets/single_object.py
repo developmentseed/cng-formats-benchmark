@@ -17,7 +17,11 @@ class SingleObjectDataset(Dataset):
     """One product, one component = ``source``."""
 
     def products(
-        self, *, prefix: str | None = None, limit: int | None = None
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | None = None,
+        limit: int | None = None,
     ) -> list[Product]:
         component = SourceObject(name=self.id, uri=self.source_uri)
         return [Product(id=self.id, components=[component])]

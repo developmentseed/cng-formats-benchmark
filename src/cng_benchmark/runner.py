@@ -591,14 +591,16 @@ def run_dataset_benchmark(
     scope = config.params.get("scope", "product")
     bound = dict(config.params.get("products", {}))
     prefix = bound.get("prefix")
+    pattern = bound.get("pattern")
     limit = bound.get("limit")
     if scope == "product" and limit is None:
         limit = 1
-    products = dataset.products(prefix=prefix, limit=limit)
+    products = dataset.products(prefix=prefix, pattern=pattern, limit=limit)
     if not products:
         raise ValueError(
             f"dataset {dataset_config.id!r} enumerated no products"
             + (f" under prefix {prefix!r}" if prefix else "")
+            + (f" matching pattern {pattern!r}" if pattern else "")
         )
 
     per_product: list[BenchmarkRun] = []

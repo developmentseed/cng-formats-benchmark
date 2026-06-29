@@ -42,16 +42,23 @@ class ZipDeliveryDataset(Dataset):
     """One ``.zip`` per scene under ``source``; members chosen by the subclass."""
 
     def products(
-        self, *, prefix: str | None = None, limit: int | None = None
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | None = None,
+        limit: int | None = None,
     ) -> list[Product]:
         # Bound enumeration server-side: ``prefix`` is a path prefix under the
         # dataset root and ``limit`` caps the listing, so a huge tile root is
         # never paginated in full to find a handful of scenes (see #14).
+        # ``pattern`` regex-filters the candidates (e.g. one date across adjacent
+        # tiles for a mosaic), the tile-first layout a single prefix can't select.
         zips = storage.list_uris(
             self.source_uri,
             role="source",
             prefix=prefix,
             suffix=".zip",
+            pattern=pattern,
             limit=limit,
         )
 
