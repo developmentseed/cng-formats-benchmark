@@ -591,9 +591,7 @@ class CopcAdapter(FormatAdapter):
         span = int(_first(opts.span, DEFAULT_SPAN))
         max_depth_value = _first(opts.max_depth, None)
         max_depth = (
-            int(max_depth_value)
-            if max_depth_value is not None
-            else _SAFETY_MAX_DEPTH
+            int(max_depth_value) if max_depth_value is not None else _SAFETY_MAX_DEPTH
         )
         scale_value = _first(opts.scale, None)
         _build_copc(

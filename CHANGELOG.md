@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.4.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.3.0...v0.4.0) (2026-06-25)
+
+
+### Features
+
+* **copc:** carry the full PIXC pixel_cloud variable set (content-complete COPC) ([#38](https://github.com/developmentseed/cng-formats-benchmark/issues/38)) ([0c3b11d](https://github.com/developmentseed/cng-formats-benchmark/commit/0c3b11db0c81d759793590cd0c7555e5bb689b69))
+* **copc:** publish the octree level-of-detail figure as a systematic run output ([#44](https://github.com/developmentseed/cng-formats-benchmark/issues/44)) ([335fa85](https://github.com/developmentseed/cng-formats-benchmark/commit/335fa85a86c5c512a169ae0fe6a1db404b79adec))
+* **metrics:** source size (bytes_in) for the PIXC arm + COPC compression ratio ([#43](https://github.com/developmentseed/cng-formats-benchmark/issues/43)) ([7e6b2b9](https://github.com/developmentseed/cng-formats-benchmark/commit/7e6b2b97bcb39684f4ad1532ad1c07843fe99c02))
+* swot-lakesp-prior vector reader + GeoParquet adapter (LakeSP -&gt; GeoParquet) ([#31](https://github.com/developmentseed/cng-formats-benchmark/issues/31)) ([3d2dc32](https://github.com/developmentseed/cng-formats-benchmark/commit/3d2dc327bb20b458a010efe7d15f5acfedfd85d7))
+* swot-pixc point-cloud reader + COPC adapter (PIXC -&gt; COPC) ([#34](https://github.com/developmentseed/cng-formats-benchmark/issues/34)) ([5b179b1](https://github.com/developmentseed/cng-formats-benchmark/commit/5b179b1c1d6ee20baa8e853be2e5e0a5d35d919a))
+* swot-raster100m netCDF-raster reader (GranuleDataset -&gt; GeoZarr) ([#29](https://github.com/developmentseed/cng-formats-benchmark/issues/29)) ([b2af313](https://github.com/developmentseed/cng-formats-benchmark/commit/b2af313c7475b96439ab79035acf566c259322d1))
+
+
+### Bug Fixes
+
+* **copc:** bound octree node size by the per-node budget (no giant leaf) ([#42](https://github.com/developmentseed/cng-formats-benchmark/issues/42)) ([da78818](https://github.com/developmentseed/cng-formats-benchmark/commit/da7881858e3fb5d826f724d680f500af5aa51c49))
+* **copc:** download the PIXC granule with boto3, not s3fs (read-timeout) ([#40](https://github.com/developmentseed/cng-formats-benchmark/issues/40)) ([96ed02d](https://github.com/developmentseed/cng-formats-benchmark/commit/96ed02de1580804034d369d5889f78f235f82b71))
+* **copc:** read the PIXC source granule in one GET, not HDF5-over-s3fs random access ([#39](https://github.com/developmentseed/cng-formats-benchmark/issues/39)) ([6712fe8](https://github.com/developmentseed/cng-formats-benchmark/commit/6712fe88bd26b0f03e50e59230e149bbc8b2d1b7))
+* default display_titiler_path to "" for GeoZarr display ([#30](https://github.com/developmentseed/cng-formats-benchmark/issues/30)) ([1354c72](https://github.com/developmentseed/cng-formats-benchmark/commit/1354c72e88c460692bf999837ee36fd46068fcdb))
+* gdal_session overlays os.environ for non-rasterio GDAL bindings (pyogrio) ([#32](https://github.com/developmentseed/cng-formats-benchmark/issues/32)) ([64a232d](https://github.com/developmentseed/cng-formats-benchmark/commit/64a232dc00f26f7dc1941e7401fa70698411d07f))
+* route the runner to titiler-xarray for GeoZarr display ([#23](https://github.com/developmentseed/cng-formats-benchmark/issues/23)) ([3293dfd](https://github.com/developmentseed/cng-formats-benchmark/commit/3293dfddea66cbe393f1c7446b5efcabf5d17ff9))
+
+
+### Performance Improvements
+
+* **copc:** cut content-complete build peak memory (free source arrays) ([#41](https://github.com/developmentseed/cng-formats-benchmark/issues/41)) ([2729764](https://github.com/developmentseed/cng-formats-benchmark/commit/27297641689bd831dba2a46034846e0325e4e3e9))
+
 ## [0.3.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.2.0...v0.3.0) (2026-06-23)
 
 
