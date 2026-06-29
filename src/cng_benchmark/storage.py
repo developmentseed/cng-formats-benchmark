@@ -369,7 +369,7 @@ def zip_source_uri(vsi_path: str) -> str | None:
     """
     if not vsi_path.startswith("/vsizip/"):
         return None
-    inner = vsi_path[len("/vsizip/"):]
+    inner = vsi_path[len("/vsizip/") :]
     dot_zip = inner.find(".zip/")
     if dot_zip == -1:
         if inner.endswith(".zip"):
@@ -377,9 +377,9 @@ def zip_source_uri(vsi_path: str) -> str | None:
         else:
             return None
     else:
-        zip_gdal = inner[:dot_zip + len(".zip")]
+        zip_gdal = inner[: dot_zip + len(".zip")]
     if zip_gdal.startswith("/vsis3/"):
-        return "s3://" + zip_gdal[len("/vsis3/"):]
+        return "s3://" + zip_gdal[len("/vsis3/") :]
     return zip_gdal
 
 
