@@ -314,6 +314,36 @@ def test_open_seekable_s3_lists_zip_members_and_closes(s3_bucket):
         assert zipfile.ZipFile(f2).namelist()
 
 
+def test_zip_source_uri_s3_member():
+    uri = "/vsizip//vsis3/bucket/path/scene.zip/bands/B02.tif"
+    assert storage.zip_source_uri(uri) == "s3://bucket/path/scene.zip"
+
+
+def test_zip_source_uri_local_member():
+    uri = "/vsizip//tmp/data/scene.zip/member.shp"
+    assert storage.zip_source_uri(uri) == "/tmp/data/scene.zip"
+
+
+def test_zip_source_uri_not_vsizip():
+    assert storage.zip_source_uri("/vsis3/bucket/key.tif") is None
+    assert storage.zip_source_uri("s3://bucket/key.zip") is None
+    assert storage.zip_source_uri("/local/path.tif") is None
+
+
+def test_zip_source_uri_no_zip_extension():
+    assert storage.zip_source_uri("/vsizip//vsis3/bucket/key.tar/member") is None
+
+
+def test_zip_source_uri_s3_size_via_object_size(s3_bucket):
+    zip_data = b"fake zip content of known size"
+    storage.write_bytes(f"s3://{s3_bucket}/scenes/A.zip", zip_data)
+    # zip_source_uri resolves the member path to the zip S3 URI, and object_size HEADs it.
+    member_vsi = f"/vsizip//vsis3/{s3_bucket}/scenes/A.zip/A_FRE_B2.tif"
+    zip_uri = storage.zip_source_uri(member_vsi)
+    assert zip_uri == f"s3://{s3_bucket}/scenes/A.zip"
+    assert storage.object_size(zip_uri, role="sink") == len(zip_data)
+
+
 def test_list_uris_s3_filters_by_suffix(s3_bucket):
     storage.write_bytes(f"s3://{s3_bucket}/t/2015/a.zip", b"z")
     storage.write_bytes(f"s3://{s3_bucket}/t/2015/a.xml", b"m")
