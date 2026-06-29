@@ -550,9 +550,10 @@ def _measure_display_object(
     network), times them via TiTiler against the uploaded object, and (best-effort)
     renders the block/chunk-grid + tile-footprint ``display_chunk_layout.png`` next
     to it. Branches on the object kind: a raster file uses TiTiler's ``/cog``
-    endpoints + the rasterio grid; a zarr store uses the multidim/xarray router
-    (``display_titiler_path``, default ``""`` — the in-stack ``titiler-xarray``
-    serves at the root) + the zarr chunk grid + the ``variable`` query.
+    endpoints + the rasterio grid; a zarr store uses TiTiler's built-in ``/zarr``
+    endpoint (available since TiTiler 2.0, no separate titiler-xarray needed) at
+    the path set by ``display_titiler_path`` (default ``"zarr"``) + the zarr chunk
+    grid + the ``variable`` query.
     """
     if not titiler_endpoint:
         raise ValueError("the display metric requires a TiTiler endpoint")
@@ -571,7 +572,7 @@ def _measure_display_object(
         from cng_benchmark.formats.geozarr import DATA_VAR
 
         tiles = select_zarr_chunk_tiles(local_target, targets=targets)
-        prefix = str(config.params.get("display_titiler_path", ""))
+        prefix = str(config.params.get("display_titiler_path", "zarr"))
         metrics = measure_display(
             titiler_endpoint,
             object_uri,

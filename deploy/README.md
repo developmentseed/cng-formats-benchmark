@@ -15,15 +15,9 @@ cd deploy && RUNNER_IMAGE=cng-benchmark-runner:dev docker compose up --wait
 docker compose down -v
 ```
 
-The default smoke runs the COG arm. The **GeoZarr** display metric needs a tile
-server that speaks Zarr v3 (GDAL's COG TiTiler cannot read the sharding codec), so
-a `titiler-xarray` service ships under the optional `geozarr` compose profile and a
-matching `titilerXarray` toggle (off by default) in the Helm chart:
-
-```bash
-docker compose --profile geozarr up titiler-xarray   # bring up the xarray surface
-# helm: --set titilerXarray.enabled=true
-```
+The default smoke runs the COG arm. The **GeoZarr** display metric is served by
+TiTiler's built-in `/zarr` endpoint (available since TiTiler 2.0) — the same
+TiTiler pod that serves `/cog` for raster tiles. No separate service is needed.
 
 ## Definition of done for a benchmark arm
 
@@ -63,7 +57,7 @@ read the source from the CNES Datalake instead.
 
 | Arm | Overlay | Target | Display |
 | --- | --- | --- | --- |
-| SWOT-A | `values-lab-swot-raster100m.yaml` | Raster100m → GeoZarr | yes (titiler-xarray) |
+| SWOT-A | `values-lab-swot-raster100m.yaml` | Raster100m → GeoZarr | yes (TiTiler /zarr) |
 | SWOT-B | `values-lab-swot-lakesp.yaml` | LakeSP Prior → GeoParquet | no |
 | SWOT-C | `values-lab-swot-pixc.yaml` | PIXC pixel cloud → COPC | no |
 

@@ -49,10 +49,9 @@ spec:
             {{- include "cng-benchmark.s3Env" . | nindent 12 }}
         {{- end }}
         {{- if eq (include "cng-benchmark.displayEnabled" .) "true" }}
-        # Gate the run on the selected display server's readiness — the display
-        # metric calls it and does not retry, so the Job must not start before the
-        # Service routes a ready endpoint. A TCP connect works for both surfaces
-        # (TiTiler /cog and titiler-xarray, whose readiness probe is tcpSocket).
+        # Gate the run on the TiTiler readiness — the display metric calls it and
+        # does not retry, so the Job must not start before the Service routes a
+        # ready endpoint. TiTiler serves both COG (/cog) and GeoZarr (/zarr).
         - name: wait-display
           image: {{ include "cng-benchmark.runnerImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -90,9 +89,8 @@ spec:
             {{- include "cng-benchmark.gdalEnv" . | nindent 12 }}
             {{- include "cng-benchmark.sourceEnv" . | nindent 12 }}
             {{- if eq (include "cng-benchmark.displayEnabled" .) "true" }}
-            # Display endpoint for the runner (--titiler-endpoint envvar): the
-            # surface selected by runner.displaySurface (cog TiTiler or
-            # titiler-xarray). The runner picks the tile path by object_kind.
+            # TiTiler endpoint: serves COG (/cog) and GeoZarr (/zarr) since 2.0.
+            # The runner picks the right path by object_kind.
             - name: TITILER_ENDPOINT
               value: {{ printf "http://%s" (include "cng-benchmark.displayHostPort" .) | quote }}
             {{- end }}
