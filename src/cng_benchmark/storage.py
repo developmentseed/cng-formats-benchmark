@@ -230,6 +230,26 @@ def list_object_sizes(uri: str, role: str = "sink") -> list[int]:
     return sizes
 
 
+def _alternation_prefixes(pattern: str) -> list[str] | None:
+    """Extract literal branches from a leading anchored alternation group.
+
+    Matches patterns of the form ``^(A|B|C)...`` where every branch is a
+    literal path segment (word chars, hyphens, dots — no regex metacharacters).
+    Returns the branch list so the S3 listing can issue one tight server-side
+    prefix per branch instead of one broad scan that covers the whole bucket.
+
+    Returns ``None`` when the pattern does not start with a literal alternation,
+    leaving ``list_uris`` to fall back to the single-prefix approach.
+    """
+    m = re.match(r"^\^?\(([^()]+)\)", pattern)
+    if m is None:
+        return None
+    alts = m.group(1).split("|")
+    if not all(re.fullmatch(r"[A-Za-z0-9._\-]+", a) for a in alts):
+        return None
+    return alts
+
+
 def list_uris(
     uri: str,
     role: str = "source",
@@ -270,20 +290,29 @@ def list_uris(
             base += "/"
         s3_prefix = base + (prefix or "")
         paginator = client.get_paginator("list_objects_v2")
+        # When the pattern opens with a literal alternation group (e.g.
+        # ``^(T30TWP|T31TCJ)/``), issue one tight listing per branch instead of
+        # one broad scan under s3_prefix — avoids walking a multi-year archive
+        # to find a sparse set of tiles in a large bucket (#58).
+        alt_pfxs = _alternation_prefixes(pattern) if pattern is not None else None
+        listing_prefixes = (
+            [base + alt for alt in alt_pfxs] if alt_pfxs is not None else [s3_prefix]
+        )
         uris: list[str] = []
-        for page in paginator.paginate(Bucket=loc.bucket, Prefix=s3_prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if key.endswith("/"):
-                    continue
-                if suffix is not None and not key.endswith(suffix):
-                    continue
-                rel = key[len(base) :] if base else key
-                if rx is not None and not rx.search(rel):
-                    continue
-                uris.append(f"s3://{loc.bucket}/{key}")
-                if limit is not None and len(uris) >= limit:
-                    return uris
+        for lp in listing_prefixes:
+            for page in paginator.paginate(Bucket=loc.bucket, Prefix=lp):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if key.endswith("/"):
+                        continue
+                    if suffix is not None and not key.endswith(suffix):
+                        continue
+                    rel = key[len(base) :] if base else key
+                    if rx is not None and not rx.search(rel):
+                        continue
+                    uris.append(f"s3://{loc.bucket}/{key}")
+                    if limit is not None and len(uris) >= limit:
+                        return uris
         return uris
 
     path = _local_path(uri)

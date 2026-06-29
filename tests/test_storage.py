@@ -396,3 +396,75 @@ def test_list_uris_s3_filters_by_suffix(s3_bucket):
     storage.write_bytes(f"s3://{s3_bucket}/t/2016/b.zip", b"z")
     uris = storage.list_uris(f"s3://{s3_bucket}/t/", suffix=".zip")
     assert uris == [f"s3://{s3_bucket}/t/2015/a.zip", f"s3://{s3_bucket}/t/2016/b.zip"]
+
+
+# --- _alternation_prefixes unit tests ----------------------------------------
+
+
+def test_alternation_prefixes_extracts_literal_branches():
+    from cng_benchmark.storage import _alternation_prefixes
+
+    assert _alternation_prefixes(r"^(T30TWP|T31TCJ)/2015/") == ["T30TWP", "T31TCJ"]
+    assert _alternation_prefixes(r"(T30TWP|T31TCJ)/2015/") == ["T30TWP", "T31TCJ"]
+
+
+def test_alternation_prefixes_single_branch():
+    from cng_benchmark.storage import _alternation_prefixes
+
+    assert _alternation_prefixes(r"^(T31TCJ)/") == ["T31TCJ"]
+
+
+def test_alternation_prefixes_returns_none_for_non_alternation():
+    from cng_benchmark.storage import _alternation_prefixes
+
+    assert _alternation_prefixes(r"^T31TCJ/2015/") is None
+    assert _alternation_prefixes(r"/2015/07/06/") is None
+
+
+def test_alternation_prefixes_returns_none_for_regex_metacharacters():
+    from cng_benchmark.storage import _alternation_prefixes
+
+    # Branches containing regex metacharacters are not safe to use as S3 prefixes.
+    assert _alternation_prefixes(r"^(T31T.*|T30T.*)/") is None
+    assert _alternation_prefixes(r"^(T31T[CJ]+)/") is None
+
+
+# --- list_uris with alternation pattern on S3 --------------------------------
+
+
+def test_list_uris_alternation_pattern_issues_tight_s3_listing(s3_bucket):
+    # Multi-tile AOI: keys live under T30TWP/ and T31TCJ/ only; a broad root
+    # scan would also walk T31TDJ/ and T31TZZ/.  The alternation pattern must
+    # restrict listing to the two named tiles.
+    keys = [
+        "T30TWP/2015/07/06/scene.zip",
+        "T31TCJ/2015/07/06/scene.zip",
+        "T31TDJ/2015/07/06/scene.zip",  # outside AOI — must NOT appear
+        "T31TZZ/2015/07/06/scene.zip",  # outside AOI — must NOT appear
+        "T30TWP/2015/07/18/scene.zip",  # wrong date — filtered by regex
+    ]
+    for key in keys:
+        storage.write_bytes(f"s3://{s3_bucket}/{key}", b"z")
+
+    hits = storage.list_uris(
+        f"s3://{s3_bucket}/",
+        suffix=".zip",
+        pattern=r"^(T30TWP|T31TCJ)/2015/07/06/",
+    )
+    assert hits == [
+        f"s3://{s3_bucket}/T30TWP/2015/07/06/scene.zip",
+        f"s3://{s3_bucket}/T31TCJ/2015/07/06/scene.zip",
+    ]
+
+
+def test_list_uris_alternation_pattern_limit_respected(s3_bucket):
+    for tile in ("T30TWP", "T31TCJ", "T31TDJ"):
+        storage.write_bytes(f"s3://{s3_bucket}/{tile}/2015/07/06/scene.zip", b"z")
+
+    hits = storage.list_uris(
+        f"s3://{s3_bucket}/",
+        suffix=".zip",
+        pattern=r"^(T30TWP|T31TCJ|T31TDJ)/2015/07/06/",
+        limit=2,
+    )
+    assert len(hits) == 2
