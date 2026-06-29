@@ -218,10 +218,10 @@ def run_conversion_benchmark(
             ]
         if "read" in requested:
             logger.info("read metric")
-            metrics += _measure_object_read(adapter, object_uri)
+            metrics += _safe_read_metrics(adapter, object_uri)
         if "display" in requested:
             logger.info("display metric")
-            display_metrics, display_artifacts = _measure_display_object(
+            display_metrics, display_artifacts = _safe_display_metrics(
                 config,
                 adapter,
                 local_target,
@@ -375,12 +375,12 @@ def _run_product(
 
             if "read" in requested and i < read_samples:
                 logger.info("  [%d/%d] %s: read metric", i + 1, n_comp, component.name)
-                extra_metrics += _measure_object_read(adapter, object_uri)
+                extra_metrics += _safe_read_metrics(adapter, object_uri)
             if "display" in requested and i < display_samples:
                 logger.info(
                     "  [%d/%d] %s: display metric", i + 1, n_comp, component.name
                 )
-                display_metrics, display_artifacts = _measure_display_object(
+                display_metrics, display_artifacts = _safe_display_metrics(
                     config,
                     adapter,
                     local_target,
@@ -603,6 +603,43 @@ def _measure_display_object(
             detail={"skipped_reason": str(exc)},
         )
     return metrics, [artifact]
+
+
+def _safe_read_metrics(adapter: FormatAdapter, object_uri: str) -> list[MetricResult]:
+    """Run the read metric, returning a skipped marker on any exception.
+
+    Network-dependent: a range-request timeout or transient S3 error should not
+    abort the enclosing product or dataset run, so failures are caught, logged,
+    and surfaced as a ``read_skipped`` result with the error string in ``detail``.
+    """
+    try:
+        return _measure_object_read(adapter, object_uri)
+    except Exception as exc:  # noqa: BLE001 - best-effort, same stance as layout image
+        logger.warning("read metric skipped: %s", exc)
+        return [MetricResult(name="read_skipped", value=0.0, detail={"error": str(exc)})]
+
+
+def _safe_display_metrics(
+    config: BenchmarkConfig,
+    adapter: FormatAdapter,
+    local_target: str,
+    object_uri: str,
+    artifact_dir: str,
+    titiler_endpoint: str | None,
+) -> tuple[list[MetricResult], list[Artifact]]:
+    """Run the display metric, returning a skipped marker on any exception.
+
+    Network-dependent (TiTiler tile fetches with a 30 s timeout): a transient
+    timeout on one product must not abort a 20- or 100-product dataset run, so
+    failures are caught, logged, and surfaced as a ``display_skipped`` result.
+    """
+    try:
+        return _measure_display_object(
+            config, adapter, local_target, object_uri, artifact_dir, titiler_endpoint
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort, same stance as layout image
+        logger.warning("display metric skipped: %s", exc)
+        return [MetricResult(name="display_skipped", value=0.0, detail={"error": str(exc)})], []
 
 
 def run_dataset_benchmark(
