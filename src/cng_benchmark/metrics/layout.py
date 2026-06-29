@@ -40,6 +40,8 @@ def describe_cog_layout(name: str, path: str, size_bytes: int) -> CogLayout:
     geo stack is missing and propagates rasterio errors for an unreadable raster,
     so the caller can decide whether a missing layout is acceptable.
     """
+    import numpy as np
+
     rasterio = _require_geo()
     with rasterio.open(path) as src:
         block_h, block_w = src.block_shapes[0]
@@ -47,6 +49,10 @@ def describe_cog_layout(name: str, path: str, size_bytes: int) -> CogLayout:
         tiled = bool(src.profile.get("tiled", False)) or block_w < width
         decimations = [int(d) for d in src.overviews(1)]
         internal_tiles = math.ceil(width / block_w) * math.ceil(height / block_h)
+        codec = (src.profile.get("compress") or "none").lower()
+        dtype_bytes = np.dtype(src.dtypes[0]).itemsize
+        uncompressed = width * height * dtype_bytes * src.count
+    compression_ratio = uncompressed / size_bytes if size_bytes else 0.0
     return CogLayout(
         name=name,
         size_bytes=size_bytes,
@@ -55,4 +61,6 @@ def describe_cog_layout(name: str, path: str, size_bytes: int) -> CogLayout:
         block_width=int(block_w),
         overview_decimations=decimations,
         internal_tiles=int(internal_tiles),
+        codec=codec,
+        compression_ratio=compression_ratio,
     )

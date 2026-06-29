@@ -138,14 +138,29 @@ def describe_geoparquet_layout(path: str, name: str) -> GeoParquetLayout:
     geo = _geo_metadata(path)
     primary = geo.get("primary_column", "geometry")
     has_bbox = bool(geo.get("columns", {}).get(primary, {}).get("covering"))
+
+    codec = "uncompressed"
+    total_uncompressed = 0
+    for i in range(md.num_row_groups):
+        rg = md.row_group(i)
+        for j in range(rg.num_columns):
+            col = rg.column(j)
+            if i == 0 and j == 0:
+                codec = col.compression.lower()
+            total_uncompressed += col.total_uncompressed_size
+    file_size = os.path.getsize(path)
+    compression_ratio = total_uncompressed / file_size if file_size else 0.0
+
     return GeoParquetLayout(
         name=name,
-        size_bytes=os.path.getsize(path),
+        size_bytes=file_size,
         geometry_column=primary,
         num_rows=md.num_rows,
         num_row_groups=md.num_row_groups,
         row_group_rows=int(row_group_rows),
         has_bbox_covering=has_bbox,
+        codec=codec,
+        compression_ratio=compression_ratio,
     )
 
 

@@ -138,14 +138,16 @@ def _render_tiling_layout(layouts: list) -> list[str]:
         f"- **Internally tiled:** {tiled}/{len(layouts)} objects "
         f"({len(layouts) - tiled} striped)",
         "",
-        "| Object | Tiled | Block | Overviews | Internal tiles |",
-        "| --- | --- | --- | --- | --- |",
+        "| Object | Tiled | Block | Overviews | Internal tiles | Codec | Compression |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         ovr = len(ly.overview_decimations)
+        ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
         lines.append(
             f"| {ly.name} | {'yes' if ly.is_tiled else 'no'} | "
-            f"{ly.block_width}×{ly.block_height} | {ovr} | {ly.internal_tiles} |"
+            f"{ly.block_width}×{ly.block_height} | {ovr} | {ly.internal_tiles} | "
+            f"{ly.codec} | {ratio} |"
         )
     return lines
 
@@ -165,15 +167,17 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
         "",
         f"- **Shard objects:** {shards} across {len(layouts)} array(s)",
         "",
-        "| Array | Chunk | Shard | Chunks/shard | Codec | Levels | Shards |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Array | Chunk | Shard | Chunks/shard | Codec | Levels | Shards"
+        " | Compression |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         chunk = "×".join(str(v) for v in ly.chunk_shape)
         shard = "×".join(str(v) for v in ly.shard_shape)
+        ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
         lines.append(
             f"| {ly.name} | {chunk} | {shard} | {ly.chunks_per_shard} | "
-            f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} |"
+            f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} | {ratio} |"
         )
     return lines
 
@@ -194,14 +198,16 @@ def _render_row_group_layout(layouts: list) -> list[str]:
         f"- **Bbox covering:** {with_bbox}/{len(layouts)} file(s) "
         "(spatial pushdown to row groups)",
         "",
-        "| Object | Geometry | Features | Row groups | Rows/group | Bbox covering |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Object | Geometry | Features | Row groups | Rows/group"
+        " | Bbox covering | Codec | Compression |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
+        ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
         lines.append(
             f"| {ly.name} | {ly.geometry_column} | {ly.num_rows} | "
             f"{ly.num_row_groups} | {ly.row_group_rows} | "
-            f"{'yes' if ly.has_bbox_covering else 'no'} |"
+            f"{'yes' if ly.has_bbox_covering else 'no'} | {ly.codec} | {ratio} |"
         )
     return lines
 
@@ -232,15 +238,16 @@ def _render_octree_layout(layouts: list) -> list[str]:
         )
     lines += [
         "",
-        "| Object | Nodes | Depth | Points | Points/node | Extra dims | Compression |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Object | Nodes | Depth | Points | Points/node | Extra dims"
+        " | Codec | Compression |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
         lines.append(
             f"| {ly.name} | {ly.num_nodes} | {ly.max_depth} | "
             f"{ly.point_count} | {ly.points_per_node} | "
-            f"{len(ly.extra_dimensions)} | {ratio} |"
+            f"{len(ly.extra_dimensions)} | {ly.codec} | {ratio} |"
         )
     return lines
 

@@ -497,6 +497,7 @@ def describe_copc_layout(path: str, name: str) -> CopcLayout:
         point_count=header.point_count,
         points_per_node=max(counts) if counts else 0,
         extra_dimensions=_copc_extra_dimensions(path),
+        codec="laszip",
         compression_ratio=(uncompressed / size_bytes) if size_bytes else 0.0,
     )
 

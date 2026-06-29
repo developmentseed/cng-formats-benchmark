@@ -263,9 +263,12 @@ def _read_array_meta(store: str) -> dict:
     chunks_per_shard = 1
     for s, c in zip(shards, chunk, strict=True):
         chunks_per_shard *= max(1, s // c)
+    import numpy as np
+
     codec = "none"
     for c in getattr(arr, "compressors", ()) or ():
         codec = type(c).__name__.replace("Codec", "").lower() or codec
+    uncompressed_bytes = int(np.prod(arr.shape) * np.dtype(str(arr.dtype)).itemsize)
     return {
         "chunk_shape": chunk,
         "shard_shape": shards,
@@ -273,6 +276,7 @@ def _read_array_meta(store: str) -> dict:
         "codec": codec,
         "multiscale_levels": int(levels),
         "shard_count": len(_shard_data_files(store)),
+        "uncompressed_bytes": uncompressed_bytes,
     }
 
 
@@ -280,7 +284,11 @@ def describe_store_layout(store: str, name: str) -> GeoZarrLayout:
     """Return the :class:`GeoZarrLayout` of the GeoZarr store at ``store``."""
     meta = _read_array_meta(store)
     total = sum(enumerate_store_objects(store))
-    return GeoZarrLayout(name=name, size_bytes=total, **meta)
+    uncompressed = meta.pop("uncompressed_bytes", 0)
+    compression_ratio = uncompressed / total if total else 0.0
+    return GeoZarrLayout(
+        name=name, size_bytes=total, compression_ratio=compression_ratio, **meta
+    )
 
 
 @FORMATS.register("geozarr")
