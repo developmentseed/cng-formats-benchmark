@@ -89,6 +89,61 @@ def test_vrt_carries_nodata(tmp_path):
         assert src.nodata == 0
 
 
+def test_vrt_nodata_defaults_to_zero_when_sources_have_no_nodata(tmp_path):
+    # Sources without nodata (e.g. MAJA S2 before the COG fix): mosaic gaps must
+    # still be masked. The VRT band NoDataValue should default to 0.
+    red = read_grid(_write_tif(tmp_path / "r.tif", 300000, 4500000))
+    green = read_grid(_write_tif(tmp_path / "g.tif", 300000, 4500000))
+    blue = read_grid(_write_tif(tmp_path / "b.tif", 300000, 4500000))
+
+    xml = build_rgb_vrt_xml([[red], [green], [blue]])
+    assert "<NoDataValue>0</NoDataValue>" in xml
+    vrt_path = tmp_path / "rgb.vrt"
+    vrt_path.write_text(xml)
+    with rasterio.open(vrt_path) as src:
+        assert src.nodata == 0
+
+
+def _write_tif_with_overviews(path, origin_x, origin_y):
+    """Write a GeoTIFF with built-in overviews."""
+    from rasterio.enums import Resampling
+
+    transform = from_origin(origin_x, origin_y, _RES, _RES)
+    data = np.ones((64, 64), dtype="uint16")
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=64,
+        width=64,
+        count=1,
+        dtype="uint16",
+        crs=_CRS,
+        transform=transform,
+    ) as dst:
+        dst.write(data, 1)
+        dst.build_overviews([2, 4], Resampling.nearest)
+        dst.update_tags(ns="rio_overview", resampling="nearest")
+    return str(path)
+
+
+def test_vrt_has_overview_list_when_source_has_overviews(tmp_path):
+    red = read_grid(_write_tif_with_overviews(tmp_path / "r.tif", 300000, 4500000))
+    green = read_grid(_write_tif_with_overviews(tmp_path / "g.tif", 300000, 4500000))
+    blue = read_grid(_write_tif_with_overviews(tmp_path / "b.tif", 300000, 4500000))
+
+    assert red.overviews == [2, 4]
+    xml = build_rgb_vrt_xml([[red], [green], [blue]])
+    assert "<OverviewList>2 4</OverviewList>" in xml
+
+
+def test_vrt_no_overview_list_when_source_has_no_overviews(tmp_path):
+    red = read_grid(_write_tif(tmp_path / "r.tif", 300000, 4500000))
+    assert red.overviews == []
+    xml = build_rgb_vrt_xml([[red], [red], [red]])
+    assert "<OverviewList>" not in xml
+
+
 def test_build_rgb_vrt_requires_three_bands(tmp_path):
     red = read_grid(_write_tif(tmp_path / "r.tif", 300000, 4500000))
     with pytest.raises(ValueError, match="3 bands"):
