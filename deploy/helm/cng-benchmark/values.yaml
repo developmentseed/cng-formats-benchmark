@@ -27,13 +27,6 @@ runner:
   source: s3://bench/fixtures/fixture.tif
   output: s3://bench/results/
   backoffLimit: 0
-  # Which tile server the display metric targets, by produced-object kind:
-  # `cog` -> the TiTiler /cog service (raster COGs); `xarray` -> the titiler-xarray
-  # service (GeoZarr sharded stores, the multidim/md router). The runner already
-  # picks the tile *path* by object_kind; this points its TITILER_ENDPOINT (and the
-  # readiness wait) at the matching service. Set `xarray` for a geozarr + display
-  # run and enable titilerXarray.
-  displaySurface: cog
 
 # Seed a synthetic fixture raster before the run. Local/CI only — for a real run
 # against real data, disable this and point runner.source at the real bucket.
@@ -87,8 +80,9 @@ minio:
   rootUser: minioadmin
   rootPassword: minioadmin
 
-# TiTiler tile service. Health-probed on /healthz; the display metric (PR-B)
-# measures tiles against it.
+# TiTiler tile service. Health-probed on /healthz; the display metric measures
+# tiles against it. Serves both COG (/cog) and GeoZarr (/zarr) since TiTiler 2.0
+# — no separate titiler-xarray service is needed.
 titiler:
   enabled: true
   image: ghcr.io/developmentseed/titiler:latest
@@ -97,22 +91,6 @@ titiler:
   # uvicorn worker count. 1 is safe for local/CI (single-core); bump to (2×CPUs)+1
   # or a fixed value (e.g. 4) on a real bench node to avoid blocking tile fetches.
   workers: 1
-
-# Second tile-server surface for the GeoZarr display metric (xarray/Zarr v3).
-# Off by default; enable for runs whose benchmark is `geozarr` + `display`. This
-# image serves its tiler at the root (`/info`, `/tiles/...`), so leave the
-# benchmark's params.display_titiler_path empty (the default); set it only if a
-# different image mounts the tiler router under a sub-path.
-titilerXarray:
-  enabled: false
-  image: ghcr.io/developmentseed/titiler-xarray:latest
-  port: 8001          # Service port; the container serves on 80.
-  replicas: 1
-  # Extra env for the object-store backend (e.g. a custom/HTTP sink endpoint):
-  #   extraEnv:
-  #     - {name: AWS_ENDPOINT, value: "https://s3.example.com"}
-  #     - {name: AWS_ALLOW_HTTP, value: "true"}   # only for a non-TLS endpoint
-  extraEnv: []
 
 # Optional PVC for results when not writing to S3. Off by default (S3 path).
 results:

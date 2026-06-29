@@ -88,28 +88,6 @@ services:
       timeout: 5s
       retries: 20
 
-  # Second tile-server surface for the GeoZarr display metric: titiler-xarray
-  # reads a sharded Zarr v3 store with zarr-python (GDAL/the COG TiTiler cannot —
-  # it rejects the sharding_indexed codec). Started under the optional `geozarr`
-  # compose profile so the default COG smoke does not need it. It serves at the
-  # root (`/info`, `/tiles/{tms}/{z}/{x}/{y}` — set the benchmark's
-  # display_titiler_path to "") and listens on port 80 inside the container.
-  titiler-xarray:
-    image: ghcr.io/developmentseed/titiler-xarray:latest
-    profiles: ["geozarr"]
-    environment:
-      <<: *s3-env
-      # Its Rust object-store backend reads AWS_ENDPOINT and refuses a plain-HTTP
-      # endpoint unless AWS_ALLOW_HTTP is set (MinIO is HTTP, not HTTPS).
-      AWS_ENDPOINT: http://minio:9000
-      AWS_ALLOW_HTTP: "true"
-      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"
-    ports:
-      - "${TITILER_XARRAY_PORT:-8001}:80"
-    depends_on:
-      minio:
-        condition: service_healthy
-
   seed:
     image: ${RUNNER_IMAGE:-cng-benchmark-runner:dev}
     environment: *s3-env
