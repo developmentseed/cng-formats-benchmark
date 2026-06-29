@@ -358,6 +358,31 @@ class _S3SeekableReader:
         self.close()
 
 
+def zip_source_uri(vsi_path: str) -> str | None:
+    """Extract the container URI from a ``/vsizip/`` GDAL path, or ``None``.
+
+    Maps ``/vsizip//vsis3/bucket/key.zip/member`` → ``s3://bucket/key.zip``
+    and ``/vsizip//local/path.zip/member`` → ``/local/path.zip``.
+    Used by the runner to resolve a zip-delivered product's delivery object
+    for ``bytes_in`` sizing — the zip is the honest storage footprint, and
+    sizing it once (not per member) avoids N×zip_size double-counting.
+    """
+    if not vsi_path.startswith("/vsizip/"):
+        return None
+    inner = vsi_path[len("/vsizip/") :]
+    dot_zip = inner.find(".zip/")
+    if dot_zip == -1:
+        if inner.endswith(".zip"):
+            zip_gdal = inner
+        else:
+            return None
+    else:
+        zip_gdal = inner[: dot_zip + len(".zip")]
+    if zip_gdal.startswith("/vsis3/"):
+        return "s3://" + zip_gdal[len("/vsis3/") :]
+    return zip_gdal
+
+
 def open_seekable(uri: str, role: str = "source"):
     """Open ``uri`` as a seekable binary file object (local file or S3 range).
 

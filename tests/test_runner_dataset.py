@@ -1,12 +1,14 @@
 """Tests for the dataset fan-out runner (multi-object products + roll-up)."""
 
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from cng_benchmark.config import DatasetConfig, load_benchmark_config
 from cng_benchmark.datasets.base import Dataset, Product, SourceObject
-from cng_benchmark.registry import DATASETS
+from cng_benchmark.registry import DATASETS, FORMATS
 from cng_benchmark.report import write_product_set_artifacts
 from cng_benchmark.runner import run_dataset_benchmark
 
@@ -42,6 +44,75 @@ class _BinFileDataset(Dataset):
             SourceObject(name=f.stem, uri=str(f)) for f in sorted(root.glob("*.bin"))
         ]
         return [Product(id="sceneZ", components=comps)] if comps else []
+
+
+@DATASETS.register("test-zip-delivery")
+class _ZipDeliveryDataset(Dataset):
+    """Test reader: each *.zip under source is a product whose members are components.
+
+    Member URIs are composed as ``/vsizip/<zip_path>/<member>`` — the same shape
+    that :mod:`cng_benchmark.datasets.zip_delivery` uses for S1/S2/LakeSP.
+    """
+
+    def products(self, *, prefix=None, limit=None):
+        root = Path(self.source_uri)
+        zips = sorted(root.glob("*.zip"))
+        if limit is not None:
+            zips = zips[:limit]
+        products = []
+        for zip_path in zips:
+            with zipfile.ZipFile(zip_path) as zf:
+                members = [n for n in zf.namelist() if not n.endswith("/")]
+            components = [
+                SourceObject(name=Path(m).stem, uri=f"/vsizip/{zip_path}/{m}")
+                for m in sorted(members)
+            ]
+            products.append(Product(id=zip_path.stem, components=components))
+        return products
+
+
+def _make_zip(path: Path, members: dict[str, bytes]) -> None:
+    """Write a zip archive at ``path`` with ``members`` (name → content)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    path.write_bytes(buf.getvalue())
+
+
+def _register_fake_passthrough():
+    """Register a no-op adapter that writes a fixed dummy output, ignoring source.
+
+    Lets the runner's bytes_in / source-size path be tested without needing
+    rasterio to actually open the source (the source_path is passed to convert
+    but never opened here).
+    """
+    import os
+
+    from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+
+    if "fake-passthrough" in FORMATS:
+        return
+
+    @FORMATS.register("fake-passthrough")
+    class _PassthroughAdapter(FormatAdapter):
+        name = "fake-passthrough"
+        object_kind = ObjectKind.RASTER_FILE
+
+        def target_basename(self):
+            return "out.bin"
+
+        def convert(self, source, target, params):
+            Path(target).write_bytes(b"dummy-output" * 4)
+
+        def describe_grouping_lever(self):
+            return "none"
+
+        def enumerate_objects(self, target):
+            return [os.path.getsize(target)]
+
+        def describe_layout(self, target, *, name=None):
+            return []
 
 
 def _write_product(root: Path, product_id: str, n_components: int) -> None:
@@ -465,3 +536,75 @@ def test_point_cloud_object_flows_through_per_component_path(tmp_path):
     assert "read_window_count" not in read_names
     # Published as a single file under each component dir, not a tree.
     assert (output / "objects" / "sceneZ" / "granule0" / "copc.laz").is_file()
+
+
+# --- bytes_in source-size coverage across source layouts -----------------------
+
+
+def _write_ds_cfg(reader: str, source: Path) -> DatasetConfig:
+    return DatasetConfig.model_validate(
+        {
+            "id": "bytes-in-test",
+            "reader": reader,
+            "source": str(source),
+            "baseline_format": "geotiff",
+            "target_formats": ["fake-passthrough"],
+        }
+    )
+
+
+def test_flat_source_bytes_in_is_sum_of_component_sizes(tmp_path):
+    """bytes_in for flat sources equals the sum of per-component file sizes."""
+    pytest.importorskip("rasterio")
+    _register_fake_passthrough()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    sizes = [100, 200, 150]
+    for i, sz in enumerate(sizes):
+        (src / f"band{i}.bin").write_bytes(b"x" * sz)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["write"], {"scope": "product"}).model_copy(
+        update={"formats": ["fake-passthrough"]}
+    )
+    result = run_dataset_benchmark(
+        cfg, _write_ds_cfg("test-binfiles", src), str(output)
+    )
+
+    run = result.per_product[0]
+    throughput = next(m for m in run.metrics if m.name == "write_throughput")
+    assert "bytes_in" in throughput.detail
+    assert throughput.detail["bytes_in"] == sum(sizes)
+
+
+def test_zip_delivered_bytes_in_equals_zip_size_once(tmp_path):
+    """bytes_in for zip-delivered sources equals the zip size, not N×zip_size."""
+    pytest.importorskip("rasterio")
+    _register_fake_passthrough()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    members = {
+        "band1.bin": b"a" * 500,
+        "band2.bin": b"b" * 500,
+        "band3.bin": b"c" * 500,
+    }
+    _make_zip(src / "scene.zip", members)
+    zip_size = (src / "scene.zip").stat().st_size
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["write"], {"scope": "product"}).model_copy(
+        update={"formats": ["fake-passthrough"]}
+    )
+    result = run_dataset_benchmark(
+        cfg, _write_ds_cfg("test-zip-delivery", src), str(output)
+    )
+
+    run = result.per_product[0]
+    assert len(run.metrics) > 0, "expected write metrics"
+    throughput = next(m for m in run.metrics if m.name == "write_throughput")
+    assert "bytes_in" in throughput.detail, "bytes_in missing for zip-delivered source"
+    # Must equal the zip size exactly — not 3× (one per band).
+    assert throughput.detail["bytes_in"] == zip_size
+    assert throughput.detail["components"] == len(members)

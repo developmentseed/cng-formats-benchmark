@@ -302,12 +302,25 @@ def _run_product(
     extra_metrics: list[MetricResult] = []
     extra_artifacts: list[Artifact] = []
 
+    # For zip-delivered products all components live in one .zip object.  Size
+    # that container once and charge it to component 0 only — summing the zip
+    # size N times in _aggregate_write_metrics would give N×zip_size.
+    _first_uri = product.components[0].uri if product.components else ""
+    _zip_uri = storage.zip_source_uri(_first_uri)
+    _zip_source_size = (
+        storage.object_size(_zip_uri, "source") if _zip_uri is not None else None
+    )
+
     with tempfile.TemporaryDirectory() as workdir:
         for i, component in enumerate(product.components):
             local_target = os.path.join(
                 workdir, f"{component.name}-{adapter.target_basename()}"
             )
             source_path = storage.to_gdal_path(component.uri)
+            if _zip_uri is not None:
+                source_size = _zip_source_size if i == 0 else None
+            else:
+                source_size = storage.object_size(component.uri, "source")
             with gdal_session("source"):
                 write_per_component.append(
                     measure_write(
@@ -315,7 +328,7 @@ def _run_product(
                         source_path,
                         local_target,
                         config.params,
-                        source_size=storage.object_size(component.uri, "source"),
+                        source_size=source_size,
                     )
                 )
 
