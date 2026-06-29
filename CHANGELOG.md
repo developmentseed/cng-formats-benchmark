@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.4.0...v0.5.0) (2026-06-29)
+
+
+### Features
+
+* **datasets:** regex product filter to select a multi-tile AOI in one run ([#50](https://github.com/developmentseed/cng-formats-benchmark/issues/50)) ([0b18795](https://github.com/developmentseed/cng-formats-benchmark/commit/0b18795a3205c3c405a87807a1d30a1d10d55e2e))
+* **models:** uniform codec and compression_ratio across all ObjectLayout kinds ([#57](https://github.com/developmentseed/cng-formats-benchmark/issues/57)) ([603ccd3](https://github.com/developmentseed/cng-formats-benchmark/commit/603ccd37e922f890d8f73d678f54b59e986ff46a))
+* RGB composite VRTs for manual TiTiler inspection ([#45](https://github.com/developmentseed/cng-formats-benchmark/issues/45)) ([1812af9](https://github.com/developmentseed/cng-formats-benchmark/commit/1812af91079412b28475879cc22e88dec7459339))
+* **runner:** timestamped progress logging to stderr ([#51](https://github.com/developmentseed/cng-formats-benchmark/issues/51)) ([5029453](https://github.com/developmentseed/cng-formats-benchmark/commit/5029453a9684f5a4a6b26293c318ac6cfe652783))
+
+
+### Bug Fixes
+
+* **metrics:** bytes_in for zip-delivered sources (closes [#47](https://github.com/developmentseed/cng-formats-benchmark/issues/47)) ([#48](https://github.com/developmentseed/cng-formats-benchmark/issues/48)) ([084b1f2](https://github.com/developmentseed/cng-formats-benchmark/commit/084b1f2f44a902a09cea77592fef3e52a37f5b06))
+* **vrt:** emit OverviewList and always set NoDataValue; fix COG nodata param ([#53](https://github.com/developmentseed/cng-formats-benchmark/issues/53)) ([3def77b](https://github.com/developmentseed/cng-formats-benchmark/commit/3def77b1ebde0f9a5c03a69edd95412af9afbf47))
+
 ## [0.4.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.3.0...v0.4.0) (2026-06-25)
 
 
