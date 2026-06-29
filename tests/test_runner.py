@@ -106,7 +106,12 @@ def test_safe_display_metrics_returns_skipped_on_failure(monkeypatch):
 
     monkeypatch.setattr(_runner, "_measure_display_object", _raise)
     metrics, artifacts = _safe_display_metrics(
-        config=None, adapter=None, local_target="", object_uri="", artifact_dir="", titiler_endpoint=None
+        config=None,
+        adapter=None,
+        local_target="",
+        object_uri="",
+        artifact_dir="",
+        titiler_endpoint=None,
     )
     assert len(metrics) == 1
     assert metrics[0].name == "display_skipped"

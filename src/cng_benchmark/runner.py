@@ -616,7 +616,8 @@ def _safe_read_metrics(adapter: FormatAdapter, object_uri: str) -> list[MetricRe
         return _measure_object_read(adapter, object_uri)
     except Exception as exc:  # noqa: BLE001 - best-effort, same stance as layout image
         logger.warning("read metric skipped: %s", exc)
-        return [MetricResult(name="read_skipped", value=0.0, detail={"error": str(exc)})]
+        detail = {"error": str(exc)}
+        return [MetricResult(name="read_skipped", value=0.0, detail=detail)]
 
 
 def _safe_display_metrics(
@@ -639,7 +640,8 @@ def _safe_display_metrics(
         )
     except Exception as exc:  # noqa: BLE001 - best-effort, same stance as layout image
         logger.warning("display metric skipped: %s", exc)
-        return [MetricResult(name="display_skipped", value=0.0, detail={"error": str(exc)})], []
+        detail = {"error": str(exc)}
+        return [MetricResult(name="display_skipped", value=0.0, detail=detail)], []
 
 
 def run_dataset_benchmark(
