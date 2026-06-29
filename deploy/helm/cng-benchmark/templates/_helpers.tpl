@@ -60,6 +60,7 @@ in-cluster MinIO stand-in is enabled, point at its Service; otherwise empty
 Shared GDAL /vsis3 environment for the runner's read metric and TiTiler. An
 explicit/derived endpoint (MinIO or a non-AWS provider) switches GDAL to
 host:port + path-style; HTTPS is inferred from the endpoint scheme.
+Performance-tuning vars follow https://developmentseed.org/titiler/advanced/performance_tuning/
 */}}
 {{- define "cng-benchmark.gdalEnv" -}}
 {{- $endpoint := include "cng-benchmark.s3Endpoint" . }}
@@ -78,6 +79,38 @@ host:port + path-style; HTTPS is inferred from the endpoint scheme.
 # /vsizip//vsis3/<scene>.zip/...), and the benchmark also reads .nc/.laz/etc.
 # GDAL_DISABLE_READDIR_ON_OPEN already prevents the sidecar-probing this would
 # otherwise optimise.
+# --- GDAL caching and network performance tuning ---
+# Block cache: decoded raster tiles are cached in a 200 MB in-process LRU so
+# repeated reads of the same block (e.g. display metric's N samples of the same
+# tile) do not re-issue range requests.
+- name: GDAL_CACHEMAX
+  value: "200"
+# Curl range-request cache: caches raw byte ranges fetched from S3 before GDAL
+# decodes them. Complements GDAL_CACHEMAX; 200 MB across all open files.
+- name: CPL_VSIL_CURL_CACHE_SIZE
+  value: "200000000"
+# Pre-read the first 32 KB of every file on open: enough to cache the COG header
+# + overview IFDs in a single range request instead of several.
+- name: GDAL_INGESTED_BYTES_AT_OPEN
+  value: "32768"
+# Per-file in-memory LRU cache (VSI layer). Works alongside CPL_VSIL_CURL; 5 MB
+# per file is enough to hold a typical COG's header + a few overview blocks.
+- name: VSI_CACHE
+  value: "TRUE"
+- name: VSI_CACHE_SIZE
+  value: "5000000"
+# Merge adjacent byte ranges into a single HTTP request to reduce round trips.
+- name: GDAL_HTTP_MERGE_CONSECUTIVE_RANGES
+  value: "YES"
+# HTTP/2 multiplexing: several range requests share one connection (supported by
+# Scaleway S3 and most S3-compatible endpoints; ignored when not supported).
+- name: GDAL_HTTP_MULTIPLEX
+  value: "YES"
+# Retry up to 3× on transient HTTP errors (e.g. S3 503 slow-down) before failing.
+- name: GDAL_HTTP_MAX_RETRY
+  value: "3"
+- name: GDAL_HTTP_RETRY_DELAY
+  value: "1"
 {{- end }}
 
 {{/* Shared boto3/AWS environment for the runner. */}}
