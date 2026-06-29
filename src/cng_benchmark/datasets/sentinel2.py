@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from cng_benchmark.datasets.base import DatasetOptions, SourceObject
+from cng_benchmark.datasets.base import DatasetOptions, RgbComposite, SourceObject
 from cng_benchmark.datasets.zip_delivery import ZipDeliveryDataset, _member_vsi_uri
 from cng_benchmark.registry import DATASETS
 
@@ -33,6 +33,15 @@ _MASK_RE = re.compile(
 #: sample should land on (the masks are tiny and unrepresentative).
 _TEN_M_BANDS = frozenset({"B2", "B3", "B4", "B8"})
 _MASK_KINDS = frozenset({"CLM", "EDG", "SAT", "MG2"})
+
+#: Viewer composites as ``(name, (red, green, blue) bands, (lo, hi) rescale)``.
+#: SWIR's B11 is 20 m and not in the default ``bands`` pick, so the ``swir``
+#: composite is realised only when B11 is added to the dataset options.
+_COMPOSITES: tuple[tuple[str, tuple[str, str, str], tuple[float, float]], ...] = (
+    ("natural", ("B4", "B3", "B2"), (0.0, 3000.0)),
+    ("color-infrared", ("B8", "B4", "B3"), (0.0, 4000.0)),
+    ("swir", ("B11", "B8", "B4"), (0.0, 4000.0)),
+)
 
 
 def _component_sort_key(name: str) -> tuple[bool, bool, str]:
@@ -99,3 +108,29 @@ class Sentinel2MajaDataset(ZipDeliveryDataset):
                     )
         selected.sort(key=lambda c: _component_sort_key(c.name))
         return selected
+
+    def rgb_composites(self) -> list[RgbComposite]:
+        """The natural/false-colour stacks realisable from the selected bands.
+
+        The reflectance prefix is the first configured kind (``FRE``/``SRE``), and
+        a composite is emitted only when all three of its bands are in
+        ``options.bands`` — so ``swir`` appears solely when B11 was added to the
+        pick. The component names match what :meth:`_select_members` lays out
+        (``<kind>_<band>``), so the runner can address the produced COGs directly.
+        """
+        opts: Sentinel2MajaOptions = self.options
+        if not opts.reflectance:
+            return []
+        kind = opts.reflectance[0].upper()
+        have = {b.upper() for b in opts.bands}
+        composites: list[RgbComposite] = []
+        for name, bands, rescale in _COMPOSITES:
+            if all(b in have for b in bands):
+                composites.append(
+                    RgbComposite(
+                        name=name,
+                        bands=tuple(f"{kind}_{b}" for b in bands),  # type: ignore[arg-type]
+                        rescale=rescale,
+                    )
+                )
+        return composites

@@ -26,7 +26,13 @@ from cng_benchmark.datasets import (
     swot_pixc,  # noqa: F401,E402
     zip_delivery,  # noqa: F401,E402
 )
-from cng_benchmark.datasets.base import Dataset, DatasetOptions, Product, SourceObject
+from cng_benchmark.datasets.base import (
+    Dataset,
+    DatasetOptions,
+    Product,
+    RgbComposite,
+    SourceObject,
+)
 from cng_benchmark.registry import DATASETS
 
 
@@ -45,6 +51,7 @@ __all__ = [
     "Dataset",
     "DatasetOptions",
     "Product",
+    "RgbComposite",
     "SourceObject",
     "build_dataset",
 ]

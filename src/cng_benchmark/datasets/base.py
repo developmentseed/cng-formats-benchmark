@@ -56,6 +56,23 @@ class Product:
     components: list[SourceObject]
 
 
+@dataclass(frozen=True)
+class RgbComposite:
+    """Three component names to stack as a (Red, Green, Blue) viewer VRT.
+
+    ``name`` is the composite's label (``"natural"``, ``"color-infrared"``,
+    ``"swir"``, ``"dualpol"``); ``bands`` is a 3-tuple of component names in
+    R/G/B order; ``rescale`` is a ``(lo, hi)`` stretch hint for TiTiler (the
+    reflectance/gamma0 values are not 8-bit, so the viewer needs a hint to
+    display them).  Owned by the dataset reader — layout knowledge lives here,
+    not in the runner.
+    """
+
+    name: str
+    bands: tuple[str, str, str]
+    rescale: tuple[float, float] | None = None
+
+
 class DatasetOptions(BaseModel):
     """Base for a reader's typed options block.
 
@@ -110,3 +127,12 @@ class Dataset(ABC):
         ``params.products`` knob): only products under ``prefix`` are yielded,
         and at most ``limit`` of them. Single-product readers ignore both.
         """
+
+    def rgb_composites(self) -> list[RgbComposite]:
+        """Viewer composites this dataset can assemble from its components.
+
+        Each names three already-enumerated component names to stack R/G/B in a
+        VRT for manual TiTiler inspection. Base: none — override in dataset
+        subclasses that have meaningful band combinations (Sentinel-2, Sentinel-1).
+        """
+        return []
