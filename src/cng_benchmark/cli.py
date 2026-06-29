@@ -11,6 +11,8 @@ COG so the deployable stack can prove itself end-to-end without external data.
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from pathlib import Path
 
 import typer
@@ -23,6 +25,8 @@ from cng_benchmark.runner import (
     run_conversion_benchmark,
     run_dataset_benchmark,
 )
+
+_log = logging.getLogger(__name__)
 
 app = typer.Typer(
     help="Benchmark cloud-native geospatial formats.",
@@ -154,11 +158,22 @@ def run(
     deployable runner's stable no-IO entry point. The result is printed as JSON;
     with an output location, ``result.json`` and ``summary.md`` are written too.
     """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
+
     try:
         cfg = load_benchmark_config(config)
     except Exception as exc:  # noqa: BLE001 — surface any load/validation error cleanly
         typer.echo(f"Invalid config {config}: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+    _log.info(
+        "benchmark %s | formats %s | metrics %s", cfg.id, cfg.formats, cfg.metrics
+    )
 
     source_raster = source or cfg.source
     object_listing = objects_uri or cfg.object_source
