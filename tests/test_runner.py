@@ -6,6 +6,8 @@ from cng_benchmark import __version__
 from cng_benchmark.config import load_benchmark_config
 from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.runner import (
+    _safe_display_metrics,
+    _safe_read_metrics,
     run_benchmark,
     run_conversion_benchmark,
     tier_policy_from_config,
@@ -66,7 +68,7 @@ def test_run_conversion_benchmark_local_publishes_and_collects(tmp_path):
     assert (output / "cog" / "cog.tif").exists()
 
 
-def test_run_conversion_benchmark_display_without_endpoint_raises(tmp_path):
+def test_run_conversion_benchmark_display_skips_without_endpoint(tmp_path):
     pytest.importorskip("rasterio")
     pytest.importorskip("rio_cogeo")
     from cng_benchmark.fixtures import generate_cog_bytes
@@ -74,5 +76,44 @@ def test_run_conversion_benchmark_display_without_endpoint_raises(tmp_path):
     source = tmp_path / "source.tif"
     source.write_bytes(generate_cog_bytes(size=128, blocksize=128))
     cfg = load_benchmark_config(SYNTHETIC).model_copy(update={"metrics": ["display"]})
-    with pytest.raises(ValueError, match="TiTiler endpoint"):
-        run_conversion_benchmark(cfg, str(source), str(tmp_path / "out"))
+    # A missing endpoint is caught and surfaced as a skipped metric — the run
+    # completes rather than aborting, even in the single-object path.
+    run = run_conversion_benchmark(cfg, str(source), str(tmp_path / "out"))
+    names = {m.name for m in run.metrics}
+    assert "display_skipped" in names
+    skipped = next(m for m in run.metrics if m.name == "display_skipped")
+    assert "TiTiler endpoint" in skipped.detail["error"]
+
+
+def test_safe_read_metrics_returns_skipped_on_failure(monkeypatch):
+    import cng_benchmark.runner as _runner
+
+    def _raise(*a, **k):
+        raise RuntimeError("timed out")
+
+    monkeypatch.setattr(_runner, "_measure_object_read", _raise)
+    result = _safe_read_metrics(adapter=None, object_uri="s3://b/k")
+    assert len(result) == 1
+    assert result[0].name == "read_skipped"
+    assert "timed out" in result[0].detail["error"]
+
+
+def test_safe_display_metrics_returns_skipped_on_failure(monkeypatch):
+    import cng_benchmark.runner as _runner
+
+    def _raise(*a, **k):
+        raise RuntimeError("HTTP 504")
+
+    monkeypatch.setattr(_runner, "_measure_display_object", _raise)
+    metrics, artifacts = _safe_display_metrics(
+        config=None,
+        adapter=None,
+        local_target="",
+        object_uri="",
+        artifact_dir="",
+        titiler_endpoint=None,
+    )
+    assert len(metrics) == 1
+    assert metrics[0].name == "display_skipped"
+    assert "HTTP 504" in metrics[0].detail["error"]
+    assert artifacts == []
