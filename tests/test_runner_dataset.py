@@ -19,7 +19,7 @@ SYNTHETIC = "configs/benchmarks/synthetic_cog.yaml"
 class _MultiFileDataset(Dataset):
     """Test reader: each subdir of ``source`` is a product of its ``*.tif``."""
 
-    def products(self, *, prefix=None, limit=None):
+    def products(self, *, prefix=None, pattern=None, limit=None):
         root = Path(self.source_uri)
         products = []
         for sub in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -38,7 +38,7 @@ class _MultiFileDataset(Dataset):
 class _BinFileDataset(Dataset):
     """Test reader: one product whose components are the ``*.bin`` files in source."""
 
-    def products(self, *, prefix=None, limit=None):
+    def products(self, *, prefix=None, pattern=None, limit=None):
         root = Path(self.source_uri)
         comps = [
             SourceObject(name=f.stem, uri=str(f)) for f in sorted(root.glob("*.bin"))
