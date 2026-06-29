@@ -35,3 +35,30 @@ def test_enumerate_objects_returns_single_file_size(source_raster, tmp_path):
     adapter = CogAdapter()
     adapter.convert(str(source_raster), str(target), {})
     assert adapter.enumerate_objects(str(target)) == [target.stat().st_size]
+
+
+def test_convert_nodata_param_is_written_to_produced_cog(tmp_path):
+    # MAJA S2 sources don't declare nodata in the file header; `params['nodata']`
+    # lets the benchmark config inject the known fill value (-10000).
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    src_path = tmp_path / "src.tif"
+    with rasterio.open(
+        src_path,
+        "w",
+        driver="GTiff",
+        height=64,
+        width=64,
+        count=1,
+        dtype="int16",
+        crs="EPSG:4326",
+        transform=from_origin(0, 1, 0.01, 0.01),
+    ) as dst:
+        dst.write(np.zeros((1, 64, 64), dtype="int16"))
+
+    target = tmp_path / "out.tif"
+    CogAdapter().convert(str(src_path), str(target), {"nodata": -10000})
+    with rasterio.open(target) as src:
+        assert src.nodata == -10000

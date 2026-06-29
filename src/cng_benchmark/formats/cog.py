@@ -56,7 +56,10 @@ class CogAdapter(FormatAdapter):
 
         profile = cog_profiles.get(str(params.get("compress", "deflate")))
         profile.update(blockxsize=block, blockysize=block)
-        cog_translate(source, target, profile, quiet=True)
+        kwargs: dict = {}
+        if "nodata" in params:
+            kwargs["nodata"] = params["nodata"]
+        cog_translate(source, target, profile, quiet=True, **kwargs)
 
     def describe_grouping_lever(self) -> str:
         return "COG internal tiling (block size) and overview layout"

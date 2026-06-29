@@ -46,6 +46,7 @@ class GridMeta:
     crs_wkt: str
     dtype: str
     nodata: float | None
+    overviews: list[int]  # scale factors from the first band, e.g. [2, 4, 8, 16, 32]
 
     @property
     def px(self) -> float:
@@ -90,6 +91,7 @@ def read_grid(path: str) -> GridMeta:
             crs_wkt=src.crs.to_wkt() if src.crs else "",
             dtype=str(src.dtypes[0]),
             nodata=src.nodata,
+            overviews=list(src.overviews(1)),
         )
 
 
@@ -127,13 +129,18 @@ def build_rgb_vrt_xml(band_grids: list[list[GridMeta]]) -> str:
     lines.append(
         "  <GeoTransform>" + ", ".join(f"{v:.10g}" for v in geo) + "</GeoTransform>"
     )
+    if ref.overviews:
+        ov = " ".join(str(f) for f in ref.overviews)
+        lines.append(f"  <OverviewList>{ov}</OverviewList>")
 
     for idx, sources in enumerate(band_grids):
         lines.append(f'  <VRTRasterBand dataType="{dtype}" band="{idx + 1}">')
         lines.append(f"    <ColorInterp>{_COLOR_INTERP[idx]}</ColorInterp>")
         nodata = next((g.nodata for g in sources if g.nodata is not None), None)
-        if nodata is not None:
-            lines.append(f"    <NoDataValue>{nodata:.10g}</NoDataValue>")
+        # Always emit NoDataValue: GDAL uses it to mask uncovered mosaic gaps.
+        # Default to 0 when no source declares one (gaps are filled with 0 anyway).
+        band_nodata = nodata if nodata is not None else 0
+        lines.append(f"    <NoDataValue>{band_nodata:.10g}</NoDataValue>")
         for g in sources:
             dx = round((g.left - minx) / px)
             dy = round((maxy - g.top) / py)
