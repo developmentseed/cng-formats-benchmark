@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from cng_benchmark.datasets.base import DatasetOptions, SourceObject
+from cng_benchmark.datasets.base import DatasetOptions, RgbComposite, SourceObject
 from cng_benchmark.datasets.zip_delivery import ZipDeliveryDataset, _member_vsi_uri
 from cng_benchmark.registry import DATASETS
 
@@ -63,3 +63,20 @@ class Sentinel1OtbRtcDataset(ZipDeliveryDataset):
         # sample (the runner takes the first component) is deterministic.
         selected.sort(key=lambda c: want.index(c.name) if c.name in want else len(want))
         return selected
+
+    def rgb_composites(self) -> list[RgbComposite]:
+        """The dual-pol quicklook stack, when both polarisations are profiled.
+
+        A common Sentinel-1 RGB is ``R=VV, G=VH, B=VV/VH`` — but the ratio band
+        needs a GDAL Python pixel function, which the slim runner/TiTiler image
+        does not enable, so we use the standard ``VV/VH/VV`` quicklook instead.
+        gamma0 is float, so a ``(0, 0.4)`` rescale hint travels with it.
+        """
+        want = {p.upper() for p in self.options.polarizations}
+        if {"VV", "VH"} <= want:
+            return [
+                RgbComposite(
+                    name="dualpol", bands=("VV", "VH", "VV"), rescale=(0.0, 0.4)
+                )
+            ]
+        return []

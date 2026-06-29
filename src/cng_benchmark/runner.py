@@ -27,6 +27,7 @@ import cng_benchmark.formats  # noqa: F401  (registers the built-in adapters)
 from cng_benchmark import __version__, storage
 from cng_benchmark.config import BenchmarkConfig, DatasetConfig, tier_policy_from_config
 from cng_benchmark.datasets import Product, build_dataset
+from cng_benchmark.datasets.base import Dataset
 from cng_benchmark.formats.base import FormatAdapter, ObjectKind
 from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import measure_display
@@ -38,7 +39,7 @@ from cng_benchmark.metrics.read import (
     measure_zarr_read,
 )
 from cng_benchmark.metrics.write import measure_write
-from cng_benchmark.models import BenchmarkRun, MetricResult, ObjectLayout
+from cng_benchmark.models import Artifact, BenchmarkRun, MetricResult, ObjectLayout
 from cng_benchmark.registry import FORMATS
 
 
@@ -186,6 +187,7 @@ def run_conversion_benchmark(
         object_layouts = _safe_object_layouts(adapter, chosen, local_target)
 
         metrics: list[MetricResult] = []
+        artifacts: list[Artifact] = []
         if "write" in requested:
             metrics += write_metrics
         if "object_size" in requested:
@@ -198,7 +200,7 @@ def run_conversion_benchmark(
         if "read" in requested:
             metrics += _measure_object_read(adapter, object_uri)
         if "display" in requested:
-            metrics += _measure_display_object(
+            display_metrics, display_artifacts = _measure_display_object(
                 config,
                 adapter,
                 local_target,
@@ -206,6 +208,8 @@ def run_conversion_benchmark(
                 artifact_dir,
                 titiler_endpoint,
             )
+            metrics += display_metrics
+            artifacts += display_artifacts
 
     params = {**config.params, "grouping_lever": adapter.describe_grouping_lever()}
     return BenchmarkRun(
@@ -217,6 +221,7 @@ def run_conversion_benchmark(
         object_profile=profile,
         object_layouts=object_layouts,
         metrics=metrics,
+        artifacts=artifacts,
     )
 
 
@@ -295,6 +300,7 @@ def _run_product(
     layouts: list[ObjectLayout] = []
     write_per_component: list[list[MetricResult]] = []
     extra_metrics: list[MetricResult] = []
+    extra_artifacts: list[Artifact] = []
 
     with tempfile.TemporaryDirectory() as workdir:
         for i, component in enumerate(product.components):
@@ -326,12 +332,12 @@ def _run_product(
             # octree level-of-detail figure (the COPC analogue of the COG chunk
             # layout). Render it once per product, best-effort.
             if adapter.object_kind is ObjectKind.POINT_CLOUD_FILE and i == 0:
-                extra_metrics += _publish_copc_lod(local_target, component_dir)
+                extra_artifacts += _publish_copc_lod(local_target, component_dir)
 
             if "read" in requested and i < read_samples:
                 extra_metrics += _measure_object_read(adapter, object_uri)
             if "display" in requested and i < display_samples:
-                extra_metrics += _measure_display_object(
+                display_metrics, display_artifacts = _measure_display_object(
                     config,
                     adapter,
                     local_target,
@@ -339,6 +345,8 @@ def _run_product(
                     component_dir,
                     titiler_endpoint,
                 )
+                extra_metrics += display_metrics
+                extra_artifacts += display_artifacts
 
             _remove_target(local_target)
 
@@ -370,16 +378,17 @@ def _run_product(
         object_profile=profile,
         object_layouts=layouts,
         metrics=metrics,
+        artifacts=extra_artifacts,
     )
     return run, sizes
 
 
-def _publish_copc_lod(local_target: str, artifact_dir: str) -> list[MetricResult]:
+def _publish_copc_lod(local_target: str, artifact_dir: str) -> list[Artifact]:
     """Render + publish the COPC octree level-of-detail PNG next to the object.
 
     The point-cloud structural artifact, mirroring how the display path publishes
     ``display_chunk_layout.png`` for a raster. Best-effort: a missing matplotlib
-    (the ``cog`` extra) is reported as a skip, not a failure.
+    (the ``cog`` extra) is reported as a skipped artifact, not a failure.
     """
     from cng_benchmark.formats.copc import render_copc_lod
 
@@ -388,13 +397,100 @@ def _publish_copc_lod(local_target: str, artifact_dir: str) -> list[MetricResult
         render_copc_lod(local_target, local_lod)
         lod_uri = storage.join(artifact_dir, "copc_octree_lod.png")
         storage.upload_from_path(local_lod, lod_uri, role="sink")
-        return [MetricResult(name="octree_lod", value=1, detail={"lod_uri": lod_uri})]
-    except RuntimeError as exc:
         return [
-            MetricResult(
-                name="octree_lod_skipped", value=0, detail={"reason": str(exc)}
+            Artifact(
+                kind="octree_lod",
+                name="copc_octree_lod",
+                uri=lod_uri,
+                media_type="image/png",
             )
         ]
+    except RuntimeError as exc:
+        return [
+            Artifact(
+                kind="octree_lod",
+                name="copc_octree_lod",
+                detail={"skipped_reason": str(exc)},
+            )
+        ]
+
+
+def _publish_rgb_vrts(
+    dataset: Dataset,
+    products: list[Product],
+    adapter: FormatAdapter,
+    output_uri: str,
+) -> list[Artifact]:
+    """Stack the produced per-band COGs into run-level RGB composite VRT(s).
+
+    A viewer convenience: for each composite the dataset exposes
+    (:meth:`~cng_benchmark.datasets.base.Dataset.rgb_composites`), every RGB band
+    is mosaicked across the products that carry it, and the result is written as
+    ``run-<name>.vrt`` at the run root so its ``s3://`` path opens directly in
+    TiTiler's viewer. Only single-file rasters published to S3 qualify; a
+    composite whose bands are absent or unreadable is recorded as a skipped
+    artifact rather than failing the run. The per-band COG URIs are reconstructed
+    from the deterministic layout :func:`_run_product` uploads them to.
+    """
+    if adapter.object_kind is not ObjectKind.RASTER_FILE:
+        return []
+    if not storage.is_s3(output_uri):
+        return []
+    composites = dataset.rgb_composites()
+    if not composites:
+        return []
+
+    from cng_benchmark import vrt
+
+    basename = adapter.target_basename()
+    artifacts: list[Artifact] = []
+    with gdal_session("sink"):
+        for composite in composites:
+            try:
+                band_grids: list[list[vrt.GridMeta]] = []
+                for band in composite.bands:
+                    grids: list[vrt.GridMeta] = []
+                    for product in products:
+                        if band not in {c.name for c in product.components}:
+                            continue
+                        comp_dir = storage.join(
+                            output_uri, f"objects/{product.id}/{band}"
+                        )
+                        object_uri = storage.join(comp_dir, basename)
+                        grids.append(vrt.read_grid(storage.to_gdal_path(object_uri)))
+                    band_grids.append(grids)
+                if any(not grids for grids in band_grids):
+                    raise ValueError("no source COGs for one or more RGB bands")
+
+                xml = vrt.build_rgb_vrt_xml(band_grids)
+                vrt_uri = storage.join(output_uri, f"run-{composite.name}.vrt")
+                storage.write_text(vrt_uri, xml, role="sink")
+
+                detail: dict = {}
+                if composite.rescale is not None:
+                    lo, hi = composite.rescale
+                    detail["rescale"] = [lo, hi]
+                    detail["titiler_url"] = (
+                        f"/cog/viewer?url={vrt_uri}&rescale={lo:g},{hi:g}"
+                    )
+                artifacts.append(
+                    Artifact(
+                        kind="viewer_vrt",
+                        name=composite.name,
+                        uri=vrt_uri,
+                        media_type="application/xml",
+                        detail=detail,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort viewer extra
+                artifacts.append(
+                    Artifact(
+                        kind="viewer_vrt",
+                        name=composite.name,
+                        detail={"skipped_reason": str(exc)},
+                    )
+                )
+    return artifacts
 
 
 def _measure_display_object(
@@ -404,7 +500,7 @@ def _measure_display_object(
     object_uri: str,
     artifact_dir: str,
     titiler_endpoint: str | None,
-) -> list[MetricResult]:
+) -> tuple[list[MetricResult], list[Artifact]]:
     """Run the display metric for one produced object and publish its chunk layout.
 
     Selects chunk-crossing tiles against the *local* produced object (cheap, no
@@ -451,16 +547,19 @@ def _measure_display_object(
         render(local_target, tiles, local_layout)
         layout_uri = storage.join(artifact_dir, "display_chunk_layout.png")
         storage.upload_from_path(local_layout, layout_uri, role="sink")
-        for m in metrics:
-            if m.name == "display_scenarios":
-                m.detail["layout_uri"] = layout_uri
-    except RuntimeError as exc:
-        metrics.append(
-            MetricResult(
-                name="display_layout_skipped", value=0, detail={"reason": str(exc)}
-            )
+        artifact = Artifact(
+            kind="chunk_layout",
+            name="display_chunk_layout",
+            uri=layout_uri,
+            media_type="image/png",
         )
-    return metrics
+    except RuntimeError as exc:
+        artifact = Artifact(
+            kind="chunk_layout",
+            name="display_chunk_layout",
+            detail={"skipped_reason": str(exc)},
+        )
+    return metrics, [artifact]
 
 
 def run_dataset_benchmark(
@@ -517,6 +616,8 @@ def run_dataset_benchmark(
         per_product.append(run)
         pooled_sizes += sizes
 
+    vrt_artifacts = _publish_rgb_vrts(dataset, products, adapter, output_uri)
+
     policy = tier_policy_from_config(config.tiers)
     rollup_profile = profile_object_sizes(pooled_sizes, policy)
     rollup = BenchmarkRun(
@@ -540,5 +641,6 @@ def run_dataset_benchmark(
             ),
             MetricResult(name="product_count", value=len(per_product)),
         ],
+        artifacts=vrt_artifacts,
     )
     return ProductSetResult(per_product=per_product, rollup=rollup)

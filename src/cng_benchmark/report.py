@@ -71,8 +71,32 @@ def render_markdown_summary(run: BenchmarkRun) -> str:
         for m in run.metrics:
             lines.append(f"| {m.name} | {m.value:g} | {m.unit or ''} |")
 
+    lines += _render_artifacts(run.artifacts)
+
     lines.append("")
     return "\n".join(lines)
+
+
+def _render_artifacts(artifacts: list) -> list[str]:
+    """Render the run's non-metric side-outputs (chunk-layout/LOD PNGs, VRTs).
+
+    A produced artifact shows its store URI (plus a ready-to-paste TiTiler viewer
+    URL for a composite VRT); a skipped one shows why. Empty when there are none.
+    """
+    if not artifacts:
+        return []
+    lines = ["", "## Artifacts", ""]
+    for a in artifacts:
+        if a.uri:
+            line = f"- **{a.name}** (`{a.kind}`): `{a.uri}`"
+            titiler = a.detail.get("titiler_url")
+            if titiler:
+                line += f" — TiTiler viewer: `{titiler}`"
+            lines.append(line)
+        else:
+            reason = a.detail.get("skipped_reason", "skipped")
+            lines.append(f"- **{a.name}** (`{a.kind}`): skipped — {reason}")
+    return lines
 
 
 def _render_object_layouts(layouts: list) -> list[str]:
@@ -292,6 +316,7 @@ def render_product_set_summary(result: ProductSetResult) -> str:
             f"| **{_format_bytes(roll.mean)}** | **{roll.highest_tier or 'none'}** "
             f"| **{_layout(result.rollup)}** |"
         )
+    lines += _render_artifacts(result.rollup.artifacts)
     lines.append("")
     return "\n".join(lines)
 

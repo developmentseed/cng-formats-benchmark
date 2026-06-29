@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 
 from cng_benchmark.models import (
+    Artifact,
     BenchmarkRun,
     CogLayout,
     GeoZarrLayout,
@@ -57,6 +58,36 @@ def test_benchmark_run_defaults_are_empty():
     assert run.metrics == []
     assert run.object_profile is None
     assert run.object_layouts == []
+    assert run.artifacts == []
+
+
+def test_artifacts_round_trip():
+    run = BenchmarkRun(
+        timestamp=datetime(2026, 6, 17, tzinfo=UTC),
+        dataset_id="example-sentinel2-l2a",
+        format_id="cog",
+        artifacts=[
+            Artifact(
+                kind="viewer_vrt",
+                name="natural",
+                uri="s3://bucket/runs/r1/run-natural.vrt",
+                media_type="application/xml",
+                detail={"rescale": [0.0, 3000.0], "titiler_url": "/cog/viewer?url=…"},
+            ),
+            Artifact(
+                kind="octree_lod",
+                name="copc_octree_lod",
+                detail={"skipped_reason": "matplotlib missing"},
+            ),
+        ],
+    )
+    reloaded = BenchmarkRun.model_validate_json(run.model_dump_json())
+    assert reloaded == run
+    produced, skipped = reloaded.artifacts
+    assert produced.uri == "s3://bucket/runs/r1/run-natural.vrt"
+    assert produced.detail["rescale"] == [0.0, 3000.0]
+    assert skipped.uri is None
+    assert skipped.detail["skipped_reason"] == "matplotlib missing"
 
 
 def test_object_layouts_union_round_trips_subclass_fields():

@@ -105,6 +105,25 @@ CI change. For docker-compose, drop the YAML under `configs/benchmarks/` (it is
 mounted into the runner) and reference it on the runner command. See
 [Configuration](configuration.md).
 
+### Inspecting a run in the TiTiler viewer
+
+Because the chart keeps TiTiler running, a port-forward lets you eyeball a run's
+output in the browser. The basic `titiler.application` has no STAC API and no
+band-combination UI, so for a COG arm over a multi-band dataset (Sentinel-2,
+Sentinel-1) the runner writes **RGB composite VRTs** at the run's root —
+`run-natural.vrt`, `run-color-infrared.vrt`, `run-swir.vrt` (Sentinel-2),
+`run-dualpol.vrt` (Sentinel-1) — each stacking the produced per-band COGs across
+every product into a directly viewable mosaic. The VRTs (with a ready-to-paste
+TiTiler viewer URL + a `rescale` hint) are listed under **Artifacts** in the
+run's `summary.md`. Which composites appear depends on the bands the dataset was
+configured to convert (e.g. `run-swir.vrt` needs `B11` in `options.bands`).
+
+```bash
+kubectl port-forward svc/bench-cng-benchmark-titiler 8000:8000
+# then open, e.g.:
+#   http://localhost:8000/cog/viewer?url=s3://<bucket>/<run>/run-natural.vrt&rescale=0,3000
+```
+
 ## Deployability CI
 
 CI proves the stack deploys, never that a benchmark produces a particular

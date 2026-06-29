@@ -9,6 +9,11 @@ harness assembles them, and the deployment (M2) persists them.
 The headline payload is the :class:`ObjectSizeProfile`. Object size is a hard
 constraint on tiered object stores (see :mod:`cng_benchmark.tiers`), so the
 profile is a first-class result rather than an incidental statistic.
+
+Non-metric side-outputs (display chunk-layout PNGs, COPC octree level-of-detail
+PNGs, RGB composite VRTs for manual TiTiler inspection) are represented by the
+:class:`Artifact` type and accumulated on :attr:`BenchmarkRun.artifacts`, rather
+than being smuggled through :class:`MetricResult.detail`.
 """
 
 from __future__ import annotations
@@ -50,6 +55,24 @@ class ObjectSizeProfile(BaseModel):
     histogram: list[HistogramBin]
     tier_fit: list[str]
     highest_tier: str | None
+
+
+class Artifact(BaseModel):
+    """A non-metric file a run produced alongside its measurements.
+
+    A structural or viewer side-output addressed on the store — the COG/Zarr
+    display chunk-layout PNG, the COPC octree level-of-detail PNG, or an RGB
+    composite VRT for manual TiTiler inspection. ``kind`` groups them, ``uri``
+    locates the produced file (``None`` when generation was skipped, reason in
+    ``detail``), ``media_type`` is its content type, and ``detail`` carries
+    kind-specific extras (e.g. a ready-to-paste TiTiler viewer URL + rescale).
+    """
+
+    kind: str  # "chunk_layout" | "octree_lod" | "viewer_vrt"
+    name: str  # label, e.g. "natural", "display_chunk_layout"
+    uri: str | None = None
+    media_type: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
 
 
 class MetricResult(BaseModel):
@@ -174,8 +197,10 @@ class BenchmarkRun(BaseModel):
 
     Captures the run context needed to interpret and compare results: when it
     ran, the versions of the tools involved, and which dataset/format/params
-    were exercised. ``object_profile`` carries the object-size differentiator and
-    ``metrics`` holds any additional scalar measurements.
+    were exercised. ``object_profile`` carries the object-size differentiator,
+    ``metrics`` holds additional scalar measurements, and ``artifacts`` holds the
+    non-metric side-outputs (chunk-layout PNGs, octree LOD, RGB VRTs) produced
+    alongside the measurements.
     """
 
     timestamp: datetime
@@ -186,3 +211,4 @@ class BenchmarkRun(BaseModel):
     object_profile: ObjectSizeProfile | None = None
     object_layouts: list[AnyObjectLayout] = Field(default_factory=list)
     metrics: list[MetricResult] = Field(default_factory=list)
+    artifacts: list[Artifact] = Field(default_factory=list)

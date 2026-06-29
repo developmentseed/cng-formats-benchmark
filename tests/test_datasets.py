@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from cng_benchmark.config import DatasetConfig
-from cng_benchmark.datasets import Product, SourceObject, build_dataset
+from cng_benchmark.datasets import Product, RgbComposite, SourceObject, build_dataset
 from cng_benchmark.datasets.sentinel2 import Sentinel2MajaDataset
 from cng_benchmark.datasets.single_object import SingleObjectDataset
 from cng_benchmark.datasets.swot import DEFAULT_VARIABLES, SwotRaster100mDataset
@@ -157,6 +157,36 @@ def test_maja_ignores_non_raster_members():
     assert all(c.uri.endswith(".tif") for c in components)
 
 
+def test_maja_rgb_composites_default_bands():
+    # Default bands (B2/B3/B4/B8) realise natural + colour-infrared; SWIR needs
+    # B11, which is not in the default pick.
+    ds = _maja(reflectance=["FRE"], bands=["B2", "B3", "B4", "B8"])
+    composites = ds.rgb_composites()
+    by_name = {c.name: c for c in composites}
+    assert set(by_name) == {"natural", "color-infrared"}
+    assert by_name["natural"].bands == ("FRE_B4", "FRE_B3", "FRE_B2")
+    assert by_name["color-infrared"].bands == ("FRE_B8", "FRE_B4", "FRE_B3")
+    assert by_name["natural"].rescale == (0.0, 3000.0)
+
+
+def test_maja_rgb_composites_swir_requires_b11():
+    ds = _maja(reflectance=["FRE"], bands=["B2", "B3", "B4", "B8", "B11"])
+    by_name = {c.name: c for c in ds.rgb_composites()}
+    assert "swir" in by_name
+    assert by_name["swir"].bands == ("FRE_B11", "FRE_B8", "FRE_B4")
+
+
+def test_maja_rgb_composites_uses_reflectance_prefix():
+    ds = _maja(reflectance=["SRE"], bands=["B2", "B3", "B4"])
+    by_name = {c.name: c for c in ds.rgb_composites()}
+    assert by_name["natural"].bands == ("SRE_B4", "SRE_B3", "SRE_B2")
+
+
+def test_maja_rgb_composites_are_rgb_composite_instances():
+    ds = _maja(reflectance=["FRE"], bands=["B2", "B3", "B4"])
+    assert all(isinstance(c, RgbComposite) for c in ds.rgb_composites())
+
+
 # A captured listing of an S1 RTC (S1Tiling gamma0) zip: two band rasters per
 # polarisation plus a quicklook jpg and a GDAL .aux.xml sidecar.
 S1_MEMBERS = [
@@ -191,6 +221,19 @@ def test_s1_order_follows_polarizations_option():
     ds = _s1(polarizations=["VH", "VV"])
     components = ds._select_members(S1_MEMBERS, "s3://bucket/T31TCH/scene.zip")
     assert [c.name for c in components] == ["VH", "VV"]
+
+
+def test_s1_rgb_composite_dualpol():
+    ds = _s1(polarizations=["VV", "VH"])
+    composites = ds.rgb_composites()
+    assert len(composites) == 1
+    assert composites[0].name == "dualpol"
+    assert composites[0].bands == ("VV", "VH", "VV")
+    assert composites[0].rescale == (0.0, 0.4)
+
+
+def test_s1_rgb_composite_requires_both_polarizations():
+    assert _s1(polarizations=["VV"]).rgb_composites() == []
 
 
 def test_s1_single_polarization():
