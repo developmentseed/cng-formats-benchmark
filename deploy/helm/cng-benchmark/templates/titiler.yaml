@@ -28,6 +28,8 @@ spec:
             - 0.0.0.0
             - --port
             - {{ .Values.titiler.port | quote }}
+            - --workers
+            - {{ .Values.titiler.workers | quote }}
           env:
             {{- include "cng-benchmark.s3Env" . | nindent 12 }}
             {{- include "cng-benchmark.gdalEnv" . | nindent 12 }}

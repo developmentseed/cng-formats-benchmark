@@ -22,11 +22,21 @@ x-s3-env: &s3-env
 
 x-gdal-env: &gdal-env
   # GDAL /vsis3 access to MinIO (the runner's read metric and TiTiler).
+  # Performance-tuning follows https://developmentseed.org/titiler/advanced/performance_tuning/
   AWS_S3_ENDPOINT: minio:9000
   AWS_VIRTUAL_HOSTING: "FALSE"
   AWS_HTTPS: "NO"
   GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
   CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.TIF,.tiff"
+  GDAL_CACHEMAX: "200"
+  CPL_VSIL_CURL_CACHE_SIZE: "200000000"
+  GDAL_INGESTED_BYTES_AT_OPEN: "32768"
+  VSI_CACHE: "TRUE"
+  VSI_CACHE_SIZE: "5000000"
+  GDAL_HTTP_MERGE_CONSECUTIVE_RANGES: "YES"
+  GDAL_HTTP_MULTIPLEX: "YES"
+  GDAL_HTTP_MAX_RETRY: "3"
+  GDAL_HTTP_RETRY_DELAY: "1"
 
 services:
   minio:
@@ -61,7 +71,8 @@ services:
   titiler:
     image: ghcr.io/developmentseed/titiler:latest
     command:
-      ["uvicorn", "titiler.application.main:app", "--host", "0.0.0.0", "--port", "8000"]
+      ["uvicorn", "titiler.application.main:app", "--host", "0.0.0.0", "--port", "8000",
+       "--workers", "2"]
     environment:
       <<: [*s3-env, *gdal-env]
     ports:

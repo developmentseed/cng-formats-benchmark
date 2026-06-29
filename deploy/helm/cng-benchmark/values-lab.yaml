@@ -70,3 +70,6 @@ nodeSelector:
 
 titiler:
   enabled: true
+  # BASIC3-X8C-16G = 8 vCPUs; guide recommends (2×N)+1, 4 is a safe pick that
+  # avoids memory pressure while letting concurrent tile requests proceed.
+  workers: 4
