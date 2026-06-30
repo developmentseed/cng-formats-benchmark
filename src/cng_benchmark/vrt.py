@@ -158,8 +158,7 @@ def build_single_band_vrt_xml(grids: list[GridMeta]) -> str:
         )
         lines.append("      <SourceBand>1</SourceBand>")
         lines.append(
-            f'      <SrcRect xOff="0" yOff="0" '
-            f'xSize="{g.width}" ySize="{g.height}"/>'
+            f'      <SrcRect xOff="0" yOff="0" xSize="{g.width}" ySize="{g.height}"/>'
         )
         lines.append(
             f'      <DstRect xOff="{dx}" yOff="{dy}" '
