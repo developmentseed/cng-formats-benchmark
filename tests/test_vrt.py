@@ -1,4 +1,4 @@
-"""Tests for the hand-built RGB mosaic VRT (requires the `cog` extra)."""
+"""Tests for the hand-built RGB/single-band mosaic VRT (requires the `cog` extra)."""
 
 import pytest
 
@@ -8,7 +8,12 @@ import numpy as np  # noqa: E402
 import rasterio  # noqa: E402
 from rasterio.transform import from_origin  # noqa: E402
 
-from cng_benchmark.vrt import build_rgb_vrt_xml, read_grid  # noqa: E402
+from cng_benchmark.vrt import (  # noqa: E402
+    build_rgb_vrt_xml,
+    build_single_band_vrt_xml,
+    crs_epsg,
+    read_grid,
+)
 
 _RES = 10.0
 _SIZE = 4
@@ -148,3 +153,52 @@ def test_build_rgb_vrt_requires_three_bands(tmp_path):
     red = read_grid(_write_tif(tmp_path / "r.tif", 300000, 4500000))
     with pytest.raises(ValueError, match="3 bands"):
         build_rgb_vrt_xml([[red], [red]])
+
+
+# --- single-band VRT ---
+
+
+def test_single_band_vrt_has_one_gray_band(tmp_path):
+    g = read_grid(_write_tif(tmp_path / "a.tif", 300000, 4500000, value=42))
+    xml = build_single_band_vrt_xml([g])
+    vrt_path = tmp_path / "gray.vrt"
+    vrt_path.write_text(xml)
+
+    with rasterio.open(vrt_path) as src:
+        assert src.count == 1
+        assert src.colorinterp[0].name == "gray"
+        assert int(src.read(1)[0, 0]) == 42
+
+
+def test_single_band_vrt_mosaics_two_tiles(tmp_path):
+    a = read_grid(_write_tif(tmp_path / "a.tif", 300000, 4500000, value=1))
+    b_x = 300000 + _SIZE * _RES
+    b = read_grid(_write_tif(tmp_path / "b.tif", b_x, 4500000, value=2))
+
+    xml = build_single_band_vrt_xml([a, b])
+    vrt_path = tmp_path / "mosaic.vrt"
+    vrt_path.write_text(xml)
+
+    with rasterio.open(vrt_path) as src:
+        assert src.count == 1
+        assert src.width == 2 * _SIZE
+        band = src.read(1)
+        assert int(band[0, 0]) == 1
+        assert int(band[0, _SIZE]) == 2
+
+
+def test_single_band_vrt_raises_on_empty_grids():
+    with pytest.raises(ValueError, match="no sources"):
+        build_single_band_vrt_xml([])
+
+
+def test_crs_epsg_extracts_from_wkt(tmp_path):
+    path = _write_tif(tmp_path / "x.tif", 300000, 4500000)
+    with rasterio.open(path) as src:
+        wkt = src.crs.to_wkt()
+    assert crs_epsg(wkt) == "32631"
+
+
+def test_crs_epsg_returns_none_for_unknown():
+    assert crs_epsg("") is None
+    assert crs_epsg("LOCAL_CS") is None
