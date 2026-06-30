@@ -464,23 +464,31 @@ def _publish_rgb_vrts(
     adapter: FormatAdapter,
     output_uri: str,
 ) -> list[Artifact]:
-    """Stack the produced per-band COGs into run-level RGB composite VRT(s).
+    """Stack the produced per-band COGs into run-level viewer VRT(s).
 
-    A viewer convenience: for each composite the dataset exposes
-    (:meth:`~cng_benchmark.datasets.base.Dataset.rgb_composites`), every RGB band
-    is mosaicked across the products that carry it, and the result is written as
-    ``run-<name>.vrt`` at the run root so its ``s3://`` path opens directly in
-    TiTiler's viewer. Only single-file rasters published to S3 qualify; a
-    composite whose bands are absent or unreadable is recorded as a skipped
-    artifact rather than failing the run. The per-band COG URIs are reconstructed
-    from the deterministic layout :func:`_run_product` uploads them to.
+    Two paths:
+    * **RGB**: for each composite the dataset exposes via
+      :meth:`~cng_benchmark.datasets.base.Dataset.rgb_composites`, every band is
+      mosaicked across the products that carry it into a 3-band ``run-<name>.vrt``.
+    * **Single-band**: for each band the dataset exposes via
+      :meth:`~cng_benchmark.datasets.base.Dataset.viewer_bands`, a 1-band Gray
+      mosaic is built — one VRT per CRS group when the products span multiple
+      UTM zones (e.g. a France-wide SWOT run).  VRT names are
+      ``run-<band>.vrt`` for a single-zone run and
+      ``run-<band>-epsg<N>.vrt`` for multi-zone runs.
+
+    Only single-file rasters published to S3 qualify; a composite whose bands are
+    absent or unreadable is recorded as a skipped artifact rather than failing the
+    run. The per-band COG URIs are reconstructed from the deterministic layout
+    :func:`_run_product` uploads them to.
     """
     if adapter.object_kind is not ObjectKind.RASTER_FILE:
         return []
     if not storage.is_s3(output_uri):
         return []
     composites = dataset.rgb_composites()
-    if not composites:
+    single_bands = dataset.viewer_bands()
+    if not composites and not single_bands:
         return []
 
     from cng_benchmark import vrt
@@ -530,6 +538,64 @@ def _publish_rgb_vrts(
                     Artifact(
                         kind="viewer_vrt",
                         name=composite.name,
+                        detail={"skipped_reason": str(exc)},
+                    )
+                )
+
+        for sb in single_bands:
+            try:
+                grids: list[vrt.GridMeta] = []
+                for product in products:
+                    if sb.band not in {c.name for c in product.components}:
+                        continue
+                    comp_dir = storage.join(
+                        output_uri, f"objects/{product.id}/{sb.band}"
+                    )
+                    object_uri = storage.join(comp_dir, basename)
+                    grids.append(vrt.read_grid(storage.to_gdal_path(object_uri)))
+                if not grids:
+                    raise ValueError(f"no source COGs for band {sb.band!r}")
+
+                # Group by CRS — products spanning multiple UTM zones need one VRT
+                # per zone (GDAL VRT requires a single SRS per dataset).
+                by_crs: dict[str, list[vrt.GridMeta]] = {}
+                for g in grids:
+                    by_crs.setdefault(g.crs_wkt, []).append(g)
+                multi_zone = len(by_crs) > 1
+
+                for crs_wkt, zone_grids in by_crs.items():
+                    xml = vrt.build_single_band_vrt_xml(zone_grids)
+                    if multi_zone:
+                        epsg = vrt.crs_epsg(crs_wkt)
+                        zone_idx = list(by_crs).index(crs_wkt)
+                        suffix = f"-epsg{epsg}" if epsg else f"-zone{zone_idx}"
+                        vrt_name = f"{sb.name}{suffix}"
+                    else:
+                        vrt_name = sb.name
+                    vrt_uri = storage.join(output_uri, f"run-{vrt_name}.vrt")
+                    storage.write_text(vrt_uri, xml, role="sink")
+
+                    detail = {}
+                    if sb.rescale is not None:
+                        lo, hi = sb.rescale
+                        detail["rescale"] = [lo, hi]
+                        detail["titiler_url"] = (
+                            f"/cog/viewer?url={vrt_uri}&rescale={lo:g},{hi:g}"
+                        )
+                    artifacts.append(
+                        Artifact(
+                            kind="viewer_vrt",
+                            name=vrt_name,
+                            uri=vrt_uri,
+                            media_type="application/xml",
+                            detail=detail,
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001 - best-effort viewer extra
+                artifacts.append(
+                    Artifact(
+                        kind="viewer_vrt",
+                        name=sb.name,
                         detail={"skipped_reason": str(exc)},
                     )
                 )

@@ -31,6 +31,7 @@ from cng_benchmark.datasets.base import (
     DatasetOptions,
     Product,
     RgbComposite,
+    SingleBandComposite,
     SourceObject,
 )
 from cng_benchmark.registry import DATASETS
@@ -52,6 +53,7 @@ __all__ = [
     "DatasetOptions",
     "Product",
     "RgbComposite",
+    "SingleBandComposite",
     "SourceObject",
     "build_dataset",
 ]

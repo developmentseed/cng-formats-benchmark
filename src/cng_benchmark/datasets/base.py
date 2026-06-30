@@ -73,6 +73,21 @@ class RgbComposite:
     rescale: tuple[float, float] | None = None
 
 
+@dataclass(frozen=True)
+class SingleBandComposite:
+    """One component name to mosaic as a single-band (Gray) viewer VRT.
+
+    Used for scalar datasets whose products have a single meaningful variable
+    (e.g. SWOT WSE, DEM elevation) where an RGB composite is not meaningful.
+    ``band`` matches a component name; ``rescale`` is an optional ``(lo, hi)``
+    stretch hint for TiTiler.  Owned by the dataset reader.
+    """
+
+    name: str
+    band: str
+    rescale: tuple[float, float] | None = None
+
+
 class DatasetOptions(BaseModel):
     """Base for a reader's typed options block.
 
@@ -141,5 +156,14 @@ class Dataset(ABC):
         Each names three already-enumerated component names to stack R/G/B in a
         VRT for manual TiTiler inspection. Base: none — override in dataset
         subclasses that have meaningful band combinations (Sentinel-2, Sentinel-1).
+        """
+        return []
+
+    def viewer_bands(self) -> list[SingleBandComposite]:
+        """Single-band viewer VRTs this dataset can assemble from its components.
+
+        Each names one component to mosaic as a Gray VRT for datasets whose
+        products are scalar/single-variable (e.g. SWOT WSE, DEMs). Base: none —
+        override in single-variable dataset subclasses.
         """
         return []

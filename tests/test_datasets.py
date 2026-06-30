@@ -4,7 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from cng_benchmark.config import DatasetConfig
-from cng_benchmark.datasets import Product, RgbComposite, SourceObject, build_dataset
+from cng_benchmark.datasets import (
+    Product,
+    RgbComposite,
+    SingleBandComposite,
+    SourceObject,
+    build_dataset,
+)
 from cng_benchmark.datasets.sentinel2 import Sentinel2MajaDataset
 from cng_benchmark.datasets.single_object import SingleObjectDataset
 from cng_benchmark.datasets.swot import DEFAULT_VARIABLES, SwotRaster100mDataset
@@ -331,6 +337,27 @@ def test_swot_enumerates_granules_from_local_files(tmp_path):
     # Prefix + limit bound a granule-set enumeration (path-prefix match).
     bounded = ds.products(prefix="SWOT_cycle048_UTM32N", limit=1)
     assert [p.id for p in bounded] == ["SWOT_cycle048_UTM32N"]
+
+
+def test_swot_viewer_bands_default():
+    ds = _swot()
+    bands = ds.viewer_bands()
+    assert len(bands) == 1
+    assert isinstance(bands[0], SingleBandComposite)
+    assert bands[0].name == "wse"
+    assert bands[0].band == "wse"
+
+
+def test_swot_viewer_bands_custom_variables():
+    ds = _swot(variables=["wse", "water_area"])
+    bands = ds.viewer_bands()
+    assert [b.band for b in bands] == ["wse", "water_area"]
+
+
+def test_base_dataset_viewer_bands_returns_empty():
+    cfg = _dataset_config(reader="single-object")
+    ds = build_dataset(cfg)
+    assert ds.viewer_bands() == []
 
 
 # --- SWOT LakeSP Prior (zipped-shapefile vector granule) -------------------

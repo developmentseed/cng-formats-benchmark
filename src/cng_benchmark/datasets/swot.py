@@ -18,7 +18,11 @@ variable (``wse``).
 
 from __future__ import annotations
 
-from cng_benchmark.datasets.base import DatasetOptions, SourceObject
+from cng_benchmark.datasets.base import (
+    DatasetOptions,
+    SingleBandComposite,
+    SourceObject,
+)
 from cng_benchmark.datasets.granule import GranuleDataset, _subdataset_vsi_uri
 from cng_benchmark.registry import DATASETS
 
@@ -53,3 +57,9 @@ class SwotRaster100mDataset(GranuleDataset):
             SourceObject(name=var, uri=_subdataset_vsi_uri(granule_uri, var))
             for var in variables
         ]
+
+    def viewer_bands(self) -> list[SingleBandComposite]:
+        """One viewer VRT per configured variable, mosaicked across granules."""
+        opts: SwotRaster100mOptions = self.options
+        variables = opts.variables if opts.variables else DEFAULT_VARIABLES
+        return [SingleBandComposite(name=var, band=var) for var in variables]
