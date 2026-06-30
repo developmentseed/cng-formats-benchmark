@@ -498,41 +498,66 @@ def _publish_rgb_vrts(
     with gdal_session("sink"):
         for composite in composites:
             try:
-                band_grids: list[list[vrt.GridMeta]] = []
-                for band in composite.bands:
-                    grids: list[vrt.GridMeta] = []
-                    for product in products:
-                        if band not in {c.name for c in product.components}:
-                            continue
+                # Collect grids per product, keeping R/G/B aligned by product.
+                # Products missing any band in this composite are skipped entirely.
+                per_product: list[tuple[str, list[vrt.GridMeta]]] = []
+                for product in products:
+                    comp_names = {c.name for c in product.components}
+                    if not all(b in comp_names for b in composite.bands):
+                        continue
+                    product_grids: list[vrt.GridMeta] = []
+                    for band in composite.bands:
                         comp_dir = storage.join(
                             output_uri, f"objects/{product.id}/{band}"
                         )
                         object_uri = storage.join(comp_dir, basename)
-                        grids.append(vrt.read_grid(storage.to_gdal_path(object_uri)))
-                    band_grids.append(grids)
-                if any(not grids for grids in band_grids):
+                        product_grids.append(
+                            vrt.read_grid(storage.to_gdal_path(object_uri))
+                        )
+                    per_product.append((product_grids[0].crs_wkt, product_grids))
+                if not per_product:
                     raise ValueError("no source COGs for one or more RGB bands")
 
-                xml = vrt.build_rgb_vrt_xml(band_grids)
-                vrt_uri = storage.join(output_uri, f"run-{composite.name}.vrt")
-                storage.write_text(vrt_uri, xml, role="sink")
+                # Group by CRS — products in different UTM zones need separate
+                # VRTs; a plain VRT requires one SRS for the whole dataset.
+                by_crs: dict[str, list[list[vrt.GridMeta]]] = {}
+                for crs_wkt, product_grids in per_product:
+                    by_crs.setdefault(crs_wkt, []).append(product_grids)
+                multi_zone = len(by_crs) > 1
 
-                detail: dict = {}
-                if composite.rescale is not None:
-                    lo, hi = composite.rescale
-                    detail["rescale"] = [lo, hi]
-                    detail["titiler_url"] = (
-                        f"/cog/viewer?url={vrt_uri}&rescale={lo:g},{hi:g}"
+                for crs_wkt, zone_products in by_crs.items():
+                    # Transpose: list-of-(R,G,B) → list-per-band.
+                    zone_band_grids = [
+                        [pg[i] for pg in zone_products]
+                        for i in range(len(composite.bands))
+                    ]
+                    xml = vrt.build_rgb_vrt_xml(zone_band_grids)
+                    if multi_zone:
+                        epsg = vrt.crs_epsg(crs_wkt)
+                        zone_idx = list(by_crs.keys()).index(crs_wkt)
+                        suffix = f"-epsg{epsg}" if epsg else f"-zone{zone_idx}"
+                        vrt_name = f"{composite.name}{suffix}"
+                    else:
+                        vrt_name = composite.name
+                    vrt_uri = storage.join(output_uri, f"run-{vrt_name}.vrt")
+                    storage.write_text(vrt_uri, xml, role="sink")
+
+                    detail: dict = {}
+                    if composite.rescale is not None:
+                        lo, hi = composite.rescale
+                        detail["rescale"] = [lo, hi]
+                        detail["titiler_url"] = (
+                            f"/cog/viewer?url={vrt_uri}&rescale={lo:g},{hi:g}"
+                        )
+                    artifacts.append(
+                        Artifact(
+                            kind="viewer_vrt",
+                            name=vrt_name,
+                            uri=vrt_uri,
+                            media_type="application/xml",
+                            detail=detail,
+                        )
                     )
-                artifacts.append(
-                    Artifact(
-                        kind="viewer_vrt",
-                        name=composite.name,
-                        uri=vrt_uri,
-                        media_type="application/xml",
-                        detail=detail,
-                    )
-                )
             except Exception as exc:  # noqa: BLE001 - best-effort viewer extra
                 artifacts.append(
                     Artifact(
