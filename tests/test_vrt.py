@@ -202,3 +202,73 @@ def test_crs_epsg_extracts_from_wkt(tmp_path):
 def test_crs_epsg_returns_none_for_unknown():
     assert crs_epsg("") is None
     assert crs_epsg("LOCAL_CS") is None
+
+
+# --- multi-zone RGB VRT grouping (#67) ---
+
+
+def _write_tif_crs(path, crs, origin_x, origin_y, *, value=1):
+    """Write a tiny single-band GeoTIFF in the given CRS."""
+    transform = from_origin(origin_x, origin_y, _RES, _RES)
+    data = np.full((_SIZE, _SIZE), value, dtype="uint16")
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=_SIZE,
+        width=_SIZE,
+        count=1,
+        dtype="uint16",
+        crs=crs,
+        transform=transform,
+    ) as dst:
+        dst.write(data, 1)
+    return str(path)
+
+
+def test_rgb_vrt_single_zone_uses_composite_name(tmp_path):
+    """Single-zone run: build_rgb_vrt_xml receives same-CRS sources — correct."""
+    r = read_grid(_write_tif_crs(tmp_path / "r.tif", "EPSG:32631", 300000, 4500000))
+    g = read_grid(_write_tif_crs(tmp_path / "g.tif", "EPSG:32631", 300000, 4500000))
+    b = read_grid(_write_tif_crs(tmp_path / "b.tif", "EPSG:32631", 300000, 4500000))
+    xml = build_rgb_vrt_xml([[r], [g], [b]])
+    assert "EPSG:32631" in xml or "32631" in xml
+
+
+def test_rgb_vrt_grouping_by_crs_splits_two_zones(tmp_path):
+    """Multi-zone: grids with different CRS WKTs must be split before building VRT.
+
+    The runner (_publish_rgb_vrts) now groups by CRS before calling
+    build_rgb_vrt_xml, so each call receives sources in one CRS only.
+    This test verifies that grouping by the crs_wkt field produces two
+    independent groups, and that build_rgb_vrt_xml works correctly per group.
+    """
+    # Zone 30 product — COGs in EPSG:32630
+    r30 = read_grid(_write_tif_crs(tmp_path / "r30.tif", "EPSG:32630", 300000, 4500000))
+    g30 = read_grid(_write_tif_crs(tmp_path / "g30.tif", "EPSG:32630", 300000, 4500000))
+    b30 = read_grid(_write_tif_crs(tmp_path / "b30.tif", "EPSG:32630", 300000, 4500000))
+    # Zone 31 product — COGs in EPSG:32631
+    r31 = read_grid(_write_tif_crs(tmp_path / "r31.tif", "EPSG:32631", 500000, 4500000))
+    g31 = read_grid(_write_tif_crs(tmp_path / "g31.tif", "EPSG:32631", 500000, 4500000))
+    b31 = read_grid(_write_tif_crs(tmp_path / "b31.tif", "EPSG:32631", 500000, 4500000))
+
+    # Simulate what _publish_rgb_vrts now does: group per_product by CRS WKT.
+    per_product = [
+        (r30.crs_wkt, [r30, g30, b30]),
+        (r31.crs_wkt, [r31, g31, b31]),
+    ]
+    by_crs: dict[str, list] = {}
+    for crs_wkt, grids in per_product:
+        by_crs.setdefault(crs_wkt, []).append(grids)
+
+    assert len(by_crs) == 2, "two zones → two CRS groups"
+
+    epsg_codes = sorted(crs_epsg(crs) for crs in by_crs)
+    assert epsg_codes == ["32630", "32631"]
+
+    # Each group produces a valid, single-CRS VRT.
+    for crs_wkt, zone_products in by_crs.items():
+        zone_band_grids = [[pg[i] for pg in zone_products] for i in range(3)]
+        xml = build_rgb_vrt_xml(zone_band_grids)
+        epsg = crs_epsg(crs_wkt)
+        assert epsg in xml or crs_wkt[:20] in xml
