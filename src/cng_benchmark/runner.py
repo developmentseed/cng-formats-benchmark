@@ -350,20 +350,17 @@ def _run_product(
             # params so the adapters can write it onto the produced object. The
             # source rasters don't always carry it (MAJA keeps nodata and the
             # reflectance quantification in side-metadata), and what the writer
-            # is not told, the output cannot declare (#70). An explicit config
-            # param stays authoritative.
-            convert_params = config.params
-            component_params = {
-                "nodata": component.nodata,
-                "scale_factor": component.scale_factor,
-            }
-            extra = {
-                k: v
-                for k, v in component_params.items()
-                if v is not None and k not in config.params
-            }
-            if extra:
-                convert_params = {**config.params, **extra}
+            # is not told, the output cannot declare (#70). Always a fresh copy,
+            # so a component's values can never leak into the next one or into
+            # the run's own params; `setdefault` keeps an explicit config param
+            # authoritative.
+            convert_params = dict(config.params)
+            for key, value in (
+                ("nodata", component.nodata),
+                ("scale_factor", component.scale_factor),
+            ):
+                if value is not None:
+                    convert_params.setdefault(key, value)
             with gdal_session("source"):
                 wm = measure_write(
                     adapter,
