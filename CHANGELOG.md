@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.5.0...v0.6.0) (2026-06-30)
+
+
+### Features
+
+* **deploy:** drop titiler-xarray in favour of TiTiler 2.0+ /zarr endpoint ([#62](https://github.com/developmentseed/cng-formats-benchmark/issues/62)) ([ad8159e](https://github.com/developmentseed/cng-formats-benchmark/commit/ad8159e884fb23f08257a9419407f3a1656d96e1))
+* **deploy:** tune TiTiler GDAL caching and uvicorn workers for display metric ([#61](https://github.com/developmentseed/cng-formats-benchmark/issues/61)) ([bd12d78](https://github.com/developmentseed/cng-formats-benchmark/commit/bd12d78b34ee2310d06a57ec4cb0cbfe5d91549a))
+* **vrt:** single-band viewer VRTs for scalar datasets ([#68](https://github.com/developmentseed/cng-formats-benchmark/issues/68)) ([cb46390](https://github.com/developmentseed/cng-formats-benchmark/commit/cb46390cb72be45b47dbde61e510d6970c6e9b6d))
+
+
+### Bug Fixes
+
+* **deploy:** scope the titiler Service/Deployment selector by release ([#65](https://github.com/developmentseed/cng-formats-benchmark/issues/65)) ([e7b4b6d](https://github.com/developmentseed/cng-formats-benchmark/commit/e7b4b6d701511d31f220e0cd851776106586637b))
+* **runner:** make per-product read/display metrics best-effort ([#64](https://github.com/developmentseed/cng-formats-benchmark/issues/64)) ([735b477](https://github.com/developmentseed/cng-formats-benchmark/commit/735b47724350d8dfe8b96c9690726f9e619152a4))
+* **storage:** avoid broad S3 scan for multi-tile alternation patterns ([#59](https://github.com/developmentseed/cng-formats-benchmark/issues/59)) ([6efb57c](https://github.com/developmentseed/cng-formats-benchmark/commit/6efb57c7dfd765371937fd854cdcbfcacb41b829))
+
 ## [0.5.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.4.0...v0.5.0) (2026-06-29)
 
 
