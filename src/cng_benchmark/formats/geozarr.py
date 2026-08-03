@@ -114,12 +114,19 @@ def _compressor(name: str):
     return table[key]()
 
 
-def _levels(data, n_levels: int) -> list:
+def _levels(data, n_levels: int, fill_value: float | None = None) -> list:
     """Return the multiscale pyramid: the base array plus ``n_levels`` coarsenings.
 
     Each extra level halves both spatial dims (mean-coarsened, trimming a ragged
     edge), the Zarr analogue of COG overviews. ``n_levels == 0`` returns just the
     base array.
+
+    When ``fill_value`` is known the mean is taken over the *valid* pixels of each
+    2x2 block, and a block that is entirely fill stays fill. Averaging a fill
+    pixel as though it were data drags the overview towards the fill value — with
+    MAJA's -10000 that darkens every swath edge — and GDAL already excludes
+    nodata when it builds COG overviews, so doing it here keeps the two arms
+    comparable.
     """
     import numpy as np
 
@@ -130,11 +137,16 @@ def _levels(data, n_levels: int) -> list:
         if h < 2 or w < 2:
             break
         trimmed = cur[: h - (h % 2), : w - (w % 2)]
-        cur = (
-            trimmed.reshape(trimmed.shape[0] // 2, 2, trimmed.shape[1] // 2, 2)
-            .mean(axis=(1, 3))
-            .astype(data.dtype)
-        )
+        blocks = trimmed.reshape(trimmed.shape[0] // 2, 2, trimmed.shape[1] // 2, 2)
+        if fill_value is None:
+            cur = blocks.mean(axis=(1, 3)).astype(data.dtype)
+        else:
+            valid = blocks != fill_value
+            n_valid = valid.sum(axis=(1, 3))
+            total = np.where(valid, blocks, 0).sum(axis=(1, 3), dtype="float64")
+            cur = np.where(
+                n_valid > 0, total / np.maximum(n_valid, 1), fill_value
+            ).astype(data.dtype)
         arrays.append(np.ascontiguousarray(cur))
     return arrays
 
@@ -149,6 +161,9 @@ def _write_sharded(
     crs_wkt: str = "",
     geotransform: str = "",
     multiscale_levels: int = 0,
+    fill_value: float | None = None,
+    scale_factor: float | None = None,
+    add_offset: float | None = None,
 ) -> None:
     """Write a 2D array to ``store`` as a sharded GeoZarr v3 store.
 
@@ -160,10 +175,15 @@ def _write_sharded(
     variable so a reader (rioxarray, GDAL, titiler-xarray) can georeference the
     array. Pure ``xarray`` + ``zarr`` + ``numpy`` — no rioxarray — so it is
     CI-testable.
+
+    ``fill_value`` declares the no-data value, ``scale_factor`` / ``add_offset``
+    the CF packing that recovers physical units (``physical = stored *
+    scale_factor + add_offset``) — see :func:`_data_var` and :func:`_encoding`
+    for how each is written.
     """
     import xarray as xr
 
-    levels = _levels(data, multiscale_levels)
+    levels = _levels(data, multiscale_levels, fill_value)
     compressors = _compressor(codec)
 
     def _grid_mapping() -> xr.DataArray:
@@ -173,16 +193,38 @@ def _write_sharded(
         )
         return ref
 
+    def _data_var(level_data) -> xr.DataArray:
+        da = xr.DataArray(level_data, dims=("y", "x"))
+        da.attrs["grid_mapping"] = "spatial_ref"
+        # CF packing travels as *attributes*, never as xarray encoding keys: in
+        # encoding, xarray applies the inverse transform on write (dividing the
+        # stored integers by scale_factor), which overflows an int16 DN array.
+        # As attributes the DNs are stored verbatim — byte-comparable with the
+        # COG arm — and a CF reader still recovers physical units. The GeoZarr
+        # spec recommends exactly these CF attributes.
+        if scale_factor is not None:
+            da.attrs["scale_factor"] = scale_factor
+        if add_offset is not None:
+            da.attrs["add_offset"] = add_offset
+        return da
+
     def _encoding(level_data) -> dict:
         c = _fit_chunk(chunk, level_data.shape)
         s = _fit_shard(shard, c, level_data.shape)
-        return {DATA_VAR: {"chunks": c, "shards": s, "compressors": compressors}}
+        enc: dict = {"chunks": c, "shards": s, "compressors": compressors}
+        if fill_value is not None:
+            # Both halves are needed: `fill_value` is the Zarr v3 array fill in
+            # zarr.json, `_FillValue` the CF attribute a reader actually masks
+            # on. Setting only the former leaves the no-data undeclared to
+            # xarray/rioxarray/GDAL.
+            enc["fill_value"] = fill_value
+            enc["_FillValue"] = fill_value
+        return {DATA_VAR: enc}
 
     if multiscale_levels <= 0:
         ds = xr.Dataset(
-            {DATA_VAR: (("y", "x"), levels[0]), "spatial_ref": _grid_mapping()}
+            {DATA_VAR: _data_var(levels[0]), "spatial_ref": _grid_mapping()}
         )
-        ds[DATA_VAR].attrs["grid_mapping"] = "spatial_ref"
         ds.to_zarr(
             store,
             mode="w",
@@ -195,9 +237,8 @@ def _write_sharded(
     # Multiscale: each level is its own group "0".."N"; the root records the paths.
     for i, level_data in enumerate(levels):
         ds = xr.Dataset(
-            {DATA_VAR: (("y", "x"), level_data), "spatial_ref": _grid_mapping()}
+            {DATA_VAR: _data_var(level_data), "spatial_ref": _grid_mapping()}
         )
-        ds[DATA_VAR].attrs["grid_mapping"] = "spatial_ref"
         ds.to_zarr(
             store,
             mode="w" if i == 0 else "a",
@@ -331,6 +372,25 @@ class GeoZarrAdapter(FormatAdapter):
         t = da.rio.transform()
         geotransform = " ".join(str(v) for v in (t.c, t.a, t.b, t.f, t.d, t.e))
 
+        # An explicit param wins; otherwise fall back to what the source
+        # embedded (rioxarray surfaces a GDAL band's nodata/scale/offset as
+        # `_FillValue`, `scale_factor` and `add_offset` attributes). MAJA
+        # reflectance declares none of them in the file, so the dataset reader
+        # supplies them — see `SourceObject.nodata` / `.scale_factor`.
+        def _param(key: str, source_value) -> float | None:
+            value = params.get(key, source_value)
+            return None if value is None else float(value)
+
+        fill_value = _param("nodata", da.rio.nodata)
+        scale_factor = _param("scale_factor", da.attrs.get("scale_factor"))
+        add_offset = _param("add_offset", da.attrs.get("add_offset"))
+        # rioxarray reports the identity packing (1.0 / 0.0) for a band that
+        # carries none; writing it out would only add noise.
+        if scale_factor == 1.0:
+            scale_factor = None
+        if add_offset == 0.0:
+            add_offset = None
+
         _write_sharded(
             target,
             data,
@@ -340,6 +400,9 @@ class GeoZarrAdapter(FormatAdapter):
             crs_wkt=crs_wkt,
             geotransform=geotransform,
             multiscale_levels=opts.multiscale_levels,
+            fill_value=fill_value,
+            scale_factor=scale_factor,
+            add_offset=add_offset,
         )
 
     def describe_grouping_lever(self) -> str:

@@ -24,6 +24,13 @@ from cng_benchmark.registry import DATASETS
 
 #: A reflectance member: ``<product>_<FRE|SRE>_<band>.tif`` at the scene root.
 _REFLECTANCE_RE = re.compile(r"(?:^|/)[^/]*_(FRE|SRE)_(B\w+)\.tif$", re.IGNORECASE)
+#: MAJA Int16 reflectance fill value (pixels outside the swath / masked as no-data).
+#: The delivered GeoTIFFs declare neither this nor the quantification below in
+#: their headers — it lives in MAJA side-metadata — so the reader carries both
+#: to the writers, which is the only way they reach the produced object (#70).
+_MAJA_NODATA = -10000.0
+#: MAJA quantification: reflectance is stored as DN = reflectance x 10000.
+_MAJA_SCALE_FACTOR = 1.0 / 10000.0
 #: A mask member: ``MASKS/<product>_<CLM|EDG|SAT|MG2>_R<n>.tif``.
 _MASK_RE = re.compile(
     r"(?:^|/)MASKS/[^/]*_(CLM|EDG|SAT|MG2)_(R\d+)\.tif$", re.IGNORECASE
@@ -93,6 +100,8 @@ class Sentinel2MajaDataset(ZipDeliveryDataset):
                         SourceObject(
                             name=f"{kind}_{band}",
                             uri=_member_vsi_uri(zip_uri, member),
+                            nodata=_MAJA_NODATA,
+                            scale_factor=_MAJA_SCALE_FACTOR,
                         )
                     )
                 continue

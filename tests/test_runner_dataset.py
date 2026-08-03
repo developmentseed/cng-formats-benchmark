@@ -54,7 +54,7 @@ class _ZipDeliveryDataset(Dataset):
     that :mod:`cng_benchmark.datasets.zip_delivery` uses for S1/S2/LakeSP.
     """
 
-    def products(self, *, prefix=None, limit=None):
+    def products(self, *, prefix=None, pattern=None, limit=None):
         root = Path(self.source_uri)
         zips = sorted(root.glob("*.zip"))
         if limit is not None:
@@ -167,6 +167,115 @@ def test_single_product_aggregates_all_objects(tmp_path):
     # Roll-up over a single product mirrors it.
     assert result.rollup.object_profile.count == 4
     assert result.rollup.params["scope"] == "rollup"
+
+
+@DATASETS.register("test-pixel-metadata")
+class _PixelMetadataDataset(Dataset):
+    """Test reader: one product, one component carrying nodata/scale, one without.
+
+    Mirrors a MAJA scene, where the reflectance bands know their fill value and
+    quantification but the masks carry neither.
+    """
+
+    def products(self, *, prefix=None, pattern=None, limit=None):
+        root = Path(self.source_uri)
+        files = sorted(root.glob("*.bin"))
+        return [
+            Product(
+                id="sceneP",
+                components=[
+                    SourceObject(
+                        name="reflectance",
+                        uri=str(files[0]),
+                        nodata=-10000.0,
+                        scale_factor=1e-4,
+                    ),
+                    SourceObject(name="mask", uri=str(files[1])),
+                ],
+            )
+        ]
+
+
+#: Params seen by the capturing adapter; reset by `_capture_convert_params`.
+_CAPTURED_PARAMS: list[dict] = []
+
+
+def _capture_convert_params() -> list[dict]:
+    """Register (once) an adapter recording the params of every convert call."""
+    import os
+
+    from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+
+    if "fake-capture" not in FORMATS:
+
+        @FORMATS.register("fake-capture")
+        class _CapturingAdapter(FormatAdapter):
+            name = "fake-capture"
+            object_kind = ObjectKind.RASTER_FILE
+
+            def target_basename(self):
+                return "out.bin"
+
+            def convert(self, source, target, params):
+                _CAPTURED_PARAMS.append(dict(params))
+                Path(target).write_bytes(b"x" * 16)
+
+            def describe_grouping_lever(self):
+                return "none"
+
+            def enumerate_objects(self, target):
+                return [os.path.getsize(target)]
+
+            def describe_layout(self, target, *, name=None):
+                return []
+
+    _CAPTURED_PARAMS.clear()
+    return _CAPTURED_PARAMS
+
+
+def _pixel_metadata_run(tmp_path, params) -> list[dict]:
+    """Run the two-component product through the capturing adapter."""
+    pytest.importorskip("rasterio")  # the runner reads sources via a GDAL session
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.bin").write_bytes(b"a" * 32)
+    (src / "b.bin").write_bytes(b"b" * 32)
+
+    seen = _capture_convert_params()
+    cfg = _benchmark(["object_size"], params).model_copy(
+        update={"formats": ["fake-capture"]}
+    )
+    ds_cfg = DatasetConfig.model_validate(
+        {
+            "id": "pixmeta",
+            "reader": "test-pixel-metadata",
+            "source": str(src),
+            "baseline_format": "geotiff",
+            "target_formats": ["fake-capture"],
+        }
+    )
+    run_dataset_benchmark(cfg, ds_cfg, str(tmp_path / "out"))
+    return seen
+
+
+def test_component_nodata_and_scale_reach_the_adapter(tmp_path):
+    # What the writer is not told, the produced object cannot declare (#70).
+    seen = _pixel_metadata_run(tmp_path, {"scope": "product"})
+
+    assert len(seen) == 2
+    assert seen[0]["nodata"] == -10000.0
+    assert seen[0]["scale_factor"] == 1e-4
+    # The mask carries neither, so nothing is injected for it.
+    assert "nodata" not in seen[1]
+    assert "scale_factor" not in seen[1]
+
+
+def test_explicit_config_param_overrides_the_component_value(tmp_path):
+    seen = _pixel_metadata_run(tmp_path, {"scope": "product", "nodata": -1.0})
+
+    assert seen[0]["nodata"] == -1.0
+    assert seen[0]["scale_factor"] == 1e-4  # still supplied by the reader
+    assert seen[1]["nodata"] == -1.0  # a config param applies to every component
 
 
 def test_object_layouts_captured_and_pooled(tmp_path):
