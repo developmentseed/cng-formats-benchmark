@@ -42,10 +42,20 @@ class SourceObject:
     ``/vsizip//vsis3/bucket/scene.zip/FRE_B3.tif`` for a zip member read on the
     fly). ``name`` is a short, stable identifier used to lay out the produced
     object and to label per-component results.
+
+    ``nodata`` is the fill value for this component's pixel data and
+    ``scale_factor`` the CF multiplier that turns a stored count into its
+    physical unit (``physical = stored * scale_factor``). Both are set by
+    readers that know the product convention — MAJA FRE/SRE reflectance is
+    stored as ``int16`` DN with -10000 as fill and a 1/10000 quantification —
+    because the delivered rasters declare neither in their headers. ``None``
+    means "whatever the source declares".
     """
 
     name: str
     uri: str
+    nodata: float | None = None
+    scale_factor: float | None = None
 
 
 @dataclass(frozen=True)

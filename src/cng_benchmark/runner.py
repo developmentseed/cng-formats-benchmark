@@ -346,12 +346,27 @@ def _run_product(
                 source_size = _zip_source_size if i == 0 else None
             else:
                 source_size = storage.object_size(component.uri, "source")
+            # Merge the reader's per-component pixel-interpretation metadata into
+            # params so the adapters can write it onto the produced object. The
+            # source rasters don't always carry it (MAJA keeps nodata and the
+            # reflectance quantification in side-metadata), and what the writer
+            # is not told, the output cannot declare (#70). Always a fresh copy,
+            # so a component's values can never leak into the next one or into
+            # the run's own params; `setdefault` keeps an explicit config param
+            # authoritative.
+            convert_params = dict(config.params)
+            for key, value in (
+                ("nodata", component.nodata),
+                ("scale_factor", component.scale_factor),
+            ):
+                if value is not None:
+                    convert_params.setdefault(key, value)
             with gdal_session("source"):
                 wm = measure_write(
                     adapter,
                     source_path,
                     local_target,
-                    config.params,
+                    convert_params,
                     source_size=source_size,
                 )
             write_per_component.append(wm)

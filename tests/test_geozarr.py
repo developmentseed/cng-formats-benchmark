@@ -146,3 +146,178 @@ def test_finest_array_is_readable_by_name(tmp_path):
     store = _store(tmp_path)
     group = zarr.open_group(store, mode="r")
     assert DATA_VAR in group
+
+
+def _nodata_store(tmp_path, name, **kw):
+    """A store whose int16 data holds MAJA's -10000 fill in its first column."""
+    store = str(tmp_path / name)
+    data = np.full((256, 256), 1234, dtype="int16")
+    data[:, 0] = -10000
+    _write_sharded(store, data, chunk=(128, 128), shard=(256, 256), codec="zstd", **kw)
+    return store
+
+
+def test_fill_value_is_declared_both_as_zarr_fill_and_cf_attribute(tmp_path):
+    # `fill_value` alone leaves the no-data undeclared to a CF reader; the
+    # `_FillValue` attribute is what xarray/rioxarray/GDAL actually mask on.
+    import zarr
+
+    store = _nodata_store(tmp_path, "nodata.zarr", fill_value=-10000.0)
+    arr = zarr.open_group(store, mode="r")[DATA_VAR]
+    assert arr.fill_value == -10000
+    assert arr.attrs["_FillValue"] == -10000
+
+
+def test_no_fill_value_defaults_to_zero(tmp_path):
+    import zarr
+
+    store = str(tmp_path / "default.zarr")
+    data = np.zeros((256, 256), dtype="uint16")
+    _write_sharded(store, data, chunk=(128, 128), shard=(256, 256), codec="zstd")
+    arr = zarr.open_group(store, mode="r")[DATA_VAR]
+    assert arr.fill_value == 0
+    assert "_FillValue" not in arr.attrs
+    assert "scale_factor" not in arr.attrs
+
+
+def test_scale_factor_is_a_cf_attribute_and_leaves_the_counts_verbatim(tmp_path):
+    # The stored DNs must stay int16 and byte-comparable with the COG arm; only
+    # a decoding reader sees physical reflectance.
+    import xarray as xr
+    import zarr
+
+    store = _nodata_store(
+        tmp_path, "scaled.zarr", fill_value=-10000.0, scale_factor=1e-4
+    )
+
+    arr = zarr.open_group(store, mode="r")[DATA_VAR]
+    assert arr.attrs["scale_factor"] == 1e-4
+    assert arr.dtype == np.dtype("int16")
+    assert arr[0, 1] == 1234  # raw DN, not rescaled on write
+
+    decoded = xr.open_zarr(store, consolidated=False)[DATA_VAR]
+    assert decoded.values[0, 1] == pytest.approx(0.1234)  # physical reflectance
+    assert np.isnan(decoded.values[0, 0])  # the fill masked out
+
+
+def test_multiscale_coarsening_excludes_the_fill_value(tmp_path):
+    # Averaging -10000 as though it were data drags every overview pixel that
+    # touches a swath edge towards the fill; GDAL excludes nodata when it builds
+    # COG overviews, so the GeoZarr arm must too.
+    import zarr
+
+    store = _nodata_store(
+        tmp_path, "pyramid.zarr", fill_value=-10000.0, multiscale_levels=1
+    )
+    level1 = zarr.open_group(store, mode="r")["1"][DATA_VAR]
+
+    # Column 0 of level 1 averages a 2x2 block of one fill + one valid column.
+    assert level1[0, 0] == 1234
+    assert level1[0, 5] == 1234
+
+
+def test_multiscale_coarsening_keeps_all_fill_blocks_as_fill(tmp_path):
+    import zarr
+
+    store = str(tmp_path / "allfill.zarr")
+    data = np.full((256, 256), 1234, dtype="int16")
+    data[:, :2] = -10000  # a full 2x2 block-column of fill
+    _write_sharded(
+        store,
+        data,
+        chunk=(128, 128),
+        shard=(256, 256),
+        codec="zstd",
+        fill_value=-10000.0,
+        multiscale_levels=1,
+    )
+    level1 = zarr.open_group(store, mode="r")["1"][DATA_VAR]
+    assert level1[0, 0] == -10000
+
+
+def _write_source(path, *, nodata=None, scales=None):
+    """A minimal georeferenced int16 GeoTIFF baseline."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=256,
+        height=256,
+        count=1,
+        dtype="int16",
+        crs="EPSG:32631",
+        transform=from_origin(300000, 4900020, 10, 10),
+        **({} if nodata is None else {"nodata": nodata}),
+    ) as dst:
+        dst.write(np.full((256, 256), 1234, dtype="int16"), 1)
+        if scales is not None:
+            dst.scales = scales
+
+
+def test_convert_propagates_nodata_and_scale_params(tmp_path):
+    # The MAJA case: the source declares neither, the params carry both.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    source = str(tmp_path / "src.tif")
+    _write_source(source)
+
+    target = str(tmp_path / "out.zarr")
+    GeoZarrAdapter().convert(
+        source,
+        target,
+        {
+            "chunk_shape": [128, 128],
+            "shard_shape": [256, 256],
+            "nodata": -10000.0,
+            "scale_factor": 1e-4,
+        },
+    )
+    arr = zarr.open_group(target, mode="r")[DATA_VAR]
+    assert arr.fill_value == -10000
+    assert arr.attrs["_FillValue"] == -10000
+    assert arr.attrs["scale_factor"] == 1e-4
+
+
+def test_convert_falls_back_to_what_the_source_declares(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    source = str(tmp_path / "src.tif")
+    _write_source(source, nodata=-9999, scales=(0.01,))
+
+    target = str(tmp_path / "out.zarr")
+    GeoZarrAdapter().convert(
+        source, target, {"chunk_shape": [128, 128], "shard_shape": [256, 256]}
+    )
+    arr = zarr.open_group(target, mode="r")[DATA_VAR]
+    assert arr.fill_value == -9999
+    assert arr.attrs["scale_factor"] == pytest.approx(0.01)
+
+
+def test_convert_omits_the_identity_scale_of_an_unpacked_source(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    source = str(tmp_path / "src.tif")
+    _write_source(source)
+
+    target = str(tmp_path / "out.zarr")
+    GeoZarrAdapter().convert(
+        source, target, {"chunk_shape": [128, 128], "shard_shape": [256, 256]}
+    )
+    arr = zarr.open_group(target, mode="r")[DATA_VAR]
+    assert "scale_factor" not in arr.attrs
+    assert "add_offset" not in arr.attrs

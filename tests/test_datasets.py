@@ -109,6 +109,18 @@ def test_maja_selects_reflectance_bands():
     )
 
 
+def test_maja_reflectance_carries_nodata_and_scale_factor():
+    # MAJA keeps both in side-metadata, so the reader is the only place they can
+    # enter the pipeline (#70); the masks are bitmasks and carry neither.
+    ds = _maja(reflectance=["FRE"], bands=["B2"], masks=["CLM"])
+    components = {c.name: c for c in ds._select_members(MAJA_MEMBERS, "s3://b/s.zip")}
+
+    assert components["FRE_B2"].nodata == -10000.0
+    assert components["FRE_B2"].scale_factor == 1e-4
+    assert components["CLM_R1"].nodata is None
+    assert components["CLM_R1"].scale_factor is None
+
+
 def test_maja_fans_in_masks_and_both_reflectances():
     ds = _maja(
         reflectance=["FRE", "SRE"],
