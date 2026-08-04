@@ -358,9 +358,6 @@ def _run_product(
             for key, value in (
                 ("nodata", component.nodata),
                 ("scale_factor", component.scale_factor),
-                # Only ever opt *in*: a False would say nothing the adapter
-                # default does not already say, and would mask a config param.
-                ("scale_offset", component.scale_offset or None),
             ):
                 if value is not None:
                     convert_params.setdefault(key, value)

@@ -17,11 +17,6 @@ options:
   reflectance: [FRE]
   bands: [B2, B3, B4, B8]
   masks: [CLM, EDG, SAT, MG2]
-  # `scale_offset: true` asks the target format to apply MAJA's reflectance
-  # quantification in the object's own encoding, for the reflectance bands only
-  # (a mask is a bitmask with no physical scale). Set per-arm in the GeoZarr
-  # benchmark config instead, since only that arm can honour it.
-  scale_offset: false
 grouping_lever:
   # Each candidate format clears the object-size tiers with its own lever: COG
   # internal tiling, Zarr v3 sharding. Both are swept against the tier thresholds.

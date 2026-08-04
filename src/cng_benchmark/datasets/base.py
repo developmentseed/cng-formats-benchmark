@@ -51,16 +51,15 @@ class SourceObject:
     because the delivered rasters declare neither in their headers. ``None``
     means "whatever the source declares".
 
-    ``scale_offset`` asks the target format to apply ``scale_factor`` in the
-    object's own encoding, rather than leaving a client to unscale — a request
-    only some formats can honour, which is what makes it worth measuring.
+    Both describe what the pixels *are*, not how to write them: how a target
+    format encodes the scale is an arm-level choice, carried in the benchmark's
+    format params (e.g. GeoZarr's ``scale_offset``), not here.
     """
 
     name: str
     uri: str
     nodata: float | None = None
     scale_factor: float | None = None
-    scale_offset: bool = False
 
 
 @dataclass(frozen=True)

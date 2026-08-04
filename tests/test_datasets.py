@@ -119,16 +119,6 @@ def test_maja_reflectance_carries_nodata_and_scale_factor():
     assert components["FRE_B2"].scale_factor == 1e-4
     assert components["CLM_R1"].nodata is None
     assert components["CLM_R1"].scale_factor is None
-    assert components["FRE_B2"].scale_offset is False  # opt-in, off by default
-
-
-def test_maja_scale_offset_option_applies_to_reflectance_only():
-    ds = _maja(reflectance=["FRE"], bands=["B2"], masks=["CLM"], scale_offset=True)
-    components = {c.name: c for c in ds._select_members(MAJA_MEMBERS, "s3://b/s.zip")}
-
-    assert components["FRE_B2"].scale_offset is True
-    # A mask is a bitmask with no physical scale — encoding one would be wrong.
-    assert components["CLM_R1"].scale_offset is False
 
 
 def test_maja_fans_in_masks_and_both_reflectances():
