@@ -25,6 +25,9 @@ params:
   chunk_shape: [128, 128]
   shard_shape: [256, 256]
   codec: zstd
+  # `multiscale_levels` is left at its `auto` default on purpose, so this
+  # deployable path exercises pyramid generation: the 512 px fixture coarsens
+  # once, to 256 (#71).
   # titiler-xarray (the compose `geozarr` profile) mounts its tiler at the root,
   # so the display router prefix is empty; a multidim extension would use "md".
   display_titiler_path: ""

@@ -188,6 +188,25 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
             f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} | {ratio} "
             f"| {encoding} |"
         )
+    overview = sum(ly.overview_bytes for ly in layouts)
+    total = sum(ly.size_bytes for ly in layouts)
+    if overview:
+        share = f"{100 * overview / total:.1f}%" if total else "—"
+        lines += [
+            "",
+            f"> **Overviews:** {_format_bytes(overview)} of {_format_bytes(total)}"
+            f" ({share}) is the multiscale pyramid — the levels a zoomed-out tile"
+            " is served from, instead of downsampling full-resolution chunks on"
+            " the fly. A COG carries its overviews in the same objects, so the"
+            " size comparison above is like-for-like.",
+        ]
+    elif any(ly.multiscale_levels == 0 for ly in layouts):
+        lines += [
+            "",
+            "> **No overviews:** these arrays are single-level, so a tile server"
+            " must read full-resolution chunks for every zoomed-out tile. The"
+            " display numbers are not comparable with an arm that has a pyramid.",
+        ]
     if any(ly.scale_offset for ly in layouts):
         lines += [
             "",

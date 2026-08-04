@@ -95,8 +95,9 @@ def _read_zarr_grid(store: str, role: str = "sink") -> _Grid:
     """Read the chunk/multiscale grid of a GeoZarr store (chunk = addressable unit).
 
     Chunk shape is the partial-read unit; multiscale levels become the available
-    decimations ``[1, 2, 4, …]``; CRS and the affine come from the CF
-    ``spatial_ref`` grid-mapping variable the adapter writes.
+    decimations ``[1, 2, 4, …]``; the CRS and the affine come from the store's
+    own ``geo-proj`` / ``spatial`` convention attributes — the same ones any
+    reader uses, not a CF grid-mapping variable written for GDAL's benefit.
     """
     import zarr
     from affine import Affine
@@ -107,31 +108,33 @@ def _read_zarr_grid(store: str, role: str = "sink") -> _Grid:
 
     so = fsspec_storage_options(role) if is_s3(store) else None
     group = zarr.open_group(store, mode="r", storage_options=so)
+    # The root describes the native grid either way: for a pyramid it is the
+    # multiscale group, for a flat store the array's own group.
+    attrs = dict(group.attrs)
     if DATA_VAR in group:
-        arr, ref, levels = group[DATA_VAR], group["spatial_ref"], 0
+        arr, levels = group[DATA_VAR], 0
     else:
         keys = sorted((k for k in group.group_keys()), key=lambda k: int(k))
         levels = len(keys) - 1
-        sub = group[keys[0]]
-        arr, ref = sub[DATA_VAR], sub["spatial_ref"]
+        arr = group[keys[0]][DATA_VAR]
 
     height, width = int(arr.shape[-2]), int(arr.shape[-1])
     block_h, block_w = int(arr.chunks[-2]), int(arr.chunks[-1])
-    wkt = ref.attrs.get("crs_wkt") or ref.attrs.get("spatial_ref") or ""
-    gt = [float(v) for v in str(ref.attrs.get("GeoTransform", "")).split()]
+    crs_def = attrs.get("proj:code") or attrs.get("proj:wkt2") or ""
+    coeffs = [float(v) for v in attrs.get("spatial:transform", [])]
     # Tile selection has to project the store into WebMercator, so both the CRS
-    # and a 6-value GDAL geotransform must be present; fail clearly if not (an
+    # and a 6-coefficient affine must be present; fail clearly if not (an
     # ungeoreferenced store has no map tiles to time).
-    if not wkt or len(gt) != 6:
+    if not crs_def or len(coeffs) != 6:
         raise RuntimeError(
             f"GeoZarr store {store!r} is not georeferenced for display "
-            f"(crs_wkt={'set' if wkt else 'missing'}, GeoTransform has "
-            f"{len(gt)} of 6 values); cannot select map tiles"
+            f"(proj:code/proj:wkt2={'set' if crs_def else 'missing'}, "
+            f"spatial:transform has {len(coeffs)} of 6 coefficients); "
+            "cannot select map tiles"
         )
-    crs = CRS.from_wkt(wkt)
-    # The adapter writes GeoTransform as c a b f d e (GDAL order).
-    c, a, b, f, d, e = gt
-    transform = Affine(a, b, c, d, e, f)
+    crs = CRS.from_user_input(crs_def)
+    # `spatial:transform` is already in rasterio/affine coefficient order.
+    transform = Affine(*coeffs)
     inv = ~transform
     # All four raster corners, so a rotated/sheared transform still bounds right.
     corners = [(0, 0), (width, 0), (0, height), (width, height)]

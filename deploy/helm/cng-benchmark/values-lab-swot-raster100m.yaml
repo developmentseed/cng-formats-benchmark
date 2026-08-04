@@ -61,7 +61,10 @@ configs:
       chunk_shape: [1024, 1024]
       shard_shape: [2048, 2048]
       codec: zstd
-      multiscale_levels: 0
+      # Overview pyramid, /2 down to roughly a tile — the analogue of the COG
+      # arm's overviews, without which the display metric measures the missing
+      # pyramid rather than the format (#71).
+      multiscale_levels: auto
       scope: product-set
       products:
         prefix: ""

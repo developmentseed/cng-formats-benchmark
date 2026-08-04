@@ -31,7 +31,8 @@ params:
   chunk_shape: [1024, 1024]
   shard_shape: [2048, 2048]
   codec: zstd
-  multiscale_levels: 0
+  # Overview pyramid, /2 down to roughly a tile (#71) — see the S2 arm's note.
+  multiscale_levels: auto
   scope: product-set     # product (one granule) | product-set (many)
   products:
     prefix: ""

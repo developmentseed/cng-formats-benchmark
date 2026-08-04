@@ -1,4 +1,4 @@
-"""GeoZarr v3 adapter — 2D, per-component, sharded.
+"""GeoZarr v3 adapter — 2D, per-component, sharded, multiscale.
 
 The grouping lever for Zarr v3 is its chunk and shard shape: the chunk is the
 addressable (range-read) unit, and a *shard* packs many chunks into one stored
@@ -8,11 +8,18 @@ GeoZarr store, the per-component analogue of the COG arm — it flows through th
 same runner paths as COG. Time-stacking the source scenes into a 3D cube is a
 separate, deferred concern (see the M2.5 plan): nothing here stacks.
 
+The store carries an **overview pyramid by default** — the direct analogue of
+COG overviews, without which a tile server has to read full-resolution chunks
+for every zoomed-out tile and the display comparison measures the missing
+pyramid rather than the format (#71). The sibling
+:mod:`~cng_benchmark.formats.geozarr_multiscales` module builds the metadata
+that describes it.
+
 The store-writing core (:func:`_write_sharded`, :func:`enumerate_store_objects`,
-:func:`describe_store_layout`) depends only on ``zarr`` + ``xarray`` + ``numpy``,
-so the sharding-lever / enumerate / layout logic is unit-testable on synthetic
-in-memory arrays. Only :meth:`GeoZarrAdapter.convert`'s source read needs
-``rioxarray`` (the ``geozarr`` extra), imported lazily.
+:func:`describe_store_layout`) depends only on ``zarr`` + ``xarray`` + ``numpy``
++ ``zarr_cm``, so the sharding-lever / enumerate / layout logic is unit-testable
+on synthetic in-memory arrays. Only :meth:`GeoZarrAdapter.convert`'s source read
+needs ``rioxarray`` (the ``geozarr`` extra), imported lazily.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from cng_benchmark.formats import geozarr_multiscales as ms
 from cng_benchmark.formats.base import FormatAdapter, ObjectKind
 from cng_benchmark.models import GeoZarrLayout
 from cng_benchmark.registry import FORMATS
@@ -43,8 +51,15 @@ class GeoZarrParams(BaseModel):
     dim is ignored in the 2D regime) and tolerate a swept *list of shapes*, taking
     the first so a swept lever degrades to a single run, mirroring COG's
     ``block_size``. ``codec`` is the per-chunk compressor (``zstd`` default;
-    ``none`` for raw). ``multiscale_levels`` is the overview-pyramid depth (0 = the
-    base array only).
+    ``none`` for raw).
+
+    ``multiscale_levels`` is the overview-pyramid depth. ``"auto"`` (the default)
+    coarsens by ``/2`` down to roughly one tile, the same rule GDAL follows for
+    COG overviews, so the display comparison between the two arms is like-for-like
+    — an arm without a pyramid makes the tile server read full-resolution chunks
+    for every zoomed-out tile (#71). An explicit integer overrides it; ``0``
+    writes the base array alone, which is the flat-store comparison, not a
+    representative GeoZarr.
 
     ``scale_offset`` switches how a packed source (one with a ``scale_factor``)
     is encoded. Off, the CF ``scale_factor``/``add_offset`` attributes are
@@ -53,6 +68,11 @@ class GeoZarrParams(BaseModel):
     ``scale_offset`` + ``cast_value`` codec chain goes into the array's codec
     pipeline: the array declares a float dtype so *every* reader gets physical
     units unambiguously, while the packed integer is what lands on disk (#54).
+
+    ``standard_name`` is the CF standard name of the quantity the pixels hold
+    (e.g. ``surface_bidirectional_reflectance``). GeoZarr requires it on a data
+    array; the dataset reader normally supplies it per component, so this is the
+    override.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -60,8 +80,9 @@ class GeoZarrParams(BaseModel):
     chunk_shape: Any = None
     shard_shape: Any = None
     codec: str = "zstd"
-    multiscale_levels: int = 0
+    multiscale_levels: Any = "auto"
     scale_offset: bool = False
+    standard_name: str | None = None
 
 
 def _spatial_pair(shape: Any, default: tuple[int, int]) -> tuple[int, int]:
@@ -83,6 +104,18 @@ def _spatial_pair(shape: Any, default: tuple[int, int]) -> tuple[int, int]:
     if len(vals) == 1:
         return (vals[0], vals[0])
     return default
+
+
+def _multiscale_depth(value: Any, shape: tuple[int, int]) -> int:
+    """Resolve the configured pyramid depth against the array's shape.
+
+    ``None`` / ``"auto"`` derives the COG-style depth from the shape; anything
+    else is an explicit level count. A depth deeper than the array can carry is
+    harmless — :func:`_levels` stops once a level would be smaller than 2 px.
+    """
+    if value is None or (isinstance(value, str) and value.strip().lower() == "auto"):
+        return ms.auto_depth(shape)
+    return max(0, int(value))
 
 
 def _fit_chunk(chunk: tuple[int, int], shape: tuple[int, int]) -> tuple[int, int]:
@@ -194,37 +227,47 @@ def _write_sharded(
     codec: str,
     crs_wkt: str = "",
     geotransform: str = "",
-    multiscale_levels: int = 0,
+    multiscale_levels: Any = "auto",
     fill_value: float | None = None,
     scale_factor: float | None = None,
     add_offset: float | None = None,
     scale_offset: bool = False,
+    standard_name: str | None = None,
 ) -> None:
-    """Write a 2D array to ``store`` as a sharded GeoZarr v3 store.
+    """Write a 2D array to ``store`` as a sharded, multiscale GeoZarr v3 store.
 
-    With no pyramid (``multiscale_levels <= 0``) the array is written under
-    :data:`DATA_VAR` at the store root. With a pyramid, each level is its own
-    integer-named group holding the array (``<level>/{DATA_VAR}``, finest at
-    ``0``), with a ``multiscales`` attribute on the root listing the level paths.
-    CRS and the GDAL geotransform travel in a CF ``spatial_ref`` grid-mapping
-    variable so a reader (rioxarray, GDAL, titiler-xarray) can georeference the
-    array. Pure ``xarray`` + ``zarr`` + ``numpy`` — no rioxarray — so it is
-    CI-testable.
+    Each pyramid level is its own integer-named group holding the array
+    (``<level>/{DATA_VAR}``, native resolution at ``0``), and the root group
+    describes the pyramid with the Zarr ``multiscales`` / ``spatial`` /
+    ``geo-proj`` conventions (see
+    :mod:`~cng_benchmark.formats.geozarr_multiscales`). Every level carries its
+    *own* affine transform, grid description and cell-centre coordinates, so a
+    reader can georeference an overview without deriving it. ``multiscale_levels
+    == 0`` degrades to the flat store — the array alone under :data:`DATA_VAR` at
+    the root, no pyramid — which is the comparison case, not the default.
+
+    Georeferencing lives in the conventions and nowhere else: no CF
+    ``spatial_ref`` grid-mapping variable, no ``grid_mapping`` attribute, and no
+    ``_ARRAY_DIMENSIONS`` (Zarr v3's own ``dimension_names`` names the axes).
+    Pure ``xarray`` + ``zarr`` + ``numpy`` — no rioxarray — so it is CI-testable.
 
     ``fill_value`` declares the no-data value, ``scale_factor`` / ``add_offset``
     the CF packing that recovers physical units (``physical = stored *
     scale_factor + add_offset``). ``scale_offset`` chooses how that packing is
     encoded — as CF attributes, or as the codec chain (see
     :class:`GeoZarrParams`) — and :func:`_data_var` / :func:`_encoding` carry it
-    out.
+    out. ``standard_name`` is the CF name of the quantity the pixels hold.
     """
     import numpy as np
     import xarray as xr
 
+    depth = _multiscale_depth(multiscale_levels, data.shape)
     # Coarsen in the *packed* domain: the fill compares exactly there, which it
     # would not after a float multiply.
-    levels = _levels(data, multiscale_levels, fill_value)
+    levels = _levels(data, depth, fill_value)
     compressors = _compressor(codec)
+    gt = ms.parse_geotransform(geotransform)
+    y_attrs, x_attrs = ms.coordinate_attrs(crs_wkt)
 
     packed_dtype = str(data.dtype)
     offset = add_offset or 0.0
@@ -255,16 +298,23 @@ def _write_sharded(
             # the un-encoded arm gets when no no-data is declared.
             array_fill = 0.0
 
-    def _grid_mapping() -> xr.DataArray:
-        ref = xr.DataArray(0).astype("int32")
-        ref.attrs.update(
-            crs_wkt=crs_wkt, spatial_ref=crs_wkt, GeoTransform=geotransform
-        )
-        return ref
+    def _level_gt(level: int) -> tuple[float, ...] | None:
+        """The geotransform of level ``level`` — the native one, coarsened."""
+        return None if gt is None else ms.decimate(gt, 2**level)
 
-    def _data_var(level_data) -> xr.DataArray:
+    def _data_var(level: int, level_data) -> xr.DataArray:
         da = xr.DataArray(level_data, dims=("y", "x"))
-        da.attrs["grid_mapping"] = "spatial_ref"
+        level_gt = _level_gt(level)
+        # The array describes its own grid, not just its parent group's: xarray
+        # drops a dataset's attributes when a variable is selected out of it, so
+        # a client holding the array alone (a tile server addressing a variable)
+        # would otherwise have nothing to georeference with.
+        if level_gt is None:
+            da.attrs.update(ms.dimensions_attrs())
+        else:
+            da.attrs.update(ms.grid_attrs(crs_wkt, level_gt, level_data.shape))
+        if standard_name:
+            da.attrs["standard_name"] = standard_name
         # Without the codec, CF packing travels as *attributes* — never as
         # xarray encoding keys, where xarray would apply the inverse transform
         # on write and overflow the int16 counts. With the codec the array
@@ -276,6 +326,18 @@ def _write_sharded(
             if add_offset is not None:
                 da.attrs["add_offset"] = add_offset
         return da
+
+    def _level_dataset(level: int, level_data) -> xr.Dataset:
+        """One pyramid level: the array, its grid description and its coordinates."""
+        ds = xr.Dataset({DATA_VAR: _data_var(level, level_data)})
+        level_gt = _level_gt(level)
+        if level_gt is not None:
+            coords = ms.level_coords(level_gt, level_data.shape)
+            if coords is not None:
+                y, x = coords
+                ds = ds.assign_coords(y=("y", y, y_attrs), x=("x", x, x_attrs))
+            ds.attrs.update(ms.grid_attrs(crs_wkt, level_gt, level_data.shape))
+        return ds
 
     def _encoding(level_data) -> dict:
         c = _fit_chunk(chunk, level_data.shape)
@@ -294,10 +356,10 @@ def _write_sharded(
             enc["_FillValue"] = array_fill
         return {DATA_VAR: enc}
 
-    if multiscale_levels <= 0:
-        ds = xr.Dataset(
-            {DATA_VAR: _data_var(levels[0]), "spatial_ref": _grid_mapping()}
-        )
+    if len(levels) == 1:
+        # Flat store: no pyramid to describe, so the array sits at the root and
+        # the root carries only its grid and CRS description.
+        ds = _level_dataset(0, levels[0])
         ds.to_zarr(
             store,
             mode="w",
@@ -307,12 +369,9 @@ def _write_sharded(
         )
         return
 
-    # Multiscale: each level is its own group "0".."N"; the root records the paths.
+    # Multiscale: each level is its own group "0".."N", native resolution at 0.
     for i, level_data in enumerate(levels):
-        ds = xr.Dataset(
-            {DATA_VAR: _data_var(level_data), "spatial_ref": _grid_mapping()}
-        )
-        ds.to_zarr(
+        _level_dataset(i, level_data).to_zarr(
             store,
             mode="w" if i == 0 else "a",
             group=str(i),
@@ -320,9 +379,12 @@ def _write_sharded(
             consolidated=False,
             encoding=_encoding(level_data),
         )
-    paths = [{"path": str(i)} for i in range(len(levels))]
-    root = xr.Dataset(attrs={"multiscales": [{"datasets": paths}]})
-    root.to_zarr(store, mode="a", zarr_format=3, consolidated=False)
+    # The root group is what declares the pyramid: which group holds each level,
+    # how it was derived, and where every level sits on the ground.
+    root_attrs = ms.group_attrs(crs_wkt, gt, [tuple(lv.shape) for lv in levels])
+    xr.Dataset(attrs=root_attrs).to_zarr(
+        store, mode="a", zarr_format=3, consolidated=False
+    )
 
 
 def _shard_data_files(store: str) -> list[str]:
@@ -332,9 +394,8 @@ def _shard_data_files(store: str) -> list[str]:
     main :data:`DATA_VAR` array's shards are the tier-judged objects, so this keeps
     files under ``.../{DATA_VAR}/c/`` — matching both the root array
     (``{DATA_VAR}/c/...``) and each multiscale level (``<level>/{DATA_VAR}/c/...``)
-    — and excludes ``zarr.json`` metadata and the scalar ``spatial_ref``
-    grid-mapping variable, which would otherwise skew the size profile and
-    ``shard_count``.
+    — and excludes ``zarr.json`` metadata and the ``x``/``y`` coordinate arrays,
+    which would otherwise skew the size profile and ``shard_count``.
     """
     marker = f"/{DATA_VAR}/c/"
     files: list[str] = []
@@ -354,6 +415,22 @@ def enumerate_store_objects(store: str) -> list[int]:
     return [os.path.getsize(p) for p in _shard_data_files(store)]
 
 
+def _overview_bytes(store: str) -> int:
+    """Return the bytes the *overview* levels occupy (everything below level 0).
+
+    The pyramid is what a zoomed-out tile is served from, and it is also what the
+    store pays for it — the same trade a COG makes with its overviews. Splitting
+    it out keeps the size comparison between the two arms readable.
+    """
+    total = 0
+    for path in _shard_data_files(store):
+        rel = os.path.relpath(path, store).replace(os.sep, "/")
+        head = rel.split("/", 1)[0]
+        if head.isdigit() and int(head) > 0:
+            total += os.path.getsize(path)
+    return total
+
+
 def _read_array_meta(store: str) -> dict:
     """Read the base array's chunk/shard shape, codec and shard count from ``store``.
 
@@ -370,13 +447,13 @@ def _read_array_meta(store: str) -> dict:
     import zarr
 
     root = zarr.open_group(store, mode="r")
-    levels = 0
     if DATA_VAR in root:
-        arr = root[DATA_VAR]
+        arrays = [root[DATA_VAR]]
     else:  # multiscale: levels live in integer-named groups
         level_keys = sorted((k for k in root.group_keys()), key=lambda k: int(k))
-        levels = max(0, len(level_keys) - 1)
-        arr = root[level_keys[0]][DATA_VAR]
+        arrays = [root[k][DATA_VAR] for k in level_keys]
+    levels = len(arrays) - 1
+    arr = arrays[0]
 
     chunk = list(arr.chunks)
     shards = list(arr.shards) if arr.shards is not None else list(arr.chunks)
@@ -408,7 +485,10 @@ def _read_array_meta(store: str) -> dict:
     except TypeError:  # an exotic cast target; fall back to the declared dtype
         stored_dtype = str(arr.dtype)
         itemsize = np.dtype(stored_dtype).itemsize
-    uncompressed_bytes = int(np.prod(arr.shape) * itemsize)
+    # Every level's raw bytes, not just the base array's: the stored size counts
+    # the whole pyramid, so a base-only baseline would report the pyramid's cost
+    # as if it were poor compression.
+    uncompressed_bytes = int(sum(int(np.prod(a.shape)) for a in arrays) * itemsize)
     return {
         "scale_offset": scale_offset,
         "stored_dtype": stored_dtype,
@@ -429,7 +509,11 @@ def describe_store_layout(store: str, name: str) -> GeoZarrLayout:
     uncompressed = meta.pop("uncompressed_bytes", 0)
     compression_ratio = uncompressed / total if total else 0.0
     return GeoZarrLayout(
-        name=name, size_bytes=total, compression_ratio=compression_ratio, **meta
+        name=name,
+        size_bytes=total,
+        compression_ratio=compression_ratio,
+        overview_bytes=_overview_bytes(store),
+        **meta,
     )
 
 
@@ -492,6 +576,11 @@ class GeoZarrAdapter(FormatAdapter):
         if add_offset == 0.0:
             add_offset = None
 
+        # Same precedence for the CF quantity name, which a source read from a
+        # CF file (SWOT's netCDF variables) already carries and a delivered
+        # GeoTIFF (MAJA, S1 RTC) does not — there the reader names it.
+        standard_name = opts.standard_name or da.attrs.get("standard_name")
+
         _write_sharded(
             target,
             data,
@@ -505,6 +594,7 @@ class GeoZarrAdapter(FormatAdapter):
             scale_factor=scale_factor,
             add_offset=add_offset,
             scale_offset=opts.scale_offset,
+            standard_name=standard_name,
         )
 
     def describe_grouping_lever(self) -> str:

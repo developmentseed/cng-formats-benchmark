@@ -131,6 +131,11 @@ class GeoZarrLayout(ObjectLayout):
     depth (the GeoZarr analogue of COG overviews) and ``shard_count`` the number of
     shard objects the array produced.
 
+    ``overview_bytes`` is how much of ``size_bytes`` the overview levels occupy.
+    Size and display are coupled through that one number: the pyramid is what
+    serves a zoomed-out tile cheaply, and it is what the store pays for it — the
+    same trade a COG makes, so quoting it keeps the size comparison honest.
+
     ``scale_offset`` records whether the ``scale_offset`` codec chain is in the
     array's pipeline — i.e. whether a reader gets physical units without knowing
     to unscale, the encoding-semantics differentiator against COG's out-of-band
@@ -148,6 +153,7 @@ class GeoZarrLayout(ObjectLayout):
     compression_ratio: float = 0.0
     scale_offset: bool = False
     stored_dtype: str = ""
+    overview_bytes: int = 0
 
 
 class GeoParquetLayout(ObjectLayout):

@@ -358,6 +358,7 @@ def _run_product(
             for key, value in (
                 ("nodata", component.nodata),
                 ("scale_factor", component.scale_factor),
+                ("standard_name", component.standard_name),
             ):
                 if value is not None:
                     convert_params.setdefault(key, value)

@@ -121,6 +121,17 @@ def test_maja_reflectance_carries_nodata_and_scale_factor():
     assert components["CLM_R1"].scale_factor is None
 
 
+def test_maja_components_name_the_quantity_they_hold():
+    # GeoZarr wants the CF quantity on the array, and the delivered GeoTIFFs
+    # name it nowhere — a reflectance band and a cloud mask are not the same
+    # kind of pixel, so the reader labels each.
+    ds = _maja(reflectance=["FRE"], bands=["B2"], masks=["CLM"])
+    components = {c.name: c for c in ds._select_members(MAJA_MEMBERS, "s3://b/s.zip")}
+
+    assert components["FRE_B2"].standard_name == "surface_bidirectional_reflectance"
+    assert components["CLM_R1"].standard_name == "quality_flag"
+
+
 def test_maja_fans_in_masks_and_both_reflectances():
     ds = _maja(
         reflectance=["FRE", "SRE"],

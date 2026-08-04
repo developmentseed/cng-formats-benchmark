@@ -148,7 +148,7 @@ name and reads what it needs, so adding a format never changes the schema:
 | Format | `params` levers |
 | --- | --- |
 | `cog` | `block_size` (internal tiling), `compress` |
-| `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels`, `scale_offset` (apply a packed source's scale in the array's codec pipeline); `display_titiler_path` selects the multidim/xarray TiTiler router for display |
+| `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels` (overview-pyramid depth, `auto` by default), `scale_offset` (apply a packed source's scale in the array's codec pipeline), `standard_name` (the CF quantity, normally supplied by the dataset reader); `display_titiler_path` selects the multidim/xarray TiTiler router for display |
 | `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` |
 | `copc` | `span` (per-node voxel-grid edge — the per-node point budget ≈ `span**3`), `max_depth` (octree depth; `null` derives it from point density), `scale` (`null` derives LAS quantisation from the extent) |
 
@@ -159,6 +159,53 @@ so it flows through the same `--source` and `--dataset` paths. `chunk_shape` /
 spatial, dims are used) and tolerate a swept list of shapes (the first is taken).
 Time-stacking the scenes into a 3D cube, and reading a set of objects as a cube,
 are deferred follow-ups.
+
+Each store carries an **overview pyramid** — the GeoZarr analogue of COG
+overviews, and the thing that makes the display comparison between the two arms
+like-for-like. `multiscale_levels: auto` (the default) coarsens by `/2` while the
+shorter side stays at or above 256 px, the same rule GDAL follows for COG
+overviews; an integer sets the depth explicitly, and `0` writes a single
+full-resolution level. A store without a pyramid makes the tile server read
+full-resolution chunks and downsample them for every zoomed-out tile, so its
+display latency measures the missing pyramid rather than the format — use `0`
+only to quantify exactly that.
+
+Every level is a child group (`0` = native resolution, `1` = /2, …) holding the
+array, its cell-centre coordinates and its **own** affine transform, so an
+overview georeferences on its own. The pyramid is described with the published
+Zarr conventions, declared in `zarr_conventions`:
+
+| Convention | What it carries |
+| --- | --- |
+| [`multiscales`](https://github.com/zarr-conventions/multiscales/blob/v0.1/README.md) | the `layout`: which group holds each level, which level it was derived from, the relative `scale`/`translation` and the `resampling_method` (`average`) |
+| [`spatial`](https://github.com/zarr-conventions/spatial/blob/v0.1/README.md) | `spatial:transform` (rasterio/affine coefficient order), `spatial:shape`, `spatial:bbox`, `spatial:dimensions`, `spatial:registration` — per level and on the group |
+| [`geo-proj`](https://github.com/zarr-conventions/proj/blob/v0.1/README.md) | the **native** CRS as `proj:code` (or `proj:wkt2`) — nothing is reprojected to web mercator |
+
+GeoZarr 0.4 is deprecated and GeoZarr v1 — which will assemble these conventions
+— has not landed, so there is no GeoZarr version to claim conformance to; the
+store is written against the published conventions directly, through
+[`zarr-cm`](https://github.com/zarr-conventions/zarr-cm), which owns each
+convention's uuid, its pinned schema URLs and its validation.
+
+The conventions are the **only** place the georeferencing lives. There is no CF
+`spatial_ref` grid-mapping variable duplicating the CRS and transform, no
+`grid_mapping` attribute pointing at one, and no `_ARRAY_DIMENSIONS` — Zarr v3
+names an array's axes in its own `dimension_names` field, which is what
+`spatial:dimensions` refers to. A reader that wants the grid reads the
+convention: [rioxarray 0.22+](https://github.com/corteva/rioxarray/releases)
+does, so `.rio.crs` / `.rio.transform()` work on any level, and so does this
+harness's own display metric, which selects tiles from `proj:code` +
+`spatial:transform`.
+
+The grid is written on the level **group and the array inside it**. The
+convention lets a group's description stand in for its arrays, but xarray drops
+a dataset's attributes when a variable is selected out of it, so a client
+holding only the array — which is what a tile server addresses — would otherwise
+have nothing to georeference with.
+
+Overviews cost bytes, the same way a COG's do. `summary.md` reports how much of
+the stored size the pyramid accounts for, so the size and display numbers can be
+read together rather than separately.
 
 `scale_offset` decides how a **packed** source — one whose values are counts to be
 multiplied by a scale, like Sentinel-2 MAJA reflectance (DN = reflectance × 10000)
@@ -278,8 +325,9 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
     `summary.md` renders a "Tiling layout" table + a tiled/striped count.
   - `geozarr` → a `GeoZarrLayout`: `chunk_shape` (addressable unit),
     `shard_shape` (stored object), `chunks_per_shard`, `codec`,
-    `multiscale_levels`, `shard_count`; `summary.md` renders a "Chunk/shard
-    layout" table + a shard-object count.
+    `multiscale_levels` (the realised pyramid depth), `overview_bytes` (how much
+    of the size the pyramid accounts for), `shard_count`; `summary.md` renders a
+    "Chunk/shard layout" table + a shard-object count.
   - `geoparquet` → a `GeoParquetLayout`: `geometry_column`, `num_rows`,
     `num_row_groups`, `row_group_rows` (the addressable unit a bbox query fetches),
     and `has_bbox_covering` (whether spatial pushdown to row groups is possible).
