@@ -321,3 +321,165 @@ def test_convert_omits_the_identity_scale_of_an_unpacked_source(tmp_path):
     arr = zarr.open_group(target, mode="r")[DATA_VAR]
     assert "scale_factor" not in arr.attrs
     assert "add_offset" not in arr.attrs
+
+
+# --- scale_offset codec arm (#54) -------------------------------------------
+
+
+def _packed_store(tmp_path, name, **kw):
+    """A store from int16 counts (1234 DN) with -10000 fill in the first column."""
+    store = str(tmp_path / name)
+    data = np.full((256, 256), 1234, dtype="int16")
+    data[:, :64] = -10000
+    _write_sharded(
+        store,
+        data,
+        chunk=(128, 128),
+        shard=(256, 256),
+        codec="zstd",
+        fill_value=-10000.0,
+        scale_factor=1e-4,
+        **kw,
+    )
+    return store
+
+
+def test_scale_offset_codec_lands_in_the_array_pipeline(tmp_path):
+    import zarr
+
+    store = _packed_store(tmp_path, "codec.zarr", scale_offset=True)
+    arr = zarr.open_group(store, mode="r")[DATA_VAR]
+
+    names = [f.to_dict()["name"] for f in arr.filters]
+    assert names == ["scale_offset", "cast_value"]
+    # The array declares physical units; the packed integer is what is stored.
+    assert arr.dtype == np.dtype("float32")
+    assert arr.filters[1].to_dict()["configuration"]["data_type"] == "int16"
+
+
+def test_scale_offset_gives_every_reader_physical_units(tmp_path):
+    # The point of #54: a plain zarr reader — no CF decoding — already sees
+    # reflectance, where the attribute arm hands back a raw count to unscale.
+    import zarr
+
+    codec = zarr.open_group(_packed_store(tmp_path, "c.zarr", scale_offset=True))
+    attrs = zarr.open_group(_packed_store(tmp_path, "a.zarr", scale_offset=False))
+
+    assert codec[DATA_VAR][0, 100] == pytest.approx(0.1234, abs=1e-6)
+    assert attrs[DATA_VAR][0, 100] == 1234
+
+
+def test_scale_offset_omits_the_cf_scale_attributes(tmp_path):
+    # The codec already unpacks; a CF reader applying scale_factor on top would
+    # scale a second time.
+    import zarr
+
+    arr = zarr.open_group(_packed_store(tmp_path, "codec.zarr", scale_offset=True))[
+        DATA_VAR
+    ]
+    assert "scale_factor" not in arr.attrs
+    assert "add_offset" not in arr.attrs
+
+
+def test_scale_offset_states_the_fill_in_physical_units(tmp_path):
+    import zarr
+
+    arr = zarr.open_group(_packed_store(tmp_path, "codec.zarr", scale_offset=True))[
+        DATA_VAR
+    ]
+    # -10000 DN x 1/10000 = -1.0 reflectance.
+    assert arr.fill_value == pytest.approx(-1.0)
+    assert arr[0, 0] == pytest.approx(-1.0)
+
+
+def test_scale_offset_round_trips_the_full_dn_range(tmp_path):
+    import zarr
+
+    store = str(tmp_path / "rt.zarr")
+    probe = np.arange(-10000, 10001, 7, dtype="int16")
+    data = np.zeros((256, 256), dtype="int16")
+    data.flat[: probe.size] = probe
+    _write_sharded(
+        store,
+        data,
+        chunk=(256, 256),
+        shard=(256, 256),
+        codec="zstd",
+        scale_factor=1e-4,
+        scale_offset=True,
+    )
+    back = zarr.open_group(store, mode="r")[DATA_VAR][:]
+    recovered = np.rint(back.astype("float64") / 1e-4).astype("int16")
+    assert np.array_equal(recovered.flat[: probe.size], probe)
+
+
+def test_scale_offset_keeps_the_stored_size_and_ratio_comparable(tmp_path):
+    # The codec must not inflate the payload: the declared dtype is float32 but
+    # int16 reaches disk, so the size and compression ratio stay comparable with
+    # the COG arm. Sizing "uncompressed" off the declared dtype would double it.
+    codec = describe_store_layout(
+        _packed_store(tmp_path, "c.zarr", scale_offset=True), "c"
+    )
+    attrs = describe_store_layout(
+        _packed_store(tmp_path, "a.zarr", scale_offset=False), "a"
+    )
+
+    assert codec.scale_offset is True
+    assert attrs.scale_offset is False
+    assert codec.stored_dtype == "int16"
+    assert attrs.stored_dtype == "int16"
+    assert codec.size_bytes == attrs.size_bytes
+    assert codec.compression_ratio == pytest.approx(attrs.compression_ratio)
+
+
+def test_scale_offset_without_a_scale_factor_is_a_no_op(tmp_path):
+    import zarr
+
+    store = str(tmp_path / "noscale.zarr")
+    _write_sharded(
+        store,
+        np.full((256, 256), 7, dtype="int16"),
+        chunk=(128, 128),
+        shard=(256, 256),
+        codec="zstd",
+        scale_offset=True,
+    )
+    arr = zarr.open_group(store, mode="r")[DATA_VAR]
+    assert arr.dtype == np.dtype("int16")
+    assert not arr.filters
+
+
+def test_scale_offset_multiscale_coarsens_without_the_fill(tmp_path):
+    import zarr
+
+    store = _packed_store(tmp_path, "pyr.zarr", scale_offset=True, multiscale_levels=1)
+    level1 = zarr.open_group(store, mode="r")["1"][DATA_VAR]
+    assert level1[0, 100] == pytest.approx(0.1234, abs=1e-6)
+    assert level1[0, 0] == pytest.approx(-1.0)  # an all-fill block stays fill
+
+
+def test_convert_honours_the_scale_offset_param(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    source = str(tmp_path / "src.tif")
+    _write_source(source)
+
+    target = str(tmp_path / "out.zarr")
+    GeoZarrAdapter().convert(
+        source,
+        target,
+        {
+            "chunk_shape": [128, 128],
+            "shard_shape": [256, 256],
+            "nodata": -10000.0,
+            "scale_factor": 1e-4,
+            "scale_offset": True,
+        },
+    )
+    arr = zarr.open_group(target, mode="r")[DATA_VAR]
+    assert [f.to_dict()["name"] for f in arr.filters] == ["scale_offset", "cast_value"]
+    assert arr[0, 0] == pytest.approx(0.1234, abs=1e-6)

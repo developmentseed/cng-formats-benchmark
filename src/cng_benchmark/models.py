@@ -130,6 +130,12 @@ class GeoZarrLayout(ObjectLayout):
     object size into a storage tier. ``multiscale_levels`` is the overview-pyramid
     depth (the GeoZarr analogue of COG overviews) and ``shard_count`` the number of
     shard objects the array produced.
+
+    ``scale_offset`` records whether the ``scale_offset`` codec chain is in the
+    array's pipeline — i.e. whether a reader gets physical units without knowing
+    to unscale, the encoding-semantics differentiator against COG's out-of-band
+    scale metadata. ``stored_dtype`` is the dtype that actually reaches disk,
+    which differs from the array's declared dtype exactly when that chain is on.
     """
 
     kind: Literal["geozarr"] = "geozarr"
@@ -140,6 +146,8 @@ class GeoZarrLayout(ObjectLayout):
     multiscale_levels: int
     shard_count: int
     compression_ratio: float = 0.0
+    scale_offset: bool = False
+    stored_dtype: str = ""
 
 
 class GeoParquetLayout(ObjectLayout):

@@ -33,6 +33,15 @@ params:
   shard_shape: [2048, 2048]
   codec: zstd
   multiscale_levels: 0
+  # Encode MAJA's reflectance quantification (DN = reflectance x 10000) in the
+  # array's own codec pipeline (`scale_offset` + `cast_value`) instead of leaving
+  # it as side metadata. The array then reads back as physical reflectance for
+  # *any* Zarr client, while the int16 count is still what occupies the shard —
+  # so the sizes stay comparable with the COG arm, where the same scale is
+  # out-of-band metadata a client has to find and apply. This is the
+  # encoding-semantics differentiator the study demonstrates (#54). It is a no-op
+  # for the masks, which carry no scale.
+  scale_offset: true
   scope: product-set     # product (one scene) | product-set (many)
   products:
     prefix: ""

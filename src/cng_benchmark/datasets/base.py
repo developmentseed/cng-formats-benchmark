@@ -50,6 +50,10 @@ class SourceObject:
     stored as ``int16`` DN with -10000 as fill and a 1/10000 quantification —
     because the delivered rasters declare neither in their headers. ``None``
     means "whatever the source declares".
+
+    Both describe what the pixels *are*, not how to write them: how a target
+    format encodes the scale is an arm-level choice, carried in the benchmark's
+    format params (e.g. GeoZarr's ``scale_offset``), not here.
     """
 
     name: str

@@ -45,6 +45,14 @@ class GeoZarrParams(BaseModel):
     ``block_size``. ``codec`` is the per-chunk compressor (``zstd`` default;
     ``none`` for raw). ``multiscale_levels`` is the overview-pyramid depth (0 = the
     base array only).
+
+    ``scale_offset`` switches how a packed source (one with a ``scale_factor``)
+    is encoded. Off, the CF ``scale_factor``/``add_offset`` attributes are
+    written and the array still reads back as the raw stored count — a client
+    has to know to unscale, the same fragmented situation COG is in. On, the
+    ``scale_offset`` + ``cast_value`` codec chain goes into the array's codec
+    pipeline: the array declares a float dtype so *every* reader gets physical
+    units unambiguously, while the packed integer is what lands on disk (#54).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -53,6 +61,7 @@ class GeoZarrParams(BaseModel):
     shard_shape: Any = None
     codec: str = "zstd"
     multiscale_levels: int = 0
+    scale_offset: bool = False
 
 
 def _spatial_pair(shape: Any, default: tuple[int, int]) -> tuple[int, int]:
@@ -114,6 +123,31 @@ def _compressor(name: str):
     return table[key]()
 
 
+#: The float dtype a scale_offset-encoded array declares. float32 holds a 16-bit
+#: packed count times its scale without loss, so the round-trip is exact.
+_UNPACKED_DTYPE = "float32"
+
+
+def _scale_offset_filters(scale_factor: float, add_offset: float, stored_dtype: str):
+    """Return the ``scale_offset`` + ``cast_value`` chain for a CF-packed array.
+
+    CF says ``physical = stored * scale_factor + add_offset``. Zarr's
+    ``scale_offset`` codec encodes ``(value - offset) * scale``, so the CF scale
+    inverts to ``scale = 1 / scale_factor`` (the same mapping EOPF's
+    ``scale_offset_from_cf`` uses). That codec alone cannot change the dtype —
+    the spec requires it to use "the arithmetic semantics of the input array's
+    data type" — so ``cast_value`` is chained after it to put the packed integer
+    on disk. Together they are the modern replacement for the legacy
+    ``numcodecs.fixedscaleoffset`` ``astype``.
+    """
+    from zarr.codecs import CastValue, ScaleOffset
+
+    return [
+        ScaleOffset(offset=add_offset, scale=1.0 / scale_factor),
+        CastValue(data_type=stored_dtype),
+    ]
+
+
 def _levels(data, n_levels: int, fill_value: float | None = None) -> list:
     """Return the multiscale pyramid: the base array plus ``n_levels`` coarsenings.
 
@@ -164,6 +198,7 @@ def _write_sharded(
     fill_value: float | None = None,
     scale_factor: float | None = None,
     add_offset: float | None = None,
+    scale_offset: bool = False,
 ) -> None:
     """Write a 2D array to ``store`` as a sharded GeoZarr v3 store.
 
@@ -178,13 +213,47 @@ def _write_sharded(
 
     ``fill_value`` declares the no-data value, ``scale_factor`` / ``add_offset``
     the CF packing that recovers physical units (``physical = stored *
-    scale_factor + add_offset``) — see :func:`_data_var` and :func:`_encoding`
-    for how each is written.
+    scale_factor + add_offset``). ``scale_offset`` chooses how that packing is
+    encoded — as CF attributes, or as the codec chain (see
+    :class:`GeoZarrParams`) — and :func:`_data_var` / :func:`_encoding` carry it
+    out.
     """
+    import numpy as np
     import xarray as xr
 
+    # Coarsen in the *packed* domain: the fill compares exactly there, which it
+    # would not after a float multiply.
     levels = _levels(data, multiscale_levels, fill_value)
     compressors = _compressor(codec)
+
+    packed_dtype = str(data.dtype)
+    offset = add_offset or 0.0
+    use_codec = scale_offset and scale_factor is not None
+    filters = None
+    array_fill = fill_value
+
+    if use_codec:
+        # Re-express the counts as physical floats and let the codec chain pack
+        # them back down on write, so the array *declares* physical units while
+        # the packed integer is what occupies the shard.
+        def _physical(arr):
+            return (arr.astype(_UNPACKED_DTYPE) * scale_factor + offset).astype(
+                _UNPACKED_DTYPE
+            )
+
+        levels = [np.ascontiguousarray(_physical(level)) for level in levels]
+        filters = _scale_offset_filters(scale_factor, offset, packed_dtype)
+        if fill_value is not None:
+            # Zarr returns `fill_value` verbatim for an unwritten chunk — it does
+            # not travel through the codecs — so it has to be stated in the
+            # array's declared (physical) units, via the same expression as the
+            # data so the two match exactly.
+            array_fill = float(_physical(np.array([fill_value], dtype=packed_dtype))[0])
+        else:
+            # A float array defaults to a NaN fill, which `cast_value` cannot
+            # cast down to the packed integer dtype. Pin it to 0 — the same fill
+            # the un-encoded arm gets when no no-data is declared.
+            array_fill = 0.0
 
     def _grid_mapping() -> xr.DataArray:
         ref = xr.DataArray(0).astype("int32")
@@ -196,29 +265,33 @@ def _write_sharded(
     def _data_var(level_data) -> xr.DataArray:
         da = xr.DataArray(level_data, dims=("y", "x"))
         da.attrs["grid_mapping"] = "spatial_ref"
-        # CF packing travels as *attributes*, never as xarray encoding keys: in
-        # encoding, xarray applies the inverse transform on write (dividing the
-        # stored integers by scale_factor), which overflows an int16 DN array.
-        # As attributes the DNs are stored verbatim — byte-comparable with the
-        # COG arm — and a CF reader still recovers physical units. The GeoZarr
-        # spec recommends exactly these CF attributes.
-        if scale_factor is not None:
-            da.attrs["scale_factor"] = scale_factor
-        if add_offset is not None:
-            da.attrs["add_offset"] = add_offset
+        # Without the codec, CF packing travels as *attributes* — never as
+        # xarray encoding keys, where xarray would apply the inverse transform
+        # on write and overflow the int16 counts. With the codec the array
+        # already reads back physical, so emitting them too would make a CF
+        # reader scale a second time.
+        if not use_codec:
+            if scale_factor is not None:
+                da.attrs["scale_factor"] = scale_factor
+            if add_offset is not None:
+                da.attrs["add_offset"] = add_offset
         return da
 
     def _encoding(level_data) -> dict:
         c = _fit_chunk(chunk, level_data.shape)
         s = _fit_shard(shard, c, level_data.shape)
         enc: dict = {"chunks": c, "shards": s, "compressors": compressors}
+        if filters is not None:
+            enc["filters"] = filters
+        # The two are not interchangeable: `fill_value` is the Zarr v3 array fill
+        # in zarr.json (what an unwritten chunk reads as), `_FillValue` the CF
+        # attribute a reader actually masks on. Declaring only the former leaves
+        # the no-data invisible to xarray/rioxarray/GDAL — and declaring the
+        # latter when the source named no no-data would mask valid zeros.
+        if array_fill is not None:
+            enc["fill_value"] = array_fill
         if fill_value is not None:
-            # Both halves are needed: `fill_value` is the Zarr v3 array fill in
-            # zarr.json, `_FillValue` the CF attribute a reader actually masks
-            # on. Setting only the former leaves the no-data undeclared to
-            # xarray/rioxarray/GDAL.
-            enc["fill_value"] = fill_value
-            enc["_FillValue"] = fill_value
+            enc["_FillValue"] = array_fill
         return {DATA_VAR: enc}
 
     if multiscale_levels <= 0:
@@ -287,6 +360,12 @@ def _read_array_meta(store: str) -> dict:
     Opens the store's finest array (the root array, or group ``0`` for a multiscale
     store) and reports its chunk grid, shard grid (chunks-per-shard), the configured
     compressor name, and the number of shard objects across the whole store.
+
+    Also reports whether the ``scale_offset`` codec chain is active and which
+    dtype actually reaches disk. That distinction matters for the compression
+    ratio: a scale_offset array *declares* float32 but stores the packed integer,
+    so sizing "uncompressed" from the declared dtype would double the baseline
+    and flatter the ratio against the COG arm.
     """
     import zarr
 
@@ -309,8 +388,30 @@ def _read_array_meta(store: str) -> dict:
     codec = "none"
     for c in getattr(arr, "compressors", ()) or ():
         codec = type(c).__name__.replace("Codec", "").lower() or codec
-    uncompressed_bytes = int(np.prod(arr.shape) * np.dtype(str(arr.dtype)).itemsize)
+
+    # `filters` are the array-to-array codecs: scale_offset unpacks, cast_value
+    # names the dtype that reaches disk. Read them through `to_dict()` — the
+    # on-disk spec form — rather than off the instances, whose attribute names
+    # and dtype objects are zarr-internal.
+    scale_offset = False
+    stored_dtype = str(arr.dtype)
+    for f in getattr(arr, "filters", ()) or ():
+        spec = f.to_dict() if hasattr(f, "to_dict") else {}
+        name = spec.get("name", "")
+        if name == "scale_offset":
+            scale_offset = True
+        elif name == "cast_value":
+            cast_to = spec.get("configuration", {}).get("data_type")
+            stored_dtype = str(cast_to) if cast_to else stored_dtype
+    try:
+        itemsize = np.dtype(stored_dtype).itemsize
+    except TypeError:  # an exotic cast target; fall back to the declared dtype
+        stored_dtype = str(arr.dtype)
+        itemsize = np.dtype(stored_dtype).itemsize
+    uncompressed_bytes = int(np.prod(arr.shape) * itemsize)
     return {
+        "scale_offset": scale_offset,
+        "stored_dtype": stored_dtype,
         "chunk_shape": chunk,
         "shard_shape": shards,
         "chunks_per_shard": int(chunks_per_shard),
@@ -403,6 +504,7 @@ class GeoZarrAdapter(FormatAdapter):
             fill_value=fill_value,
             scale_factor=scale_factor,
             add_offset=add_offset,
+            scale_offset=opts.scale_offset,
         )
 
     def describe_grouping_lever(self) -> str:
