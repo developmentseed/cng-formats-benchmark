@@ -1,0 +1,29 @@
+# Example fan-out benchmark: Sentinel-1 RTC (gamma0) as COG, matched-codec arm (#72).
+#
+# Identical to example_sentinel1_rtc_cog.yaml except for `codec: zstd`. Run
+# alongside example_sentinel1_rtc_geozarr.yaml (also zstd) so the S1 side of the
+# GeoZarr-vs-COG size gap is attributable to the format/overviews, not a codec
+# mismatch — the same pairing as the S2 MAJA arms. Keep the deflate config as
+# the baseline.
+id: example-sentinel1-rtc-cog-zstd
+dataset: example-sentinel1-rtc
+formats:
+  - cog
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: warm
+    min_object_bytes: 33554432    # 32 MiB
+  - name: cold
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  block_size: 512
+  codec: zstd                     # matched against the GeoZarr arm's codec
+  scope: product-set              # one scene (product) | many (product-set)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1                       # sample one component per product for read
