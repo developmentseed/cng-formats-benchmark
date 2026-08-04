@@ -528,6 +528,19 @@ def test_a_rotated_grid_skips_coordinates_but_keeps_its_transform(tmp_path):
     assert group.attrs["spatial:transform"] == [10.0, 2.0, x0, 3.0, -10.0, y0]
 
 
+def test_bbox_bounds_a_rotated_grid_by_all_four_corners():
+    # A sheared grid's other diagonal can fall outside the box the first one
+    # makes, so bounding by two corners understates the extent. Here the corner
+    # at (0, h) is the southernmost and (w, 0) the northernmost — neither is on
+    # the (0,0)–(w,h) diagonal.
+    gt = (300000.0, 10.0, 2.0, 4900020.0, 3.0, -10.0)
+
+    assert ms.bounds(gt, (256, 256)) == [300000.0, 4897460.0, 303072.0, 4900788.0]
+    # An unrotated grid is unaffected: the diagonal already bounds it.
+    north_up = (300000.0, 10.0, 0.0, 4900020.0, 0.0, -10.0)
+    assert ms.bounds(north_up, (256, 256)) == [300000.0, 4897460.0, 302560.0, 4900020.0]
+
+
 def test_overview_bytes_account_for_the_pyramid_alone(tmp_path):
     # Overviews cost bytes, the same way a COG's do; the report quotes this to
     # keep the size story readable next to the display one.

@@ -107,11 +107,17 @@ def spatial_transform(gt: tuple[float, ...]) -> list[float]:
 
 
 def bounds(gt: tuple[float, ...], shape: tuple[int, int]) -> list[float]:
-    """Return the ``[xmin, ymin, xmax, ymax]`` extent of an array of ``shape``."""
+    """Return the ``[xmin, ymin, xmax, ymax]`` extent of an array of ``shape``.
+
+    All four corners are projected, not just the two on one diagonal: when the
+    transform is rotated or sheared the other two can fall outside that
+    diagonal's box, and ``spatial:bbox`` is meant to be the axis-aligned extent.
+    """
     c, a, b, f, d, e = gt
     h, w = int(shape[0]), int(shape[1])
-    xs = (c, c + w * a + h * b)
-    ys = (f, f + w * d + h * e)
+    corners = ((0, 0), (w, 0), (0, h), (w, h))
+    xs = [c + col * a + row * b for col, row in corners]
+    ys = [f + col * d + row * e for col, row in corners]
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
