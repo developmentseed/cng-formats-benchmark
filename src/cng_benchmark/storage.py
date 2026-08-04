@@ -66,6 +66,19 @@ def to_gdal_path(uri: str) -> str:
     return uri
 
 
+def from_gdal_path(path: str) -> str:
+    """Map a GDAL path back to its URI — the inverse of :func:`to_gdal_path`.
+
+    ``/vsis3/bucket/key`` becomes ``s3://bucket/key``; anything else (a local
+    path, an ``s3://`` URI already) is passed through. Used where a library that
+    is not GDAL must open the source the runner has already mapped for GDAL — a
+    LAS/LAZ tile read with laspy, which needs a local, seekable file.
+    """
+    if path.startswith("/vsis3/"):
+        return "s3://" + path[len("/vsis3/") :]
+    return path
+
+
 @dataclass(frozen=True)
 class S3Profile:
     """Per-role S3 connection settings resolved from the environment."""

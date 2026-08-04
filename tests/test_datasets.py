@@ -37,6 +37,7 @@ def test_builtin_readers_registered():
         "swot-raster100m",
         "swot-lakesp-prior",
         "swot-pixc",
+        "co3d-cars",
     ):
         assert name in DATASETS
 
@@ -514,6 +515,77 @@ def test_pixc_enumerates_granules_from_local_files(tmp_path):
     assert [c.name for c in products[0].components] == ["pixel_cloud"]
     uri = products[0].components[0].uri
     assert uri.startswith("PIXC:") and uri.endswith(".nc::pixel_cloud")
+
+
+# --- CO3D CARS (tiled-LAZ point-cloud delivery) -----------------------------
+
+
+def _cars_tiles(root, tiles, suffix=".laz"):
+    """Stage a synthetic CARS tile set (empty files — only names are enumerated)."""
+    for tile in tiles:
+        path = root / f"{tile}{suffix}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+
+def test_cars_tiles_are_the_components_of_one_delivery(tmp_path):
+    root = tmp_path / "CO3D_CARS"
+    _cars_tiles(root, ["0_0", "0_1", "1_0"])
+    (root / "metadata.json").write_bytes(b"{}")  # non-tile sibling ignored
+
+    products = build_dataset(
+        _dataset_config(reader="co3d-cars", source=str(root))
+    ).products()
+
+    # The product is the tile *set*, not one granule: one product, one component
+    # per tile, the tile identity kept in the name so sizes are profiled per tile.
+    assert [p.id for p in products] == ["CO3D_CARS"]
+    assert [c.name for c in products[0].components] == ["0_0", "0_1", "1_0"]
+    assert products[0].components[0].uri == str(root / "0_0.laz")
+
+
+def test_cars_groups_tiles_into_one_product_per_delivery(tmp_path):
+    root = tmp_path / "CO3D"
+    _cars_tiles(root, ["pairA/point_cloud/0_0", "pairA/point_cloud/0_1"])
+    _cars_tiles(root, ["pairB/point_cloud/0_0"])
+
+    ds = build_dataset(_dataset_config(reader="co3d-cars", source=str(root)))
+    products = ds.products()
+    assert [p.id for p in products] == [
+        "pairA_point_cloud",
+        "pairB_point_cloud",
+    ]
+    assert [c.name for c in products[0].components] == ["0_0", "0_1"]
+
+    # prefix + limit bound the *product* set, as in the granule readers — a tile
+    # listing bound would truncate a delivery mid-way and profile a partial set.
+    assert [p.id for p in ds.products(prefix="pairB")] == ["pairB_point_cloud"]
+    assert [p.id for p in ds.products(limit=1)] == ["pairA_point_cloud"]
+    assert len(ds.products(limit=1)[0].components) == 2
+
+
+def test_cars_tile_suffix_selects_an_uncompressed_staging(tmp_path):
+    root = tmp_path / "CO3D_CARS"
+    _cars_tiles(root, ["0_0"], suffix=".las")
+    _cars_tiles(root, ["0_1"], suffix=".laz")
+
+    cfg = _dataset_config(
+        reader="co3d-cars", source=str(root), options={"tile_suffix": ".las"}
+    )
+    products = build_dataset(cfg).products()
+    assert [c.name for c in products[0].components] == ["0_0"]
+
+
+def test_cars_rejects_a_suffix_the_point_loader_cannot_read(tmp_path):
+    with pytest.raises(ValidationError):
+        build_dataset(
+            _dataset_config(reader="co3d-cars", options={"tile_suffix": ".tif"})
+        )
+
+
+def test_cars_rejects_unknown_option():
+    with pytest.raises(ValidationError):
+        build_dataset(_dataset_config(reader="co3d-cars", options={"bogus": 1}))
 
 
 def test_zip_delivery_enumerates_scenes_from_local_zips(tmp_path):

@@ -57,6 +57,7 @@ one registry line; the core config and runner are untouched.
 | `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`) |
 | `swot-lakesp-prior` | a `.zip`-per-pass shapefile delivery under `source` (SWOT L2 HR LakeSP Prior) | none (one `.shp` member = one component) |
 | `swot-pixc` | one netCDF point-cloud granule per file under `source` (SWOT L2 HR PIXC) | `groups` (default `pixel_cloud`); `point_variables` (allow-list of carried point vars; default all) / `exclude_variables` (deny-list) |
+| `co3d-cars` | a tiled-LAZ delivery under `source` (CO3D CARS) — one product per delivery directory, one component per tile | `tile_suffix` (default `.laz`) |
 
 ```yaml
 id: sentinel2-l2a-maja
@@ -101,8 +102,22 @@ allows it (so the produced size is a like-for-like basis for comparison, not a
 geometry-only fraction). `point_variables` (allow-list) and `exclude_variables`
 (deny-list) choose the carried set; the default carries every point-dimensioned
 variable. A variable whose name collides with a reserved LAS dimension (e.g.
-`classification`) is carried under a suffixed name. The COPC adapter and this
-point-cloud path are reused by the CO3D CARS arm (tiled LAZ → COPC).
+`classification`) is carried under a suffixed name.
+
+The `co3d-cars` reader reuses that point-cloud path from the other side. The CARS
+pipeline delivers its cloud as **tiled LAZ** — one file per ground tile — so the
+*product* is a set of tiles, not a single granule: tiles are grouped into products
+by the directory holding them (one delivery = one product), and each tile becomes
+one component keeping the tile identity in its name, so the run's object-size
+distribution is **per tile**. `prefix`/`pattern`/`limit` bound the product set, as
+in the granule readers — narrow a large root with `prefix`, since a bound on the
+tile listing would truncate a delivery mid-way. Each tile is converted to one COPC
+by the same adapter, whose loader reads the tile with laspy and carries the rest of
+its point record (colour, intensity, the tile's own extra dimensions) as LAS extra
+dimensions, so the comparison is like-for-like here too. A single tile is far
+smaller than a PIXC granule and may sit below Tier 2, so the open question this arm
+answers is whether the grouping lever is the octree node budget *inside* one tile
+(what this reader measures) or *merging* tiles into one COPC.
 
 ## Benchmark descriptor
 
