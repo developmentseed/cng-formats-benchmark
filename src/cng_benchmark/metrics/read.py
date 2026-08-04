@@ -365,9 +365,7 @@ def _copc_handle(uri: str, role: str):
     return uri
 
 
-def _random_boxes(
-    mins: list[float], maxs: list[float], count: int, rng: random.Random
-):
+def _random_boxes(mins: list[float], maxs: list[float], count: int, rng: random.Random):
     """Return ``count`` random 3D ``laspy.copc.Bounds`` (full Z, random X–Y).
 
     Each box keeps the footprint a grid cell would (``extent / sqrt(count)`` per
