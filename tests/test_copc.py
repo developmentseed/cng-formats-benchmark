@@ -123,8 +123,10 @@ def test_octree_node_read_metric_round_trips(tmp_path):
     metrics = {m.name: m for m in measure_copc_read(target, role="sink", queries=4)}
     assert metrics["read_query_count"].value == 4
     assert metrics["read_latency_mean"].value >= 0
-    # The grid of boxes tiles the full extent, so every point is fetched in total.
-    assert metrics["read_decoded_throughput"].detail["points"] == 40_000
+    assert metrics["read_latency_spread"].value >= 0
+    # Random (seeded) boxes keep the grid's per-box footprint but overlap/gap
+    # differently, so the total is no longer an exact full-extent tiling.
+    assert 0 < metrics["read_decoded_throughput"].detail["points"] <= 40_000 * 4
 
 
 def _pixc_netcdf(tmp_path, n=20_000, *, nan_first=False):
