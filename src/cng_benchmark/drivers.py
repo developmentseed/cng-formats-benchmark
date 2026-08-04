@@ -84,6 +84,9 @@ REQUIRED: tuple[Capability, ...] = (
     Capability(
         "swot-pixc", PYTHON, "h5netcdf", "read the PIXC pixel_cloud netCDF group"
     ),
+    Capability(
+        "co3d-cars", PYTHON, "lazrs", "read the CARS LAZ tiles (laspy's LAZ backend)"
+    ),
 )
 
 

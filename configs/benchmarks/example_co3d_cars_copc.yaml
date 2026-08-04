@@ -1,0 +1,39 @@
+# Example benchmark arm: CO3D CARS -> COPC.
+#
+# The fourth scoped mission, reusing the SWOT-C point-cloud path (tiled LAZ →
+# COPC). One CARS delivery is one product whose components are its tiles, so the
+# fan-out is over *tiles* and the object-size profile is the per-tile
+# distribution against the tiers — unlike the granule arms, where the fan-out is
+# over granules. The `read` metric is an octree-node spatial query (partial
+# access), NOT a raster window, and there is NO `display` metric (a point cloud is
+# not a TiTiler raster tile).
+#
+# Run with `--dataset configs/datasets/example_co3d_cars.yaml` (chart:
+# runner.datasetFile). `output` is supplied by the deployment.
+id: example-co3d-cars-copc
+dataset: example-co3d-cars
+formats:
+  - copc
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # The COPC octree is the per-tile grouping lever: `span` is the per-node voxel
+  # grid (per-node point budget ≈ span**3) and `max_depth` bounds the octree
+  # depth (null = derive from point density). A CARS tile is far smaller than a
+  # PIXC granule, so unlike SWOT-C the tier verdict is genuinely open — the run
+  # records whether a tile clears Tier 2 on its own.
+  span: 128
+  max_depth: null
+  scope: product         # one delivery; its tiles are the components
+  products:
+    prefix: ""
+    limit: 1
+  samples:
+    read: 1

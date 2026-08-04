@@ -257,6 +257,77 @@ def test_render_copc_lod_writes_png(tmp_path):
     assert os.path.getsize(out) > 0
 
 
+def _cars_tile(tmp_path, name="0_0.laz", n=20_000):
+    """Write a synthetic CARS tile: geometry + colour + a CARS-style extra dim."""
+    import laspy
+
+    x, y, z = _cloud(n)
+    rng = np.random.default_rng(11)
+    # Point format 3 carries RGB — CARS colours its cloud from the source image.
+    header = laspy.LasHeader(point_format=3)
+    header.add_extra_dim(laspy.ExtraBytesParams(name="confidence", type=np.float32))
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = x, y, z
+    las.intensity = rng.integers(0, 4000, n).astype("uint16")
+    las.red = rng.integers(0, 65535, n).astype("uint16")
+    las.green = rng.integers(0, 65535, n).astype("uint16")
+    las.blue = rng.integers(0, 65535, n).astype("uint16")
+    las.confidence = rng.uniform(0, 1, n).astype("float32")
+    tile = str(tmp_path / name)
+    las.write(tile)
+    return tile
+
+
+def test_convert_carries_a_cars_tile_point_record(tmp_path):
+    # The CO3D CARS arm: a delivered LAZ tile → one COPC, reusing the PIXC
+    # adapter path. The conversion is content-complete — the tile's colour,
+    # intensity and its own extra dimensions travel with the geometry, so the
+    # produced object's size is a like-for-like basis for comparison with the
+    # source tile, not a geometry-only fraction.
+    from cng_benchmark.formats.copc import CopcAdapter
+
+    n = 20_000
+    tile = _cars_tile(tmp_path, n=n)
+    target = str(tmp_path / "out.copc.laz")
+    CopcAdapter().convert(tile, target, {"span": 32, "max_depth": 4})
+
+    ly = describe_copc_layout(target, "0_0")
+    assert ly.point_count == n
+    carried = set(ly.extra_dimensions)
+    assert {"red", "green", "blue", "confidence"} <= carried
+    # 'intensity' and 'classification' collide with standard dimensions of the
+    # target point format, so the writer suffixes them.
+    assert "intensity_1" in carried
+    # The raw scaled-integer geometry is not carried twice.
+    assert carried.isdisjoint({"X", "Y", "Z"})
+
+
+def test_cars_tile_values_round_trip(tmp_path):
+    import laspy
+
+    from cng_benchmark.formats.copc import CopcAdapter
+
+    tile = _cars_tile(tmp_path, name="1_0.laz", n=5_000)
+    source = laspy.read(tile)
+    target = str(tmp_path / "rt.copc.laz")
+    CopcAdapter().convert(tile, target, {"span": 16, "max_depth": 4})
+
+    back = laspy.CopcReader.open(target).query()
+    # Pair source and produced points by their (unique) confidence value: the
+    # octree reorders points, so compare per point, not by position.
+    order = np.argsort(np.asarray(back.confidence))
+    expected = np.argsort(np.asarray(source.confidence))
+    assert np.array_equal(np.asarray(back.red)[order], np.asarray(source.red)[expected])
+    assert np.array_equal(
+        np.asarray(back.intensity_1)[order], np.asarray(source.intensity)[expected]
+    )
+    # The geometry survives the octree's own coordinate quantisation (the COPC is
+    # written on a scale derived from the cloud extent, not the tile's 0.01 step).
+    assert np.allclose(
+        np.sort(np.asarray(back.z)), np.sort(np.asarray(source.z)), atol=1e-4
+    )
+
+
 def test_object_size_resolves_pixc_scheme(tmp_path):
     # The point-cloud component URI wraps the granule; object_size sizes the
     # underlying granule so the write metric records bytes_in for the PIXC arm.
