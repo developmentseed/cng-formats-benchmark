@@ -179,6 +179,50 @@ def test_summary_flags_the_scale_offset_encoding():
     assert "without" in md and "unscaling" in md
 
 
+def test_summary_quotes_what_the_overview_pyramid_costs():
+    # Size and display are coupled through the pyramid: it is what serves a
+    # zoomed-out tile cheaply, and what the store pays for it.
+    run = _sample_run()
+    run.format_id = "geozarr"
+    run.object_layouts = [
+        GeoZarrLayout(
+            name="FRE_B4",
+            size_bytes=400,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=3,
+            shard_count=7,
+            overview_bytes=100,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "**Overviews:**" in md
+    assert "25.0%" in md
+
+
+def test_summary_flags_a_store_that_has_no_pyramid():
+    # A single-level store makes the tile server downsample full-resolution
+    # chunks, so its display numbers are not comparable with an arm that has one.
+    run = _sample_run()
+    run.format_id = "geozarr"
+    run.object_layouts = [
+        GeoZarrLayout(
+            name="FRE_B4",
+            size_bytes=400,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=0,
+            shard_count=4,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "**No overviews:**" in md
+
+
 def test_summary_omits_the_scale_offset_note_when_inactive():
     run = _sample_run()
     run.format_id = "geozarr"

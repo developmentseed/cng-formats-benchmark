@@ -26,6 +26,9 @@ from cng_benchmark.registry import DATASETS
 
 #: An RTC gamma0 band member: ``<scene>_<VV|VH>_GAM_<...>.tif`` at the scene root.
 _BAND_RE = re.compile(r"(?:^|/)[^/]*_(VV|VH)_GAM_[^/]*\.tif$", re.IGNORECASE)
+#: The CF quantity a terrain-corrected gamma0 band holds. The delivered GeoTIFFs
+#: name it nowhere, so the reader carries it to the writers.
+_RTC_STANDARD_NAME = "surface_backwards_scattering_coefficient_of_radar_wave"
 
 
 class Sentinel1OtbRtcOptions(DatasetOptions):
@@ -57,7 +60,11 @@ class Sentinel1OtbRtcDataset(ZipDeliveryDataset):
             pol = band.group(1).upper()
             if pol in want_set:
                 selected.append(
-                    SourceObject(name=pol, uri=_member_vsi_uri(zip_uri, member))
+                    SourceObject(
+                        name=pol,
+                        uri=_member_vsi_uri(zip_uri, member),
+                        standard_name=_RTC_STANDARD_NAME,
+                    )
                 )
         # Order by the configured polarisation list, so the representative-band
         # sample (the runner takes the first component) is deterministic.

@@ -53,6 +53,12 @@ REQUIRED: tuple[Capability, ...] = (
     Capability("geozarr", PYTHON, "rioxarray", "read the source raster into xarray"),
     Capability("geozarr", PYTHON, "zarr", "write/read the Zarr v3 sharded store"),
     Capability(
+        "geozarr",
+        PYTHON,
+        "zarr_cm",
+        "declare the multiscale pyramid's Zarr conventions metadata",
+    ),
+    Capability(
         "geoparquet",
         OGR_VECTOR,
         "ESRI Shapefile",

@@ -23,7 +23,8 @@ RUN apt-get update \
 # Install the project with the deployment extras: `s3` (boto3) so the runner can
 # list/read objects and persist artifacts to S3/MinIO, `cog` (rasterio + rio-cogeo)
 # to generate fixtures and convert GeoTIFF -> COG, `geozarr` (zarr v3 + xarray
-# + rioxarray + s3fs) to convert GeoTIFF -> sharded GeoZarr and read it back,
+# + rioxarray + zarr-cm + s3fs) to convert GeoTIFF -> a sharded, multiscale
+# GeoZarr and read it back,
 # `geoparquet` (geopandas + pyarrow + shapely + pyogrio + s3fs) to convert a
 # shapefile -> GeoParquet and run the bbox/row-group read, and `copc` (copclib +
 # laspy + xarray + h5netcdf) to convert a SWOT PIXC pixel cloud -> COPC and run the

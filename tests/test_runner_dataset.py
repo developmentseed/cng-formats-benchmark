@@ -189,6 +189,7 @@ class _PixelMetadataDataset(Dataset):
                         uri=str(files[0]),
                         nodata=-10000.0,
                         scale_factor=1e-4,
+                        standard_name="surface_bidirectional_reflectance",
                     ),
                     SourceObject(name="mask", uri=str(files[1])),
                 ],
@@ -265,9 +266,11 @@ def test_component_nodata_and_scale_reach_the_adapter(tmp_path):
     assert len(seen) == 2
     assert seen[0]["nodata"] == -10000.0
     assert seen[0]["scale_factor"] == 1e-4
-    # The mask carries neither, so nothing is injected for it.
+    assert seen[0]["standard_name"] == "surface_bidirectional_reflectance"
+    # The mask carries none of them, so nothing is injected for it.
     assert "nodata" not in seen[1]
     assert "scale_factor" not in seen[1]
+    assert "standard_name" not in seen[1]
 
 
 def test_explicit_config_param_overrides_the_component_value(tmp_path):
@@ -448,15 +451,18 @@ def test_zarr_store_object_flows_through_per_component_path(tmp_path):
     result = run_dataset_benchmark(cfg, ds_cfg, str(output))
 
     run = result.per_product[0]
-    # 2 components × 4 shards (1024/512 = 2 per side) = 8 stored objects.
-    assert run.object_profile.count == 8
+    # 2 components × 6 shards = 12 stored objects: the 1024 px array's 4 shards
+    # (1024/512 = 2 per side) plus one each for its 512 and 256 px overviews —
+    # the runner walks the pyramid's nested level groups, not one flat array.
+    assert run.object_profile.count == 12
     # One GeoZarrLayout per component (per produced array), pooled into the roll-up.
     assert [ly.kind for ly in run.object_layouts] == ["geozarr", "geozarr"]
+    assert [ly.multiscale_levels for ly in run.object_layouts] == [2, 2]
     assert len(result.rollup.object_layouts) == 2
     # Published as a tree under each component dir, not a single file.
-    assert (
-        output / "objects" / "sceneZ" / "band0" / "geozarr.zarr" / "zarr.json"
-    ).exists()
+    store = output / "objects" / "sceneZ" / "band0" / "geozarr.zarr"
+    assert (store / "zarr.json").exists()
+    assert (store / "1" / "data" / "zarr.json").exists()
 
 
 # --- vector-file object kind flows through the per-component path -------------

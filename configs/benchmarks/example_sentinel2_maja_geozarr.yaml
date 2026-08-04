@@ -32,7 +32,12 @@ params:
   chunk_shape: [1024, 1024]
   shard_shape: [2048, 2048]
   codec: zstd
-  multiscale_levels: 0
+  # Overview pyramid, /2 down to roughly a tile — the analogue of the COG arm's
+  # overviews. Without it the tile server downsamples full-resolution chunks for
+  # every zoomed-out tile, so the display comparison would measure the missing
+  # pyramid rather than the format (#71). `auto` derives the depth from the
+  # scene: a 10980 px MAJA band gets 5 levels.
+  multiscale_levels: auto
   # Encode MAJA's reflectance quantification (DN = reflectance x 10000) in the
   # array's own codec pipeline (`scale_offset` + `cast_value`) instead of leaving
   # it as side metadata. The array then reads back as physical reflectance for

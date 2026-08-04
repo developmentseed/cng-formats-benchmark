@@ -31,6 +31,11 @@ _REFLECTANCE_RE = re.compile(r"(?:^|/)[^/]*_(FRE|SRE)_(B\w+)\.tif$", re.IGNORECA
 _MAJA_NODATA = -10000.0
 #: MAJA quantification: reflectance is stored as DN = reflectance x 10000.
 _MAJA_SCALE_FACTOR = 1.0 / 10000.0
+#: The CF quantity MAJA FRE (flat, slope-corrected) and SRE reflectance hold.
+_MAJA_STANDARD_NAME = "surface_bidirectional_reflectance"
+#: The MASKS members (CLM cloud, EDG edge, SAT saturation, MG2 geophysical) are
+#: per-pixel condition flags, not a measured quantity.
+_MAJA_MASK_STANDARD_NAME = "quality_flag"
 #: A mask member: ``MASKS/<product>_<CLM|EDG|SAT|MG2>_R<n>.tif``.
 _MASK_RE = re.compile(
     r"(?:^|/)MASKS/[^/]*_(CLM|EDG|SAT|MG2)_(R\d+)\.tif$", re.IGNORECASE
@@ -102,6 +107,7 @@ class Sentinel2MajaDataset(ZipDeliveryDataset):
                             uri=_member_vsi_uri(zip_uri, member),
                             nodata=_MAJA_NODATA,
                             scale_factor=_MAJA_SCALE_FACTOR,
+                            standard_name=_MAJA_STANDARD_NAME,
                         )
                     )
                 continue
@@ -113,6 +119,7 @@ class Sentinel2MajaDataset(ZipDeliveryDataset):
                         SourceObject(
                             name=f"{kind}_{res}",
                             uri=_member_vsi_uri(zip_uri, member),
+                            standard_name=_MAJA_MASK_STANDARD_NAME,
                         )
                     )
         selected.sort(key=lambda c: _component_sort_key(c.name))

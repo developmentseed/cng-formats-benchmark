@@ -11,24 +11,55 @@ pytest.importorskip("zarr")
 pytest.importorskip("xarray")
 np = pytest.importorskip("numpy")
 
+from cng_benchmark.formats import geozarr_multiscales as ms  # noqa: E402
 from cng_benchmark.formats.geozarr import (  # noqa: E402
     DATA_VAR,
     GeoZarrParams,
     _fit_shard,
+    _shard_data_files,
     _spatial_pair,
     _write_sharded,
     describe_store_layout,
     enumerate_store_objects,
 )
 
+#: A real UTM 31N WKT — the CRS a MAJA tile carries. Verbatim (rather than
+#: derived from rasterio) so the metadata tests run without the geo stack, and
+#: nested: the inner geographic `AUTHORITY["EPSG","4326"]` must not be mistaken
+#: for the CRS's own code.
+UTM31N_WKT = (
+    'PROJCS["WGS 84 / UTM zone 31N",GEOGCS["WGS 84",DATUM["WGS_1984",'
+    'SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],'
+    'AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],'
+    'UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],'
+    'AUTHORITY["EPSG","4326"]],PROJECTION["Transverse_Mercator"],'
+    'PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",3],'
+    'PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],'
+    'PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],'
+    'AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","32631"]]'
+)
+#: 10 m pixels with their origin at a MAJA-like tile corner (GDAL order).
+GEOTRANSFORM = "300000.0 10.0 0.0 4900020.0 0.0 -10.0"
+
 
 def _store(tmp_path, name="g.zarr", **kw):
     store = str(tmp_path / name)
     data = (np.arange(2048 * 2048, dtype="uint16") % 1000).reshape(2048, 2048)
-    opts = dict(chunk=(512, 512), shard=(1024, 1024), codec="zstd")
+    opts = dict(
+        chunk=(512, 512),
+        shard=(1024, 1024),
+        codec="zstd",
+        crs_wkt=UTM31N_WKT,
+        geotransform=GEOTRANSFORM,
+    )
     opts.update(kw)
     _write_sharded(store, data, **opts)
     return store
+
+
+def _flat_store(tmp_path, name="flat.zarr", **kw):
+    """A store with the pyramid switched off — the single-level comparison case."""
+    return _store(tmp_path, name, multiscale_levels=0, **kw)
 
 
 def test_spatial_pair_normalises_shapes():
@@ -49,7 +80,7 @@ def test_fit_shard_aligns_to_chunk_multiple_and_clamps():
 
 
 def test_enumerate_returns_shard_data_excluding_metadata(tmp_path):
-    store = _store(tmp_path)
+    store = _flat_store(tmp_path)
     sizes = enumerate_store_objects(store)
     # 2048/1024 = 2 shards per side -> 4 shard objects, no zarr.json among them.
     assert len(sizes) == 4
@@ -60,8 +91,15 @@ def test_enumerate_returns_shard_data_excluding_metadata(tmp_path):
     assert "zarr.json" in names  # present in the store, excluded from enumeration
 
 
+def test_enumerate_excludes_the_coordinate_arrays(tmp_path):
+    # The x/y coordinate variables are metadata, not the tier-judged payload;
+    # counting their chunks would inflate `shard_count` and skew the size profile.
+    store = _flat_store(tmp_path, name="coords.zarr")
+    assert all(f"/{DATA_VAR}/c/" in p for p in _shard_data_files(store))
+
+
 def test_describe_layout_reports_chunk_shard_codec(tmp_path):
-    store = _store(tmp_path)
+    store = _flat_store(tmp_path)
     ly = describe_store_layout(store, "FRE_B4")
     assert ly.kind == "geozarr"
     assert ly.name == "FRE_B4"
@@ -71,11 +109,12 @@ def test_describe_layout_reports_chunk_shard_codec(tmp_path):
     assert ly.codec == "zstd"
     assert ly.multiscale_levels == 0
     assert ly.shard_count == 4
+    assert ly.overview_bytes == 0
     assert ly.size_bytes == sum(enumerate_store_objects(store))
 
 
 def test_codec_none_is_uncompressed(tmp_path):
-    store = _store(tmp_path, name="raw.zarr", codec="none")
+    store = _flat_store(tmp_path, name="raw.zarr", codec="none")
     ly = describe_store_layout(store, "x")
     assert ly.codec == "none"
 
@@ -96,7 +135,8 @@ def test_unknown_codec_raises(tmp_path):
 def test_params_default_and_tolerate_extra_keys():
     opts = GeoZarrParams.model_validate({"codec": "zstd", "scope": "product-set"})
     assert opts.codec == "zstd"
-    assert opts.multiscale_levels == 0
+    # A pyramid by default: an arm that omits the lever still gets overviews.
+    assert opts.multiscale_levels == "auto"
 
 
 def test_convert_reads_a_raster_and_writes_a_store(tmp_path):
@@ -124,7 +164,9 @@ def test_convert_reads_a_raster_and_writes_a_store(tmp_path):
 
     target = str(tmp_path / "out.zarr")
     GeoZarrAdapter().convert(
-        source, target, {"chunk_shape": [256, 256], "shard_shape": [512, 512]}
+        source,
+        target,
+        {"chunk_shape": [256, 256], "shard_shape": [512, 512], "multiscale_levels": 0},
     )
     ly = describe_store_layout(target, "B4")
     assert ly.chunk_shape == [256, 256]
@@ -143,7 +185,7 @@ def test_finest_array_is_readable_by_name(tmp_path):
     # The single-level store exposes the data variable at the root.
     import zarr
 
-    store = _store(tmp_path)
+    store = _flat_store(tmp_path)
     group = zarr.open_group(store, mode="r")
     assert DATA_VAR in group
 
@@ -233,6 +275,350 @@ def test_multiscale_coarsening_keeps_all_fill_blocks_as_fill(tmp_path):
     )
     level1 = zarr.open_group(store, mode="r")["1"][DATA_VAR]
     assert level1[0, 0] == -10000
+
+
+# --- the default pyramid and its metadata (#71) -----------------------------
+
+
+def _root_attrs(store) -> dict:
+    import zarr
+
+    return dict(zarr.open_group(store, mode="r").attrs)
+
+
+def test_auto_depth_coarsens_by_two_down_to_about_one_tile():
+    # The rule GDAL follows for COG overviews: keep halving while the shorter
+    # side stays at or above a tile, so the two arms get comparable pyramids.
+    assert ms.auto_depth((2048, 2048)) == 3  # 2048 -> 1024 -> 512 -> 256
+    assert ms.auto_depth((10980, 10980)) == 5  # a MAJA 10 m band
+    assert ms.auto_depth((256, 256)) == 0  # already one tile
+    assert ms.auto_depth((4096, 300)) == 0  # bounded by the shorter side
+    assert ms.auto_depth((512, 512), min_dimension=128) == 2
+
+
+def test_a_store_carries_a_pyramid_by_default(tmp_path):
+    # The regression #71 is about: an arm that sets no lever used to get a flat,
+    # full-resolution store, which made the tile server downsample on every
+    # zoomed-out tile and made the display comparison meaningless.
+    import zarr
+
+    store = _store(tmp_path, name="default.zarr")
+    group = zarr.open_group(store, mode="r")
+
+    assert sorted(group.group_keys(), key=int) == ["0", "1", "2", "3"]
+    assert [group[k][DATA_VAR].shape for k in ("0", "1", "2", "3")] == [
+        (2048, 2048),
+        (1024, 1024),
+        (512, 512),
+        (256, 256),
+    ]
+    assert describe_store_layout(store, "x").multiscale_levels == 3
+
+
+def test_each_level_georeferences_on_its_own(tmp_path):
+    # A coarser level covers the same ground with bigger cells. Copying the
+    # native transform onto every level would mislocate each overview by its
+    # decimation factor.
+    import zarr
+
+    group = zarr.open_group(_store(tmp_path, name="gt.zarr"), mode="r")
+    x0, y0 = 300000.0, 4900020.0
+
+    assert group["0"].attrs["spatial:transform"] == [10.0, 0.0, x0, 0.0, -10.0, y0]
+    assert group["1"].attrs["spatial:transform"] == [20.0, 0.0, x0, 0.0, -20.0, y0]
+    assert group["2"].attrs["spatial:transform"] == [40.0, 0.0, x0, 0.0, -40.0, y0]
+    # The extent is the same at every level; only the cells grow.
+    assert group["3"].attrs["spatial:bbox"] == group["0"].attrs["spatial:bbox"]
+    # The CRS travels on every level too, so an overview stands alone.
+    assert group["3"].attrs["proj:code"] == "EPSG:32631"
+
+
+def test_no_cf_grid_mapping_shadows_the_conventions(tmp_path):
+    # The conventions are the only place the georeferencing lives: no
+    # `spatial_ref` variable duplicating the CRS and transform, no
+    # `grid_mapping` pointing at one, and no `_ARRAY_DIMENSIONS` — Zarr v3 names
+    # the axes itself, in `dimension_names`.
+    import json
+    import os
+
+    import zarr
+
+    store = _store(tmp_path, name="nocf.zarr")
+    group = zarr.open_group(store, mode="r")
+
+    assert "spatial_ref" not in list(group["0"].array_keys())
+    for node in (group, group["1"], group["1"][DATA_VAR], group["1"]["x"]):
+        assert "_ARRAY_DIMENSIONS" not in node.attrs
+        assert "grid_mapping" not in node.attrs
+        assert "GeoTransform" not in node.attrs
+
+    meta = json.load(open(os.path.join(store, "1", DATA_VAR, "zarr.json")))
+    assert meta["dimension_names"] == ["y", "x"]
+
+
+def test_root_declares_the_multiscales_layout(tmp_path):
+    import zarr_cm
+
+    attrs = _root_attrs(_store(tmp_path, name="layout.zarr"))
+
+    # The declared conventions are `zarr_cm`'s to define — including which
+    # revision's schema each entry pins.
+    uuids = {c["uuid"] for c in attrs["zarr_conventions"]}
+    assert uuids == {
+        zarr_cm.multiscales.UUID,
+        zarr_cm.spatial.UUID,
+        zarr_cm.proj.UUID,
+    }
+    zarr_cm.multiscales.validate(attrs["multiscales"])
+
+    layout = attrs["multiscales"]["layout"]
+    assert [e["asset"] for e in layout] == ["0", "1", "2", "3"]
+    # Level 0 is the source of the chain and derives from nothing.
+    assert "derived_from" not in layout[0]
+    assert [e["derived_from"] for e in layout[1:]] == ["0", "1", "2"]
+    # `scale` is relative to the level it was derived from, so it is 2 at every
+    # step — not the absolute decimation.
+    assert [e["transform"]["scale"] for e in layout[1:]] == [[2.0, 2.0]] * 3
+    assert attrs["multiscales"]["resampling_method"] == "average"
+    assert all(e["resampling_method"] == "average" for e in layout[1:])
+
+
+def test_layout_entries_carry_each_level_absolute_position(tmp_path):
+    # `transform` is the relative step between levels; where a level actually
+    # sits belongs outside it, per the convention.
+    layout = _root_attrs(_store(tmp_path, name="abs.zarr"))["multiscales"]["layout"]
+
+    assert [e["spatial:shape"] for e in layout] == [
+        [2048, 2048],
+        [1024, 1024],
+        [512, 512],
+        [256, 256],
+    ]
+    # Rasterio/affine coefficient order [a, b, c, d, e, f]: pixel size first,
+    # origin third and sixth — *not* GDAL's [c, a, b, f, d, e]. The origin is
+    # the same on every level; only the cell size doubles.
+    x0, y0 = 300000.0, 4900020.0
+    assert layout[0]["spatial:transform"] == [10.0, 0.0, x0, 0.0, -10.0, y0]
+    assert layout[1]["spatial:transform"] == [20.0, 0.0, x0, 0.0, -20.0, y0]
+
+
+def test_root_declares_the_native_crs_and_grid(tmp_path):
+    # Native CRS, not web mercator: nothing is reprojected to build the pyramid.
+    attrs = _root_attrs(_store(tmp_path, name="crs.zarr"))
+
+    assert attrs["proj:code"] == "EPSG:32631"
+    assert attrs["spatial:dimensions"] == ["y", "x"]
+    assert attrs["spatial:shape"] == [2048, 2048]
+    assert attrs["spatial:registration"] == "pixel"
+    assert attrs["spatial:bbox"] == [300000.0, 4879540.0, 320480.0, 4900020.0]
+
+
+def test_the_store_metadata_reads_back_as_declared_conventions(tmp_path):
+    # The conformance check, in the terms the conventions define: every
+    # attribute the group carries belongs to a convention it declares, each
+    # document validates, and nothing is left dangling.
+    import zarr_cm
+
+    attrs = _root_attrs(_store(tmp_path, name="valid.zarr"))
+    remaining, extracted = zarr_cm.extract_many(
+        attrs, ["multiscales", "spatial", "geo-proj"]
+    )
+
+    assert zarr_cm.multiscales.detect(attrs) is not None
+    zarr_cm.multiscales.validate(extracted["multiscales"])
+    zarr_cm.spatial.validate(extracted["spatial"])
+    zarr_cm.proj.validate(extracted["geo-proj"])
+    assert remaining == {}
+
+
+def test_each_level_group_and_array_declare_what_they_use(tmp_path):
+    # A convention's keys are only meaningful where the node declares it, and a
+    # level's grid is its own — so the declaration travels all the way down to
+    # the array, which is what a client ends up holding.
+    import zarr
+    import zarr_cm
+
+    group = zarr.open_group(_store(tmp_path, name="decl.zarr"), mode="r")
+    declared = {zarr_cm.spatial.UUID, zarr_cm.proj.UUID}
+
+    for node in (group["1"], group["1"][DATA_VAR]):
+        attrs = dict(node.attrs)
+        assert {c["uuid"] for c in attrs["zarr_conventions"]} == declared
+        assert attrs["spatial:dimensions"] == ["y", "x"]
+        assert attrs["spatial:shape"] == [1024, 1024]
+        assert attrs["proj:code"] == "EPSG:32631"
+        _remaining, got = zarr_cm.extract_many(attrs, ["spatial", "geo-proj"])
+        zarr_cm.spatial.validate(got["spatial"])
+        zarr_cm.proj.validate(got["geo-proj"])
+
+
+def test_a_crs_without_an_epsg_code_travels_as_wkt():
+    wkt = 'PROJCRS["Local grid",BASEGEOGCRS["Unknown"]]'
+    assert ms.proj_attrs(wkt) == {"proj:wkt2": wkt}
+    assert ms.proj_attrs("") == {}
+
+
+def test_every_array_names_its_axes_and_quantity(tmp_path):
+    import zarr
+
+    store = _store(tmp_path, name="axes.zarr", standard_name="toa_reflectance")
+    group = zarr.open_group(store, mode="r")["1"]
+
+    data = group[DATA_VAR]
+    # Which array dimensions are spatial, ordered Y then X — what resolves
+    # `spatial:transform` against the array's axes.
+    assert data.attrs["spatial:dimensions"] == ["y", "x"]
+    assert data.attrs["standard_name"] == "toa_reflectance"
+    assert group["x"].attrs["standard_name"] == "projection_x_coordinate"
+    assert group["x"].attrs["units"] == "m"
+
+
+def test_levels_carry_cell_centre_coordinates(tmp_path):
+    import zarr
+
+    group = zarr.open_group(_store(tmp_path, name="coords.zarr"), mode="r")
+
+    # The first 10 m cell's centre is half a pixel in from the tile corner.
+    assert group["0"]["x"][0] == pytest.approx(300005.0)
+    assert group["0"]["y"][0] == pytest.approx(4900015.0)
+    # Level 1's cells are 20 m, so its first centre is 10 m in.
+    assert group["1"]["x"][0] == pytest.approx(300010.0)
+    assert group["1"]["x"][1] - group["1"]["x"][0] == pytest.approx(20.0)
+
+
+def test_a_geographic_crs_gets_longitude_latitude_coordinates(tmp_path):
+    import zarr
+
+    wkt = 'GEOGCRS["WGS 84",ID["EPSG",4326]]'
+    store = str(tmp_path / "geo.zarr")
+    _write_sharded(
+        store,
+        np.zeros((256, 256), dtype="uint16"),
+        chunk=(128, 128),
+        shard=(256, 256),
+        codec="zstd",
+        crs_wkt=wkt,
+        geotransform="-10.0 0.01 0.0 45.0 0.0 -0.01",
+    )
+    group = zarr.open_group(store, mode="r")
+    assert group["x"].attrs["standard_name"] == "longitude"
+    assert group["x"].attrs["units"] == "degrees_east"
+    assert group["y"].attrs["standard_name"] == "latitude"
+    assert group.attrs["proj:code"] == "EPSG:4326"
+
+
+def test_a_rotated_grid_skips_coordinates_but_keeps_its_transform(tmp_path):
+    # 1D coordinate variables cannot describe a sheared grid; the affine still can.
+    import zarr
+
+    store = str(tmp_path / "rot.zarr")
+    _write_sharded(
+        store,
+        np.zeros((256, 256), dtype="uint16"),
+        chunk=(128, 128),
+        shard=(256, 256),
+        codec="zstd",
+        crs_wkt=UTM31N_WKT,
+        geotransform="300000.0 10.0 2.0 4900020.0 3.0 -10.0",
+    )
+    group = zarr.open_group(store, mode="r")
+    assert "x" not in list(group.array_keys())
+    # [a, b, c, d, e, f]: the rotation terms survive where 1D coordinates cannot.
+    x0, y0 = 300000.0, 4900020.0
+    assert group.attrs["spatial:transform"] == [10.0, 2.0, x0, 3.0, -10.0, y0]
+
+
+def test_bbox_bounds_a_rotated_grid_by_all_four_corners():
+    # A sheared grid's other diagonal can fall outside the box the first one
+    # makes, so bounding by two corners understates the extent. Here the corner
+    # at (0, h) is the southernmost and (w, 0) the northernmost — neither is on
+    # the (0,0)–(w,h) diagonal.
+    gt = (300000.0, 10.0, 2.0, 4900020.0, 3.0, -10.0)
+
+    assert ms.bounds(gt, (256, 256)) == [300000.0, 4897460.0, 303072.0, 4900788.0]
+    # An unrotated grid is unaffected: the diagonal already bounds it.
+    north_up = (300000.0, 10.0, 0.0, 4900020.0, 0.0, -10.0)
+    assert ms.bounds(north_up, (256, 256)) == [300000.0, 4897460.0, 302560.0, 4900020.0]
+
+
+def test_overview_bytes_account_for_the_pyramid_alone(tmp_path):
+    # Overviews cost bytes, the same way a COG's do; the report quotes this to
+    # keep the size story readable next to the display one.
+    pyramid = describe_store_layout(_store(tmp_path, name="p.zarr"), "p")
+    flat = describe_store_layout(_flat_store(tmp_path, name="f.zarr"), "f")
+
+    assert flat.overview_bytes == 0
+    assert 0 < pyramid.overview_bytes < pyramid.size_bytes
+    assert pyramid.size_bytes - pyramid.overview_bytes == flat.size_bytes
+
+
+def test_compression_ratio_measures_compression_not_the_pyramid(tmp_path):
+    # The stored size counts every level, so the uncompressed baseline must too
+    # — otherwise the pyramid's cost would read as poor compression.
+    pyramid = describe_store_layout(_store(tmp_path, name="p.zarr"), "p")
+    flat = describe_store_layout(_flat_store(tmp_path, name="f.zarr"), "f")
+
+    assert pyramid.compression_ratio == pytest.approx(flat.compression_ratio, rel=0.2)
+
+
+def test_the_pyramid_is_visible_to_the_display_tile_selector(tmp_path):
+    # The display metric picks tiles against the available decimations; the
+    # levels are what make a zoomed-out tile cheap instead of a full-res read.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("morecantile")
+    from cng_benchmark.metrics.display_tiles import _read_zarr_grid
+
+    grid = _read_zarr_grid(_store(tmp_path, name="disp.zarr"), role="sink")
+    assert grid.decimations == [1, 2, 4, 8]
+    assert (grid.width, grid.height) == (2048, 2048)
+
+
+def test_the_read_metric_addresses_the_native_level(tmp_path):
+    # A partial read must land on level 0, not on an overview — otherwise the
+    # read metric would quietly compare full-resolution COG reads against
+    # coarsened Zarr ones.
+    from cng_benchmark.metrics.read import _open_zarr_array
+
+    assert _open_zarr_array(_store(tmp_path, name="read.zarr"), "sink").shape == (
+        2048,
+        2048,
+    )
+
+
+def test_rioxarray_georeferences_every_level_from_the_conventions(tmp_path):
+    # The store carries no CF grid mapping, so this is the whole georeferencing
+    # story: rioxarray 0.22+ reads the `spatial` and `geo-proj` conventions.
+    # Checked on the *array*, not just the dataset — xarray drops dataset
+    # attributes when a variable is selected out, and a tile server addresses a
+    # variable, so each array repeats its own grid.
+    pytest.importorskip("rioxarray")
+    import xarray as xr
+
+    store = _store(tmp_path, name="rio.zarr")
+    extent = (300000.0, 4879540.0, 320480.0, 4900020.0)
+    for level, cell in (("0", 10.0), ("1", 20.0), ("3", 80.0)):
+        da = xr.open_dataset(store, engine="zarr", group=level, consolidated=False)[
+            DATA_VAR
+        ]
+        assert da.rio.crs.to_epsg() == 32631
+        assert da.rio.transform()[0] == pytest.approx(cell)
+        # Every level covers the same ground; only the cells grow.
+        assert da.rio.bounds() == pytest.approx(extent)
+
+
+def test_a_pyramid_store_opens_as_a_datatree(tmp_path):
+    # What a GeoZarr reader does with a multiscale store: open the hierarchy and
+    # find every level under its own group, decoded and georeferenced.
+    import xarray as xr
+
+    tree = xr.open_datatree(
+        _store(tmp_path, name="tree.zarr"), engine="zarr", consolidated=False
+    )
+    assert sorted(tree.children) == ["0", "1", "2", "3"]
+    level1 = tree["1"].ds
+    assert level1[DATA_VAR].dims == ("y", "x")
+    assert level1[DATA_VAR].shape == (1024, 1024)
+    assert float(level1["x"][0]) == pytest.approx(300010.0)
 
 
 def _write_source(path, *, nodata=None, scales=None):
