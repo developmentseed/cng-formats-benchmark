@@ -56,6 +56,8 @@ def test_params_default_and_tolerate_extra_keys():
     assert opts.row_group_rows == 1000
     assert opts.spatial_partitioning is True
     assert opts.compression == "zstd"
+    assert opts.compression_level is None
+    assert opts.data_page_size is None
 
 
 def test_write_produces_one_file_with_row_groups(tmp_path):
@@ -99,6 +101,45 @@ def test_spatial_sort_preserves_features_and_reorders():
     assert len(out) == len(gdf)
     # The Hilbert ordering is not the identity for a 2D grid of points.
     assert list(out["id"]) != list(gdf["id"])
+
+
+@pytest.mark.parametrize("codec", ["snappy", "zstd", "gzip", "brotli"])
+def test_codec_is_reported_across_the_sweep(tmp_path, codec):
+    # #73: the codec sweep (snappy, the geopandas/pyarrow default, vs zstd,
+    # gzip, brotli) must round-trip and be readable back from the footer.
+    target = _parquet(tmp_path, name=f"{codec}.parquet", n=200, compression=codec)
+    ly = describe_geoparquet_layout(target, "x")
+    assert ly.codec == codec
+    assert ly.compression_ratio > 0
+
+
+def test_compression_level_and_data_page_size_are_forwarded(tmp_path):
+    # A bigger, repetitive GeoDataFrame so a higher zstd effort level has
+    # deterministic room to shrink the file further than the codec default.
+    gdf = _gdf(2000)
+    fast = tmp_path / "fast.parquet"
+    slow = tmp_path / "slow.parquet"
+    _write_geoparquet(
+        gdf,
+        str(fast),
+        row_group_rows=500,
+        spatial_partitioning=True,
+        compression="zstd",
+    )
+    _write_geoparquet(
+        gdf,
+        str(slow),
+        row_group_rows=500,
+        spatial_partitioning=True,
+        compression="zstd",
+        compression_level=19,
+        data_page_size=4096,
+    )
+    assert fast.stat().st_size >= slow.stat().st_size
+    # Still a valid, readable GeoParquet.
+    ly = describe_geoparquet_layout(str(slow), "x")
+    assert ly.codec == "zstd"
+    assert ly.num_rows == 2000
 
 
 def test_vector_read_metric_round_trips(tmp_path):
