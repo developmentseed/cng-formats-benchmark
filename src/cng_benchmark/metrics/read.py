@@ -1,10 +1,14 @@
-"""Read metric — range-request-aware read latency and throughput.
+"""Read metric — range-request-aware subsetting-read latency and throughput.
 
-Opens the produced object with rasterio and reads a grid of windows, timing each
-read. When the object lives on S3 (``s3://`` mapped to GDAL ``/vsis3``), those
-window reads become HTTP range requests against the store, so this measures the
-realistic cloud-native access pattern — partial reads of an internally tiled
-COG — rather than a bulk download. Requires the ``cog`` extra (rasterio).
+Opens the produced object and reads a handful of random windows — a bbox /
+sub-zone query, not a full/sequential scan — timing each. This is the CNES
+subsetting-read pattern (issue #74): windows are seeded-random rather than
+laid out on a fixed grid, so repeated runs sample different parts of the
+object while staying reproducible. When the object lives on S3 (``s3://``
+mapped to GDAL ``/vsis3``), those window reads become HTTP range requests
+against the store, so this measures the realistic cloud-native access
+pattern — partial reads — rather than a bulk download. Requires the ``cog``
+extra (rasterio).
 
 Latency reflects the full range-request round-trip. Throughput is reported as
 *decoded* bytes per second (``read_decoded_throughput``), not bytes over the
@@ -16,8 +20,9 @@ it is not mistaken for wire transfer. True wire bytes would need GDAL
 from __future__ import annotations
 
 import math
+import random
 import time
-from statistics import median
+from statistics import median, pstdev
 
 from cng_benchmark.models import MetricResult
 from cng_benchmark.storage import to_gdal_path
@@ -35,15 +40,44 @@ def _require_geo():
     return rasterio, Window
 
 
-def _grid_origins(
-    width: int, height: int, win: int, count: int
+def _random_origins(
+    width: int,
+    height: int,
+    win: int,
+    count: int,
+    rng: random.Random,
+    block: tuple[int, int] | None = None,
 ) -> list[tuple[int, int]]:
-    """Return up to ``count`` distinct ``(col, row)`` window origins on a grid."""
-    per_side = max(1, int(math.ceil(math.sqrt(count))))
-    xs = sorted({min(i * win, max(0, width - win)) for i in range(per_side)})
-    ys = sorted({min(j * win, max(0, height - win)) for j in range(per_side)})
-    origins = [(x, y) for y in ys for x in xs]
-    return origins[:count]
+    """Return ``count`` random ``(col, row)`` window origins within bounds.
+
+    Positions are drawn uniformly at random (seeded via ``rng``) rather than
+    laid out on a fixed grid, so the sample lands on different parts of the
+    raster from run to run while staying reproducible for a given seed. When
+    ``block`` — a COG's internal tile shape as ``(block_h, block_w)`` — is
+    given, alternates between tile-aligned origins (snapped to the block grid)
+    and tile-unaligned ones, since a real bbox query stresses both depending on
+    where it falls relative to the tiling.
+    """
+    max_x = max(0, width - win)
+    max_y = max(0, height - win)
+    origins = []
+    for i in range(count):
+        x = rng.randint(0, max_x)
+        y = rng.randint(0, max_y)
+        if block is not None:
+            block_h, block_w = block
+            if i % 2 == 0:
+                if block_w > 0:
+                    x = min((x // block_w) * block_w, max_x)
+                if block_h > 0:
+                    y = min((y // block_h) * block_h, max_y)
+            else:
+                if block_w > 1 and x % block_w == 0:
+                    x = min(x + block_w // 2, max_x)
+                if block_h > 1 and y % block_h == 0:
+                    y = min(y + block_h // 2, max_y)
+        origins.append((x, y))
+    return origins
 
 
 def measure_read(
@@ -51,18 +85,27 @@ def measure_read(
     *,
     windows: int = 8,
     window_size: int = 256,
+    seed: int = 0,
 ) -> list[MetricResult]:
-    """Read a grid of windows from the object at ``uri`` and return read metrics."""
+    """Read ``windows`` random sub-zones from the object at ``uri``.
+
+    Alternates tile-aligned and tile-unaligned origins (the COG's internal
+    block grid) so both access patterns are exercised. ``seed`` makes the
+    sample reproducible across runs.
+    """
     if windows < 1 or window_size < 1:
         raise ValueError("windows and window_size must be >= 1")
     rasterio, Window = _require_geo()
     path = to_gdal_path(uri)
+    rng = random.Random(seed)
 
     latencies: list[float] = []
     bytes_read = 0
     with rasterio.open(path) as src:
         win = min(window_size, src.width, src.height)
-        for col, row in _grid_origins(src.width, src.height, win, windows):
+        block = src.block_shapes[0] if src.block_shapes else None
+        origins = _random_origins(src.width, src.height, win, windows, rng, block)
+        for col, row in origins:
             start = time.perf_counter()
             data = src.read(1, window=Window(col, row, win, win))
             latencies.append(time.perf_counter() - start)
@@ -87,6 +130,12 @@ def _read_metrics(
         MetricResult(name="read_latency_mean", value=total / len(latencies), unit="s"),
         MetricResult(name="read_latency_p50", value=float(median(latencies)), unit="s"),
         MetricResult(
+            name="read_latency_spread",
+            value=float(pstdev(latencies)),
+            unit="s",
+            detail={"latencies": latencies},
+        ),
+        MetricResult(
             name="read_decoded_throughput",
             value=throughput,
             unit="decoded-bytes/s",
@@ -101,25 +150,28 @@ def measure_zarr_read(
     role: str = "sink",
     windows: int = 8,
     window_size: int = 256,
+    seed: int = 0,
 ) -> list[MetricResult]:
-    """Read a grid of windows from the GeoZarr store at ``uri`` and return metrics.
+    """Read ``windows`` random chunk-range slices from the GeoZarr store at ``uri``.
 
     The zarr-native counterpart to :func:`measure_read`: GDAL's Zarr driver cannot
     read the ``sharding_indexed`` codec, so the finest array is opened with
-    zarr-python over fsspec. Each window read pulls only the chunks it overlaps —
+    zarr-python over fsspec. Each random slice pulls only the chunks it overlaps —
     HTTP range requests against the shard objects when ``uri`` is S3 — so this is
-    the realistic partial-access pattern for a sharded cube. Emits the same
-    ``read_*`` metrics as the COG path.
+    the realistic partial-access pattern for a sharded cube. ``seed`` makes the
+    sample reproducible across runs. Emits the same ``read_*`` metrics as the COG
+    path.
     """
     if windows < 1 or window_size < 1:
         raise ValueError("windows and window_size must be >= 1")
+    rng = random.Random(seed)
     arr = _open_zarr_array(uri, role)
     height, width = arr.shape[-2], arr.shape[-1]
     win = min(window_size, width, height)
 
     latencies: list[float] = []
     bytes_read = 0
-    for col, row in _grid_origins(width, height, win, windows):
+    for col, row in _random_origins(width, height, win, windows, rng):
         start = time.perf_counter()
         data = arr[row : row + win, col : col + win]
         latencies.append(time.perf_counter() - start)
@@ -155,20 +207,29 @@ def _require_vector():
     return geopandas
 
 
-def _bbox_grid(
-    bounds: tuple[float, float, float, float], count: int
+def _random_bboxes(
+    bounds: tuple[float, float, float, float], count: int, rng: random.Random
 ) -> list[tuple[float, float, float, float]]:
-    """Tile ``bounds`` into up to ``count`` cell bboxes for partial spatial reads."""
+    """Return ``count`` random bbox windows within ``bounds``.
+
+    Each window keeps the footprint a grid cell would (``extent / sqrt(count)``
+    per side, so query selectivity stays comparable across the sample) but is
+    placed at a random position (seeded via ``rng``) rather than tiled, so
+    repeated queries land on different, potentially row-group-crossing, parts of
+    the extent.
+    """
     minx, miny, maxx, maxy = bounds
     per_side = max(1, int(math.ceil(math.sqrt(count))))
     dx = (maxx - minx) / per_side or 1.0
     dy = (maxy - miny) / per_side or 1.0
-    cells = [
-        (minx + i * dx, miny + j * dy, minx + (i + 1) * dx, miny + (j + 1) * dy)
-        for j in range(per_side)
-        for i in range(per_side)
-    ]
-    return cells[:count]
+    span_x = max(0.0, (maxx - minx) - dx)
+    span_y = max(0.0, (maxy - miny) - dy)
+    boxes = []
+    for _ in range(count):
+        ox = minx + rng.uniform(0, span_x)
+        oy = miny + rng.uniform(0, span_y)
+        boxes.append((ox, oy, ox + dx, oy + dy))
+    return boxes
 
 
 def measure_vector_read(
@@ -176,15 +237,17 @@ def measure_vector_read(
     *,
     role: str = "sink",
     queries: int = 8,
+    seed: int = 0,
 ) -> list[MetricResult]:
-    """Run a grid of bbox spatial queries against the GeoParquet at ``uri``.
+    """Run ``queries`` random bbox spatial queries against the GeoParquet at ``uri``.
 
     The vector counterpart to :func:`measure_read`: each query passes a bbox
     predicate to ``geopandas.read_parquet``, which pushes it down to the row
     groups whose covering bbox overlaps — only those row groups are fetched (HTTP
     range requests against the file when ``uri`` is S3), so this measures the
     realistic partial-access pattern for a GeoParquet, not a full table scan. The
-    file's total extent (read once, untimed) seeds the query grid. Emits the same
+    file's total extent (read once, untimed) seeds the random query positions;
+    ``seed`` makes the sample reproducible across runs. Emits the same
     ``read_latency_*`` / ``read_decoded_throughput`` family as the raster path,
     counting returned features rather than pixels.
     """
@@ -192,13 +255,14 @@ def measure_vector_read(
         raise ValueError("queries must be >= 1")
     gpd = _require_vector()
     storage_options = _vector_storage_options(uri, role)
+    rng = random.Random(seed)
 
     bounds = _vector_total_bounds(gpd, uri, storage_options)
 
     latencies: list[float] = []
     features = 0
     decoded_bytes = 0
-    for bbox in _bbox_grid(bounds, queries):
+    for bbox in _random_bboxes(bounds, queries, rng):
         start = time.perf_counter()
         sub = gpd.read_parquet(uri, bbox=bbox, storage_options=storage_options)
         latencies.append(time.perf_counter() - start)
@@ -246,21 +310,24 @@ def measure_copc_read(
     *,
     role: str = "sink",
     queries: int = 8,
+    seed: int = 0,
 ) -> list[MetricResult]:
-    """Run a grid of octree-node spatial queries against the COPC at ``uri``.
+    """Run ``queries`` random octree-node spatial queries against the COPC at ``uri``.
 
     The point-cloud counterpart to :func:`measure_read`: each query passes a 3D
     bbox to laspy's ``CopcReader.spatial_query``, which fetches only the octree
     nodes that overlap (HTTP range requests against the file when ``uri`` is S3, via
     an fsspec stream), so this measures the realistic partial-access pattern for a
     COPC — an octree-node fetch — not a full-cloud scan. The file's extent (read
-    from the header, untimed) seeds the query grid. Emits the same
-    ``read_latency_*`` / ``read_decoded_throughput`` family as the other arms,
-    counting returned points rather than pixels.
+    from the header, untimed) seeds the random query positions; ``seed`` makes the
+    sample reproducible across runs. Emits the same ``read_latency_*`` /
+    ``read_decoded_throughput`` family as the other arms, counting returned points
+    rather than pixels.
     """
     if queries < 1:
         raise ValueError("queries must be >= 1")
     laspy = _require_pointcloud()
+    rng = random.Random(seed)
     handle = _copc_handle(uri, role)
     try:
         reader = laspy.CopcReader.open(handle)
@@ -271,7 +338,7 @@ def measure_copc_read(
         latencies: list[float] = []
         points = 0
         decoded_bytes = 0
-        for box in _box_grid(mins, maxs, queries):
+        for box in _random_boxes(mins, maxs, queries, rng):
             start = time.perf_counter()
             sub = reader.spatial_query(box)
             latencies.append(time.perf_counter() - start)
@@ -298,8 +365,14 @@ def _copc_handle(uri: str, role: str):
     return uri
 
 
-def _box_grid(mins: list[float], maxs: list[float], count: int):
-    """Tile the X–Y extent into up to ``count`` 3D ``laspy.copc.Bounds`` (full Z)."""
+def _random_boxes(mins: list[float], maxs: list[float], count: int, rng: random.Random):
+    """Return ``count`` random 3D ``laspy.copc.Bounds`` (full Z, random X–Y).
+
+    Each box keeps the footprint a grid cell would (``extent / sqrt(count)`` per
+    side) but is placed at a random X–Y position (seeded via ``rng``) rather than
+    tiled, so repeated queries land on different, potentially octree-node-crossing,
+    parts of the extent.
+    """
     from laspy.copc import Bounds
 
     minx, miny, minz = mins
@@ -307,15 +380,14 @@ def _box_grid(mins: list[float], maxs: list[float], count: int):
     per_side = max(1, int(math.ceil(math.sqrt(count))))
     dx = (maxx - minx) / per_side or 1.0
     dy = (maxy - miny) / per_side or 1.0
-    boxes = [
-        Bounds(
-            [minx + i * dx, miny + j * dy, minz],
-            [minx + (i + 1) * dx, miny + (j + 1) * dy, maxz],
-        )
-        for j in range(per_side)
-        for i in range(per_side)
-    ]
-    return boxes[:count]
+    span_x = max(0.0, (maxx - minx) - dx)
+    span_y = max(0.0, (maxy - miny) - dy)
+    boxes = []
+    for _ in range(count):
+        ox = minx + rng.uniform(0, span_x)
+        oy = miny + rng.uniform(0, span_y)
+        boxes.append(Bounds([ox, oy, minz], [ox + dx, oy + dy, maxz]))
+    return boxes
 
 
 def _pointcloud_read_metrics(
@@ -333,6 +405,12 @@ def _pointcloud_read_metrics(
         MetricResult(name="read_query_count", value=len(latencies)),
         MetricResult(name="read_latency_mean", value=total / len(latencies), unit="s"),
         MetricResult(name="read_latency_p50", value=float(median(latencies)), unit="s"),
+        MetricResult(
+            name="read_latency_spread",
+            value=float(pstdev(latencies)),
+            unit="s",
+            detail={"latencies": latencies},
+        ),
         MetricResult(
             name="read_decoded_throughput",
             value=throughput,
@@ -357,6 +435,12 @@ def _vector_read_metrics(
         MetricResult(name="read_query_count", value=len(latencies)),
         MetricResult(name="read_latency_mean", value=total / len(latencies), unit="s"),
         MetricResult(name="read_latency_p50", value=float(median(latencies)), unit="s"),
+        MetricResult(
+            name="read_latency_spread",
+            value=float(pstdev(latencies)),
+            unit="s",
+            detail={"latencies": latencies},
+        ),
         MetricResult(
             name="read_decoded_throughput",
             value=throughput,

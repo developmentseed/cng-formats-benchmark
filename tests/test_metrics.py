@@ -5,6 +5,8 @@ local file. The display collector talks HTTP, so it is tested with a fake
 ``urlopen`` — no TiTiler required.
 """
 
+import random
+
 import pytest
 
 from cng_benchmark.metrics import display
@@ -131,6 +133,8 @@ def test_read_metric_reads_windows_locally(tmp_path):
     by_name = {m.name: m for m in metrics}
     assert by_name["read_window_count"].value >= 1
     assert by_name["read_latency_mean"].value >= 0
+    assert by_name["read_latency_spread"].value >= 0
+    assert len(by_name["read_latency_spread"].detail["latencies"]) == 4
     assert by_name["read_decoded_throughput"].value > 0
     assert by_name["read_decoded_throughput"].unit == "decoded-bytes/s"
     assert by_name["read_decoded_throughput"].detail["decoded_bytes"] > 0
@@ -139,3 +143,25 @@ def test_read_metric_reads_windows_locally(tmp_path):
 def test_read_metric_rejects_bad_inputs(tmp_path):
     with pytest.raises(ValueError, match="window"):
         measure_read(str(tmp_path / "whatever.tif"), windows=0)
+
+
+def test_random_origins_are_seeded_reproducible_and_bounded():
+    from cng_benchmark.metrics.read import _random_origins
+
+    a = _random_origins(1000, 1000, 100, 6, random.Random(0))
+    b = _random_origins(1000, 1000, 100, 6, random.Random(0))
+    assert a == b  # same seed -> same sample
+    c = _random_origins(1000, 1000, 100, 6, random.Random(1))
+    assert a != c  # different seed -> different sample
+    assert all(0 <= x <= 900 and 0 <= y <= 900 for x, y in a)
+
+
+def test_random_origins_alternate_tile_aligned_and_unaligned():
+    from cng_benchmark.metrics.read import _random_origins
+
+    block = (256, 256)  # (block_h, block_w)
+    origins = _random_origins(2048, 2048, 300, 8, random.Random(0), block)
+    aligned = origins[0::2]
+    unaligned = origins[1::2]
+    assert all(x % 256 == 0 and y % 256 == 0 for x, y in aligned)
+    assert any(x % 256 != 0 or y % 256 != 0 for x, y in unaligned)

@@ -149,6 +149,7 @@ def test_vector_read_metric_round_trips(tmp_path):
     metrics = {m.name: m for m in measure_vector_read(target, role="sink", queries=4)}
     assert metrics["read_query_count"].value == 4
     assert metrics["read_latency_mean"].value >= 0
+    assert metrics["read_latency_spread"].value >= 0
     # The bbox queries cover the full extent, so they return features in total.
     assert metrics["read_decoded_throughput"].detail["features"] > 0
 

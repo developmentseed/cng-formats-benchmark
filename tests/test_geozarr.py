@@ -178,6 +178,7 @@ def test_convert_reads_a_raster_and_writes_a_store(tmp_path):
 
     metrics = {m.name: m.value for m in measure_zarr_read(target, role="sink")}
     assert metrics["read_window_count"] >= 1
+    assert metrics["read_latency_spread"] >= 0
     assert metrics["read_decoded_throughput"] > 0
 
 
