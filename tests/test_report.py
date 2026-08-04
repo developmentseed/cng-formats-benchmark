@@ -152,3 +152,48 @@ def test_write_artifacts_writes_both_files(tmp_path):
     payload = json.loads(result_path.read_text())
     assert payload["dataset_id"] == "synthetic-cog"
     assert payload["object_profile"]["count"] == 3
+
+
+def test_summary_flags_the_scale_offset_encoding():
+    # The run has to say the codec is active, otherwise the report cannot show
+    # the encoding-semantics contrast with COG (#54).
+    run = _sample_run()
+    run.format_id = "geozarr"
+    run.object_layouts = [
+        GeoZarrLayout(
+            name="FRE_B4",
+            size_bytes=200,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=1,
+            shard_count=4,
+            scale_offset=True,
+            stored_dtype="int16",
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "Value encoding" in md
+    assert "scale_offset → int16" in md
+    assert "without" in md and "unscaling" in md
+
+
+def test_summary_omits_the_scale_offset_note_when_inactive():
+    run = _sample_run()
+    run.format_id = "geozarr"
+    run.object_layouts = [
+        GeoZarrLayout(
+            name="FRE_B4",
+            size_bytes=200,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=1,
+            shard_count=4,
+            stored_dtype="int16",
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "scale_offset" not in md

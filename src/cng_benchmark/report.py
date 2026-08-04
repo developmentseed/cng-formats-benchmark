@@ -168,17 +168,36 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
         f"- **Shard objects:** {shards} across {len(layouts)} array(s)",
         "",
         "| Array | Chunk | Shard | Chunks/shard | Codec | Levels | Shards"
-        " | Compression |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        " | Compression | Value encoding |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         chunk = "×".join(str(v) for v in ly.chunk_shape)
         shard = "×".join(str(v) for v in ly.shard_shape)
         ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
+        # Whether the array itself applies the scale, or leaves that to the
+        # client — the encoding-semantics contrast with COG.
+        if ly.scale_offset:
+            encoding = "scale_offset"
+            if ly.stored_dtype:
+                encoding += f" → {ly.stored_dtype}"
+        else:
+            encoding = ly.stored_dtype or "—"
         lines.append(
             f"| {ly.name} | {chunk} | {shard} | {ly.chunks_per_shard} | "
-            f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} | {ratio} |"
+            f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} | {ratio} "
+            f"| {encoding} |"
         )
+    if any(ly.scale_offset for ly in layouts):
+        lines += [
+            "",
+            "> `scale_offset` arrays apply the source's scale in the array's own"
+            " codec pipeline, so any Zarr reader returns physical units without"
+            " unscaling them itself. The packed integer is still what occupies"
+            " the shard, so the sizes above stay comparable with the COG arm —"
+            " where the same scale is out-of-band metadata the client must find"
+            " and apply.",
+        ]
     return lines
 
 

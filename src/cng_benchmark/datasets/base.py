@@ -50,12 +50,17 @@ class SourceObject:
     stored as ``int16`` DN with -10000 as fill and a 1/10000 quantification —
     because the delivered rasters declare neither in their headers. ``None``
     means "whatever the source declares".
+
+    ``scale_offset`` asks the target format to apply ``scale_factor`` in the
+    object's own encoding, rather than leaving a client to unscale — a request
+    only some formats can honour, which is what makes it worth measuring.
     """
 
     name: str
     uri: str
     nodata: float | None = None
     scale_factor: float | None = None
+    scale_offset: bool = False
 
 
 @dataclass(frozen=True)

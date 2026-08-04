@@ -71,11 +71,18 @@ class Sentinel2MajaOptions(DatasetOptions):
     spectral bands to include, and ``masks`` which mask families to fan in. An
     empty list means "none of that family"; omit ``masks`` to profile
     reflectance only.
+
+    ``scale_offset`` asks the target format to encode MAJA's reflectance
+    quantification in the array's codec pipeline rather than as side metadata,
+    so a reader gets physical reflectance without unscaling it itself. Only the
+    GeoZarr arm can honour it — that asymmetry is the point of the comparison
+    (#54) — and it applies to the reflectance bands, never the masks.
     """
 
     reflectance: list[str] = ["FRE"]
     bands: list[str] = ["B2", "B3", "B4", "B8"]
     masks: list[str] = []
+    scale_offset: bool = False
 
 
 @DATASETS.register("sentinel2-maja")
@@ -102,6 +109,7 @@ class Sentinel2MajaDataset(ZipDeliveryDataset):
                             uri=_member_vsi_uri(zip_uri, member),
                             nodata=_MAJA_NODATA,
                             scale_factor=_MAJA_SCALE_FACTOR,
+                            scale_offset=opts.scale_offset,
                         )
                     )
                 continue

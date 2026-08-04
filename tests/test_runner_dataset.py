@@ -189,6 +189,7 @@ class _PixelMetadataDataset(Dataset):
                         uri=str(files[0]),
                         nodata=-10000.0,
                         scale_factor=1e-4,
+                        scale_offset=True,
                     ),
                     SourceObject(name="mask", uri=str(files[1])),
                 ],
@@ -265,9 +266,11 @@ def test_component_nodata_and_scale_reach_the_adapter(tmp_path):
     assert len(seen) == 2
     assert seen[0]["nodata"] == -10000.0
     assert seen[0]["scale_factor"] == 1e-4
-    # The mask carries neither, so nothing is injected for it.
+    assert seen[0]["scale_offset"] is True
+    # The mask carries none of them, so nothing is injected for it.
     assert "nodata" not in seen[1]
     assert "scale_factor" not in seen[1]
+    assert "scale_offset" not in seen[1]
 
 
 def test_explicit_config_param_overrides_the_component_value(tmp_path):

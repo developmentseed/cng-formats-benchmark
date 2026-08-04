@@ -148,7 +148,7 @@ name and reads what it needs, so adding a format never changes the schema:
 | Format | `params` levers |
 | --- | --- |
 | `cog` | `block_size` (internal tiling), `compress` |
-| `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels`; `display_titiler_path` selects the multidim/xarray TiTiler router for display |
+| `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels`, `scale_offset` (apply a packed source's scale in the array's codec pipeline); `display_titiler_path` selects the multidim/xarray TiTiler router for display |
 | `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` |
 | `copc` | `span` (per-node voxel-grid edge — the per-node point budget ≈ `span**3`), `max_depth` (octree depth; `null` derives it from point density), `scale` (`null` derives LAS quantisation from the extent) |
 
@@ -159,6 +159,25 @@ so it flows through the same `--source` and `--dataset` paths. `chunk_shape` /
 spatial, dims are used) and tolerate a swept list of shapes (the first is taken).
 Time-stacking the scenes into a 3D cube, and reading a set of objects as a cube,
 are deferred follow-ups.
+
+`scale_offset` decides how a **packed** source — one whose values are counts to be
+multiplied by a scale, like Sentinel-2 MAJA reflectance (DN = reflectance × 10000)
+— is encoded:
+
+| | Off (default) | On |
+| --- | --- | --- |
+| Where the scale lives | CF `scale_factor` / `add_offset` attributes | the array's codec pipeline (`scale_offset` + `cast_value`) |
+| Array's declared dtype | the stored integer | float |
+| What a plain Zarr reader gets | the raw count — it must know to unscale | physical units |
+| What reaches disk | the integer | the integer |
+
+Both write the same bytes, so object sizes and compression ratios stay comparable
+with the COG arm — where the equivalent scale is always out-of-band metadata
+(GeoTIFF tags, STAC `raster:scale`, GDAL `unscale=True`) that a client has to find
+and apply. That contrast is the point of the lever, so `summary.md` reports the
+active encoding per array in the "Chunk/shard layout" table. Turning it on needs
+the `geozarr` extra's `cast-value-rs`, and it is a no-op for a source with no
+scale (a mask, say).
 
 !!! note "Why URIs are usually omitted from the file"
     Keeping `source` / `output` out of the committed config makes it portable
