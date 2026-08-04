@@ -16,6 +16,12 @@ The write core (:func:`_write_geoparquet`, :func:`enumerate_objects`,
 ``shapely``, so the lever / enumerate / layout logic is unit-testable on a
 synthetic in-memory GeoDataFrame. Only :meth:`GeoParquetAdapter.convert`'s source
 read needs an OGR driver (``pyogrio``, the ``geoparquet`` extra), imported lazily.
+
+The per-column codec (``params['compression']``) defaults to ``zstd``, not
+geopandas'/pyarrow's own ``snappy`` default — the CNES D2 review's leading
+hypothesis for LakeSP's GeoParquet coming out **larger** than the zipped
+shapefile source was the row-group codec (#73). ``compression_level`` and
+``data_page_size`` round out the sweep once the codec name itself is fixed.
 """
 
 from __future__ import annotations
@@ -44,7 +50,11 @@ class GeoParquetParams(BaseModel):
     ``spatial_partitioning`` (default on) spatially orders the features before
     writing so each row group's covering bbox is compact — the lever that makes a
     bbox query touch fewer groups. ``compression`` is the per-column codec
-    (``zstd`` default).
+    (``zstd`` default — geopandas/pyarrow's own default is ``snappy``, the codec
+    the CNES D2 review's +14%-vs-shapefile hypothesis pinned as the culprit
+    (#73); ``compression_level`` and ``data_page_size`` are the finer knobs
+    (codec effort, and the parquet-internal page granularity within a row
+    group) a codec sweep can tune once the row-group lever is fixed.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -52,6 +62,8 @@ class GeoParquetParams(BaseModel):
     row_group_rows: Any = None
     spatial_partitioning: bool = True
     compression: str = "zstd"
+    compression_level: int | None = None
+    data_page_size: int | None = None
 
 
 def _row_group_rows(value: Any, default: int = DEFAULT_ROW_GROUP_ROWS) -> int:
@@ -92,23 +104,34 @@ def _write_geoparquet(
     row_group_rows: int,
     spatial_partitioning: bool,
     compression: str = "zstd",
+    compression_level: int | None = None,
+    data_page_size: int | None = None,
 ) -> None:
     """Write ``gdf`` to ``target`` as a GeoParquet file with the grouping lever.
 
     Features are (optionally) spatially sorted, then written with the configured
     ``row_group_rows`` per row group and a GeoParquet 1.1 covering-bbox column
     (``write_covering_bbox=True``) so a reader can push a bbox predicate down to
-    the overlapping row groups. Pure ``geopandas`` + ``pyarrow`` — no OGR — so it
-    is CI-testable on a synthetic GeoDataFrame.
+    the overlapping row groups. ``compression_level`` and ``data_page_size`` are
+    forwarded to pyarrow's writer as-is (``None`` uses the codec's / pyarrow's
+    own default) — the finer half of the codec-sweep lever (#73), on top of the
+    codec name itself. Pure ``geopandas`` + ``pyarrow`` — no OGR — so it is
+    CI-testable on a synthetic GeoDataFrame.
     """
     if spatial_partitioning and len(gdf) > 1:
         gdf = _spatial_sort(gdf)
+    kwargs: dict[str, Any] = {}
+    if compression_level is not None:
+        kwargs["compression_level"] = compression_level
+    if data_page_size is not None:
+        kwargs["data_page_size"] = data_page_size
     gdf.to_parquet(
         target,
         index=False,
         compression=compression,
         row_group_size=row_group_rows,
         write_covering_bbox=True,
+        **kwargs,
     )
 
 
@@ -196,6 +219,8 @@ class GeoParquetAdapter(FormatAdapter):
             row_group_rows=_row_group_rows(opts.row_group_rows),
             spatial_partitioning=opts.spatial_partitioning,
             compression=opts.compression,
+            compression_level=opts.compression_level,
+            data_page_size=opts.data_page_size,
         )
 
     def describe_grouping_lever(self) -> str:

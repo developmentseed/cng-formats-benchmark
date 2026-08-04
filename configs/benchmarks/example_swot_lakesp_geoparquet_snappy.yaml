@@ -1,0 +1,35 @@
+# Example benchmark arm: SWOT LakeSP -> GeoParquet, snappy codec (#73).
+#
+# Identical to example_swot_lakesp_geoparquet.yaml except for `compression:
+# snappy` — geopandas'/pyarrow's own default codec, and Guillaume's leading
+# hypothesis for why the CNES D2 review's LakeSP GeoParquet came out +14%
+# larger than the zipped shapefile source. Running this arm alongside the
+# zstd baseline isolates how much of the gap is the row-group codec versus
+# the format itself (the write_covering_bbox spatial-index column, WKB
+# geometry encoding, …).
+#
+# Run with `--dataset configs/datasets/example_swot_lakesp_prior.yaml` (chart:
+# runner.datasetFile). `output` is supplied by the deployment.
+id: example-swot-lakesp-geoparquet-snappy
+dataset: example-swot-lakesp-prior
+formats:
+  - geoparquet
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  row_group_rows: 50000
+  spatial_partitioning: true
+  compression: snappy             # the codec-sweep baseline (#73)
+  scope: product-set     # product (one pass) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1
