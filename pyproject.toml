@@ -34,15 +34,17 @@ cog = [
 # georeferenced xarray array. zarr + xarray + numpy are also pulled into `dev`
 # (below) so the sharding-lever / enumerate / layout logic is unit-tested in CI on
 # synthetic in-memory arrays — only the rioxarray source-read path skips there.
-# `cast-value-rs` backs zarr's `cast_value` codec, which the `scale_offset`
-# encoding chains after `scale_offset` to store the packed integer on disk while
-# the array reads back as physical float (see the GeoZarr adapter).
+# zarr's own `cast-value-rs` extra installs the (Rust) backing for its
+# `cast_value` codec — zarr ships the codec class but not its implementation.
+# The `scale_offset` encoding chains that codec after `scale_offset` to store the
+# packed integer on disk while the array reads back as physical float (see the
+# GeoZarr adapter). Taking it as an extra of zarr keeps the version relationship
+# zarr's to state rather than ours to guess.
 geozarr = [
-    "zarr>=3.2",
+    "zarr[cast-value-rs]>=3.2",
     "xarray>=2024.1",
     "rioxarray>=0.15",
     "s3fs>=2024",
-    "cast-value-rs>=0.1",
 ]
 # GeoParquet writes need geopandas (1.0+, for the covering-bbox column and bbox
 # read filter) on pyarrow; pyogrio is the OGR driver that reads the source
@@ -74,10 +76,9 @@ dev = [
     "ruff>=0.6",
     "boto3>=1.34",
     "moto[s3]>=5",
-    "zarr>=3.2",
+    "zarr[cast-value-rs]>=3.2",
     "xarray>=2024.1",
     "numpy>=1.26",
-    "cast-value-rs>=0.1",
     "geopandas>=1.0",
     "pyarrow>=14",
     "shapely>=2",

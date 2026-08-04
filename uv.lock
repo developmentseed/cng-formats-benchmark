@@ -501,7 +501,6 @@ copc = [
 ]
 dev = [
     { name = "boto3" },
-    { name = "cast-value-rs" },
     { name = "copclib" },
     { name = "geopandas" },
     { name = "h5netcdf" },
@@ -514,7 +513,7 @@ dev = [
     { name = "ruff" },
     { name = "shapely" },
     { name = "xarray" },
-    { name = "zarr" },
+    { name = "zarr", extra = ["cast-value-rs"] },
 ]
 docs = [
     { name = "mkdocs-material" },
@@ -528,11 +527,10 @@ geoparquet = [
     { name = "shapely" },
 ]
 geozarr = [
-    { name = "cast-value-rs" },
     { name = "rioxarray" },
     { name = "s3fs" },
     { name = "xarray" },
-    { name = "zarr" },
+    { name = "zarr", extra = ["cast-value-rs"] },
 ]
 s3 = [
     { name = "boto3" },
@@ -542,8 +540,6 @@ s3 = [
 requires-dist = [
     { name = "boto3", marker = "extra == 'dev'", specifier = ">=1.34" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
-    { name = "cast-value-rs", marker = "extra == 'dev'", specifier = ">=0.1" },
-    { name = "cast-value-rs", marker = "extra == 'geozarr'", specifier = ">=0.1" },
     { name = "copclib", marker = "extra == 'copc'", specifier = ">=2.6" },
     { name = "copclib", marker = "extra == 'dev'", specifier = ">=2.6" },
     { name = "geopandas", marker = "extra == 'dev'", specifier = ">=1.0" },
@@ -579,8 +575,8 @@ requires-dist = [
     { name = "xarray", marker = "extra == 'copc'", specifier = ">=2024.1" },
     { name = "xarray", marker = "extra == 'dev'", specifier = ">=2024.1" },
     { name = "xarray", marker = "extra == 'geozarr'", specifier = ">=2024.1" },
-    { name = "zarr", marker = "extra == 'dev'", specifier = ">=3.2" },
-    { name = "zarr", marker = "extra == 'geozarr'", specifier = ">=3.2" },
+    { name = "zarr", extras = ["cast-value-rs"], marker = "extra == 'dev'", specifier = ">=3.2" },
+    { name = "zarr", extras = ["cast-value-rs"], marker = "extra == 'geozarr'", specifier = ">=3.2" },
 ]
 
 [[package]]
@@ -2757,4 +2753,9 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/93/8d/aeb164004f87543b06ef54f885d02c342c31ceb274e2bbec470a98927621/zarr-3.2.1.tar.gz", hash = "sha256:71565b738a0e7e8ed226f0516eba8c6bb53440ad7669a8c48ebb3534a161d035", size = 675161 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/0a/469e2bd01be1490336e6c8707386845655d59261543315778a3ccc7e8019/zarr-3.2.1-py3-none-any.whl", hash = "sha256:f78cdd3d9687ad0e9f9cba2c5683b64f0c52589c19f685eeabe872e93cc0d2c7", size = 319617 },
+]
+
+[package.optional-dependencies]
+cast-value-rs = [
+    { name = "cast-value-rs" },
 ]
