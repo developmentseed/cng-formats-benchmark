@@ -43,10 +43,39 @@ def test_example_sentinel1_dataset_config_validates():
     assert cfg.options["polarizations"] == ["VV", "VH"]
 
 
+def test_example_sentinel1_cog_benchmark_configs_validate():
+    cfg = load_benchmark_config("configs/benchmarks/example_sentinel1_rtc_cog.yaml")
+    assert cfg.dataset == "example-sentinel1-rtc"
+    assert cfg.formats == ["cog"]
+    assert "codec" not in cfg.params  # deflate baseline: no override
+
+    zstd_cfg = load_benchmark_config(
+        "configs/benchmarks/example_sentinel1_rtc_cog_zstd.yaml"
+    )
+    assert zstd_cfg.params["codec"] == "zstd"
+
+
+def test_example_sentinel1_geozarr_benchmark_config_validates():
+    cfg = load_benchmark_config("configs/benchmarks/example_sentinel1_rtc_geozarr.yaml")
+    assert cfg.formats == ["geozarr"]
+    assert cfg.params["codec"] == "zstd"
+    ds = load_dataset_config("configs/datasets/example_sentinel1_rtc.yaml")
+    assert "geozarr" in ds.target_formats
+
+
 def test_example_maja_benchmark_config_validates():
     cfg = load_benchmark_config(MAJA_BENCHMARK_EXAMPLE)
     assert cfg.params["scope"] == "product-set"
     assert cfg.params["products"]["limit"] == 3
+
+
+def test_example_maja_cog_zstd_benchmark_config_validates():
+    # Matched-codec arm (#72): COG run with the same codec as the GeoZarr arm.
+    cfg = load_benchmark_config(
+        "configs/benchmarks/example_sentinel2_maja_cog_zstd.yaml"
+    )
+    assert cfg.formats == ["cog"]
+    assert cfg.params["codec"] == "zstd"
 
 
 def test_example_maja_geozarr_benchmark_config_validates():

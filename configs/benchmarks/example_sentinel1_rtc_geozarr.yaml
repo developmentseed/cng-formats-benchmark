@@ -1,0 +1,45 @@
+# Example benchmark arm: Sentinel-1 RTC (gamma0) -> GeoZarr v3 (per-component, 2D).
+#
+# The RTC analogue of example_sentinel2_maja_geozarr.yaml: each VV/VH gamma0
+# band (picked in the dataset `options`) is converted independently to its own
+# sharded 2D GeoZarr store — the head-to-head structural comparison against the
+# COG arm, from the same canonical source. Unlike MAJA, RTC gamma0 is not a
+# packed/scaled product, so `scale_offset` does not apply here; the reader
+# supplies `standard_name` (backscatter coefficient) per component.
+#
+# Run with `--dataset configs/datasets/example_sentinel1_rtc.yaml`. `output`
+# (and the TiTiler endpoint for display) are supplied by the deployment.
+id: example-sentinel1-rtc-geozarr
+dataset: example-sentinel1-rtc
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # Zarr v3 sharding is the object-grouping lever (chunk = addressable unit,
+  # shard = stored object); mirrors the MAJA GeoZarr arm's granularity.
+  chunk_shape: [1024, 1024]
+  shard_shape: [2048, 2048]
+  codec: zstd                     # matched against the COG arm's codec (#72)
+  # Overview pyramid, /2 down to roughly a tile — the analogue of the COG arm's
+  # overviews (#71); `auto` derives the depth from the scene.
+  multiscale_levels: auto
+  scope: product-set              # product (one scene) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1
+    display: 1
+  # GeoZarr display is served by a multidim/xarray TiTiler surface, not the COG
+  # endpoints; `display_titiler_path` selects that router (deploy-specific). The
+  # in-stack `titiler-xarray` serves at the root, so leave this empty.
+  display_titiler_path: ""

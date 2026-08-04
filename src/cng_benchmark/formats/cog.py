@@ -19,6 +19,10 @@ from cng_benchmark.registry import FORMATS
 #: Default internal tile (block) size when the config carries no lever value.
 DEFAULT_BLOCK_SIZE = 512
 
+#: Default codec when the config carries no `codec` value — GDAL's traditional
+#: COG default, and the deflate side of the matched-codec comparison (#72).
+DEFAULT_CODEC = "deflate"
+
 
 def _require_geo():
     """Import the geo stack, raising a clear error if the ``cog`` extra is absent."""
@@ -44,8 +48,9 @@ class CogAdapter(FormatAdapter):
         The grouping lever is the internal block size, taken from
         ``params['block_size']`` (default :data:`DEFAULT_BLOCK_SIZE`); a list
         value uses its first element so a swept lever degrades to a single run.
-        Compression defaults to deflate and can be overridden with
-        ``params['compress']``.
+        The codec is taken from ``params['codec']`` (default
+        :data:`DEFAULT_CODEC`; e.g. ``deflate`` | ``zstd``) — the COG side of the
+        matched-codec comparison against GeoZarr's own ``codec`` param (#72).
         """
         cog_translate, cog_profiles = _require_geo()
 
@@ -54,7 +59,7 @@ class CogAdapter(FormatAdapter):
             block = block[0]
         block = int(block)
 
-        profile = cog_profiles.get(str(params.get("compress", "deflate")))
+        profile = cog_profiles.get(str(params.get("codec", DEFAULT_CODEC)))
         profile.update(blockxsize=block, blockysize=block)
         kwargs: dict = {}
         if "nodata" in params:

@@ -1,0 +1,29 @@
+# Example fan-out benchmark: profile a Sentinel-1 RTC (gamma0) tile as COG.
+#
+# Pairs with datasets/example_sentinel1_rtc.yaml (run with `--dataset`). The
+# benchmark carries only run-shape params — the component pick (VV/VH
+# polarisations) lives in the dataset `options`, not here. `object_size` +
+# `write` cover every component; `read` is sampled to one representative band
+# per scene. Codec defaults to deflate — the baseline side of the matched-codec
+# comparison in example_sentinel1_rtc_cog_zstd.yaml (#72).
+id: example-sentinel1-rtc-cog
+dataset: example-sentinel1-rtc
+formats:
+  - cog
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: warm
+    min_object_bytes: 33554432    # 32 MiB
+  - name: cold
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  block_size: 512
+  scope: product-set              # one scene (product) | many (product-set)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1                       # sample one component per product for read
