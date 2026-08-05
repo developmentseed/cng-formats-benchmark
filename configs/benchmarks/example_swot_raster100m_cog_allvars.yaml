@@ -1,0 +1,40 @@
+# Example benchmark arm: SWOT L2 HR Raster 100m, content-complete -> COG.
+#
+# Closes CNES consolidated-metrics gap 1 (content subset) and gap 5 (wrong
+# geography) together: every CF variable the granule carries
+# (`options.variables: all` on the dataset, not a `wse`-only pick) is converted
+# to its own COG, and the product set is bounded to the UTM zones over mainland
+# France + Corsica (`params.products.pattern`) rather than the full
+# nominal-orbit sweep (UTM zones 20-32) the un-filtered staged sample spans.
+# The scope travels into `result.json` as `params.products.pattern` (recorded
+# verbatim by the runner), so a roll-up built from this run cannot be
+# mislabelled "France" again if the filter is ever widened or dropped.
+#
+# Run with `--dataset configs/datasets/example_swot_raster100m_allvars.yaml`
+# (chart: runner.datasetFile). `output` is supplied by the deployment.
+id: example-swot-raster100m-cog-allvars
+dataset: example-swot-raster100m-allvars
+formats:
+  - cog
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  block_size: 512
+  scope: product-set     # product (one granule) | product-set (many)
+  products:
+    prefix: ""
+    # Mainland France + Corsica span UTM zones 30N-32N — adjust to the real
+    # CNES delivery's exact granule-naming convention when wiring a live
+    # source; the nominal orbit this sample is staged from spans zones 20-32
+    # unfiltered (the "Nom" in the folder name is nominal *orbit*, not France).
+    pattern: "UTM3[0-2][NS]"
+    limit: 3
+  samples:
+    read: 1

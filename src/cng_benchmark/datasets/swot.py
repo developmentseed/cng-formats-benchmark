@@ -13,22 +13,40 @@ A variable is read in place through GDAL's CF subdataset syntax
 conversion's write metric pays the real granule read cost. Which variables a run
 profiles is the layout-specific pick, carried in ``options`` and validated by
 :class:`SwotRaster100mOptions`; the default is the primary water-surface-elevation
-variable (``wse``).
+variable (``wse``). ``variables: all`` (or ``"*"``) instead profiles **every** CF
+variable the granule carries (enumerated via
+:func:`~cng_benchmark.datasets.granule._list_cf_subdatasets`) — the
+content-complete pick a like-for-like comparison against the as-delivered
+multi-variable ``.nc`` needs (#86, the same class of correction as the
+content-complete PIXC point cloud, #38): profiling ``wse`` alone against a
+granule that carries fifteen to twenty CF variables measures dropped content,
+not compression.
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
+from cng_benchmark import storage
 from cng_benchmark.datasets.base import (
     DatasetOptions,
     SingleBandComposite,
     SourceObject,
 )
-from cng_benchmark.datasets.granule import GranuleDataset, _subdataset_vsi_uri
+from cng_benchmark.datasets.granule import (
+    GranuleDataset,
+    _list_cf_subdatasets,
+    _subdataset_vsi_uri,
+)
 from cng_benchmark.registry import DATASETS
 
 #: The primary SWOT HR Raster variable — water surface elevation — profiled when
 #: ``options.variables`` is unset. Overridable to select any CF variable(s).
 DEFAULT_VARIABLES = ["wse"]
+
+#: ``variables`` sentinel values meaning "profile every CF variable in the
+#: granule" rather than a fixed pick.
+_ALL_VARIABLES = ("all", "*")
 
 
 class SwotRaster100mOptions(DatasetOptions):
@@ -37,10 +55,13 @@ class SwotRaster100mOptions(DatasetOptions):
     ``variables`` selects which CF variables to profile, one component each.
     ``None`` (the default) profiles the primary :data:`DEFAULT_VARIABLES`; an
     explicit list selects exactly those, in order, so the representative read/
-    display sample (the runner takes the first component) is deterministic.
+    display sample (the runner takes the first component) is deterministic;
+    ``"all"`` (or ``"*"``) profiles every CF variable the granule carries,
+    enumerated at run time — the content-complete pick for an honest
+    compression comparison against the as-delivered ``.nc``.
     """
 
-    variables: list[str] | None = None
+    variables: list[str] | Literal["all", "*"] | None = None
 
 
 @DATASETS.register("swot-raster100m")
@@ -51,15 +72,32 @@ class SwotRaster100mDataset(GranuleDataset):
     granule_suffix = ".nc"
 
     def _select_components(self, granule_uri: str) -> list[SourceObject]:
-        opts: SwotRaster100mOptions = self.options
-        variables = opts.variables if opts.variables else DEFAULT_VARIABLES
+        variables = self._resolve_variables(granule_uri)
         return [
             SourceObject(name=var, uri=_subdataset_vsi_uri(granule_uri, var))
             for var in variables
         ]
 
-    def viewer_bands(self) -> list[SingleBandComposite]:
-        """One viewer VRT per configured variable, mosaicked across granules."""
+    def _resolve_variables(self, granule_uri: str) -> list[str]:
         opts: SwotRaster100mOptions = self.options
-        variables = opts.variables if opts.variables else DEFAULT_VARIABLES
+        if opts.variables in _ALL_VARIABLES:
+            return _list_cf_subdatasets(granule_uri)
+        return opts.variables if opts.variables else DEFAULT_VARIABLES
+
+    def viewer_bands(self) -> list[SingleBandComposite]:
+        """One viewer VRT per configured variable, mosaicked across granules.
+
+        For ``variables: all``/``"*"`` the variable set is not known statically
+        (it depends on the granule's own content), so one granule under
+        ``source`` is peeked at to resolve it; an empty ``source`` yields no
+        bands rather than failing the run.
+        """
+        opts: SwotRaster100mOptions = self.options
+        if opts.variables in _ALL_VARIABLES:
+            granules = storage.list_uris(
+                self.source_uri, role="source", suffix=self.granule_suffix, limit=1
+            )
+            variables = _list_cf_subdatasets(granules[0]) if granules else []
+        else:
+            variables = opts.variables if opts.variables else DEFAULT_VARIABLES
         return [SingleBandComposite(name=var, band=var) for var in variables]

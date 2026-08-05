@@ -390,6 +390,31 @@ def test_zip_source_uri_s3_size_via_object_size(s3_bucket):
     assert storage.object_size(zip_uri, role="sink") == len(zip_data)
 
 
+def test_netcdf_source_uri_s3_subdataset():
+    uri = 'NETCDF:"/vsis3/bucket/Raster100m/SWOT_UTM31N.nc":wse'
+    assert storage.netcdf_source_uri(uri) == "s3://bucket/Raster100m/SWOT_UTM31N.nc"
+
+
+def test_netcdf_source_uri_local_subdataset():
+    uri = 'NETCDF:"/tmp/data/SWOT_UTM31N.nc":wse'
+    assert storage.netcdf_source_uri(uri) == "/tmp/data/SWOT_UTM31N.nc"
+
+
+def test_netcdf_source_uri_not_netcdf():
+    assert storage.netcdf_source_uri("/vsis3/bucket/key.tif") is None
+    assert storage.netcdf_source_uri("s3://bucket/key.nc") is None
+    assert storage.netcdf_source_uri("PIXC:s3://bucket/key.nc::pixel_cloud") is None
+
+
+def test_netcdf_source_uri_s3_size_via_object_size(s3_bucket):
+    granule_data = b"fake netcdf content of known size"
+    storage.write_bytes(f"s3://{s3_bucket}/Raster100m/SWOT_UTM31N.nc", granule_data)
+    sub_uri = f'NETCDF:"/vsis3/{s3_bucket}/Raster100m/SWOT_UTM31N.nc":wse'
+    granule_uri = storage.netcdf_source_uri(sub_uri)
+    assert granule_uri == f"s3://{s3_bucket}/Raster100m/SWOT_UTM31N.nc"
+    assert storage.object_size(granule_uri, role="sink") == len(granule_data)
+
+
 def test_list_uris_s3_filters_by_suffix(s3_bucket):
     storage.write_bytes(f"s3://{s3_bucket}/t/2015/a.zip", b"z")
     storage.write_bytes(f"s3://{s3_bucket}/t/2015/a.xml", b"m")

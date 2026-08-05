@@ -54,7 +54,7 @@ one registry line; the core config and runner are untouched.
 | `single-object` (default) | one product, one component = `source` | none |
 | `sentinel2-maja` | a `.zip`-per-scene MAJA L2A delivery under `source` | `reflectance` (FRE/SRE), `bands`, `masks` (CLM/EDG/SAT/MG2) |
 | `sentinel1-otb-rtc` | a `.zip`-per-scene S1Tiling (OTB) RTC gamma0 delivery under `source` | `polarizations` (VV/VH) |
-| `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`) |
+| `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`; `all`/`"*"` profiles every CF variable the granule carries) |
 | `swot-lakesp-prior` | a `.zip`-per-pass shapefile delivery under `source` (SWOT L2 HR LakeSP Prior) | none (one `.shp` member = one component) |
 | `swot-pixc` | one netCDF point-cloud granule per file under `source` (SWOT L2 HR PIXC) | `groups` (default `pixel_cloud`); `point_variables` (allow-list of carried point vars; default all) / `exclude_variables` (deny-list) |
 | `sentinel2-l2b-snow-lis` | one loose GeoTIFF per date, flat under a tile `source` (Sentinel-2 L2B snow / Let-it-Snow) | none (one file = one component) |
@@ -81,7 +81,19 @@ layout — one netCDF file per granule, flat under `source` — where each selec
 CF `variable` becomes one component, read in place via GDAL's CF subdataset
 syntax (`NETCDF:"<granule>":<variable>`) and converted to a sharded GeoZarr store
 by the existing GeoZarr adapter. `variables` defaults to the primary
-water-surface-elevation variable (`wse`).
+water-surface-elevation variable (`wse`); set it to `all` (or `"*"`) to profile
+**every** CF variable the granule carries instead — enumerated from the
+granule's own GDAL subdatasets, not hand-listed — so a run is content-complete
+against the as-delivered `.nc` (which typically carries fifteen to twenty CF
+variables) rather than measuring dropped content as if it were compression.
+
+A `variables: all` run pairs with the product-set `pattern` filter (below) to
+also fix the *geography*: the staged nominal-orbit sample spans many UTM zones,
+so an unfiltered run and any "France-wide" roll-up built from it are two
+different things unless the product set is explicitly bounded. See
+`configs/benchmarks/example_swot_raster100m_cog_allvars.yaml` and its GeoZarr
+sibling for a run that does both at once, closing CNES consolidated-metrics
+gaps 1 (content subset) and 5 (wrong geography).
 
 The `swot-lakesp-prior` reader is the *vector* arm — a cross-mission proof that a
 non-raster delivery wires through config alone. It is the same `.zip`-per-scene
@@ -278,6 +290,7 @@ params:
 | --- | --- |
 | `scope` | `product` (one product) or `product-set` (the bounded set) |
 | `products.prefix` / `products.limit` | bound which/how many products a set covers — `prefix` is a path prefix **under** `source` (applied server-side for S3), `limit` caps the count |
+| `products.pattern` | a regex (`re.search`, matched against the key relative to `source`) that selects a set that is not a single path-prefix — e.g. the UTM zones over France in a SWOT Raster100m mosaic (`"UTM3[0-2][NS]"`) — narrow with `prefix` where possible so the regex only filters server-returned candidates |
 | `samples.read` / `samples.display` | how many components per product to sample for read/display (default 1) |
 
 `object_size` and `write` cover **every** component; `read` and `display` run on

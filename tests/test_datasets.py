@@ -337,6 +337,89 @@ def test_swot_rejects_unknown_option():
         build_dataset(_dataset_config(reader="swot-raster100m", options={"bogus": 1}))
 
 
+def test_swot_rejects_variables_typo():
+    # A bare non-sentinel string (e.g. a forgotten list bracket) is not a valid
+    # pick — only an explicit list, or the "all"/"*" sentinel, is.
+    with pytest.raises(ValidationError):
+        build_dataset(
+            _dataset_config(reader="swot-raster100m", options={"variables": "wse"})
+        )
+
+
+def _write_raster100m_netcdf(path, variables=("wse", "sig0", "water_area")):
+    """Write a synthetic Raster100m netCDF: 2-D CF variables + a scalar grid-mapping
+    placeholder (which GDAL does not list as a subdataset)."""
+    import numpy as np
+    import xarray as xr
+
+    rng = np.random.default_rng(3)
+    data_vars: dict[str, object] = {
+        var: (("y", "x"), rng.uniform(0, 1, (4, 5)).astype("float32"))
+        for var in variables
+    }
+    data_vars["crs"] = ((), 0)
+    ds = xr.Dataset(data_vars, coords={"y": np.arange(4), "x": np.arange(5)})
+    ds.to_netcdf(str(path), engine="h5netcdf")
+
+
+def test_swot_all_variables_enumerates_cf_subdatasets(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+
+    granule = tmp_path / "SWOT_L2_HR_Raster_100m_UTM31N.nc"
+    _write_raster100m_netcdf(granule, variables=("wse", "sig0", "water_area"))
+
+    ds = _swot(variables="all")
+    components = ds._select_components(str(granule))
+    assert [c.name for c in components] == ["wse", "sig0", "water_area"]
+    assert components[0].uri == f'NETCDF:"{granule}":wse'
+
+
+def test_swot_all_variables_star_sentinel_equivalent(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+
+    granule = tmp_path / "SWOT_L2_HR_Raster_100m_UTM31N.nc"
+    _write_raster100m_netcdf(granule, variables=("wse", "sig0"))
+
+    ds = _swot(variables="*")
+    components = ds._select_components(str(granule))
+    assert [c.name for c in components] == ["wse", "sig0"]
+
+
+def test_swot_all_variables_viewer_bands_peeks_one_granule(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+
+    root = tmp_path / "Raster100m_Nom_France"
+    root.mkdir()
+    _write_raster100m_netcdf(
+        root / "SWOT_cycle048_UTM31N.nc", variables=("wse", "sig0", "water_area")
+    )
+
+    cfg = _dataset_config(
+        reader="swot-raster100m",
+        source=str(root),
+        options={"variables": "all"},
+    )
+    ds = build_dataset(cfg)
+    bands = ds.viewer_bands()
+    assert [b.band for b in bands] == ["wse", "sig0", "water_area"]
+
+
+def test_swot_all_variables_viewer_bands_empty_source_yields_no_bands(tmp_path):
+    root = tmp_path / "empty"
+    root.mkdir()
+    cfg = _dataset_config(
+        reader="swot-raster100m", source=str(root), options={"variables": "all"}
+    )
+    ds = build_dataset(cfg)
+    assert ds.viewer_bands() == []
+
+
 def test_swot_enumerates_granules_from_local_files(tmp_path):
     root = tmp_path / "Raster100m_Nom_France"
     root.mkdir()

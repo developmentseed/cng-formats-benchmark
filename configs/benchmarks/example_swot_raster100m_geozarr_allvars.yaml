@@ -1,0 +1,46 @@
+# Example benchmark arm: SWOT L2 HR Raster 100m, content-complete -> GeoZarr v3.
+#
+# The GeoZarr sibling of example_swot_raster100m_cog_allvars.yaml — same
+# content-complete dataset (`options.variables: all`) and the same France UTM-zone
+# product filter, so the two formats are compared on an honest, identical
+# before/after basis against the ~50-71 MB as-delivered `.nc` (CNES
+# consolidated-metrics gaps 1 and 5, #86). See that file for the geography note.
+#
+# Run with `--dataset configs/datasets/example_swot_raster100m_allvars.yaml`
+# (chart: runner.datasetFile). `output` (and the TiTiler endpoint for display)
+# are supplied by the deployment.
+id: example-swot-raster100m-geozarr-allvars
+dataset: example-swot-raster100m-allvars
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  chunk_shape: [1024, 1024]
+  shard_shape: [2048, 2048]
+  codec: zstd
+  # Overview pyramid, /2 down to roughly a tile (#71) — see the S2 arm's note.
+  multiscale_levels: auto
+  scope: product-set     # product (one granule) | product-set (many)
+  products:
+    prefix: ""
+    # Mainland France + Corsica span UTM zones 30N-32N — see the COG sibling's
+    # note; adjust to the real CNES delivery's UTM-zone naming when wiring a
+    # live source.
+    pattern: "UTM3[0-2][NS]"
+    limit: 3
+  samples:
+    read: 1
+    display: 1
+  # The raster GeoZarr is displayed by a multidim/xarray TiTiler surface, not the
+  # COG endpoints; `display_titiler_path` selects that router (deploy-specific).
+  # The in-stack `titiler-xarray` serves at the root, so leave this empty.
+  display_titiler_path: ""

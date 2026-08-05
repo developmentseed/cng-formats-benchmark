@@ -46,6 +46,29 @@ class _BinFileDataset(Dataset):
         return [Product(id="sceneZ", components=comps)] if comps else []
 
 
+@DATASETS.register("test-netcdf-granule")
+class _NetcdfGranuleDataset(Dataset):
+    """Test reader: one product per .nc granule; components are CF subdatasets.
+
+    Component URIs are composed as ``NETCDF:"<granule_path>":<var>`` — the same
+    shape :mod:`cng_benchmark.datasets.swot` uses for SWOT Raster100m.
+    """
+
+    def products(self, *, prefix=None, pattern=None, limit=None):
+        root = Path(self.source_uri)
+        granules = sorted(root.glob("*.nc"))
+        if limit is not None:
+            granules = granules[:limit]
+        products = []
+        for granule in granules:
+            components = [
+                SourceObject(name=var, uri=f'NETCDF:"{granule}":{var}')
+                for var in ("wse", "sig0", "water_area")
+            ]
+            products.append(Product(id=granule.stem, components=components))
+        return products
+
+
 @DATASETS.register("test-zip-delivery")
 class _ZipDeliveryDataset(Dataset):
     """Test reader: each *.zip under source is a product whose members are components.
@@ -723,3 +746,31 @@ def test_zip_delivered_bytes_in_equals_zip_size_once(tmp_path):
     # Must equal the zip size exactly — not 3× (one per band).
     assert throughput.detail["bytes_in"] == zip_size
     assert throughput.detail["components"] == len(members)
+
+
+def test_netcdf_granule_bytes_in_equals_granule_size_once(tmp_path):
+    """bytes_in for a multi-variable netCDF granule equals the granule size,
+    not N×granule_size — the SWOT Raster100m ``variables: all`` case (#86)."""
+    pytest.importorskip("rasterio")
+    _register_fake_passthrough()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    granule = src / "SWOT_L2_HR_Raster_100m_UTM31N.nc"
+    granule.write_bytes(b"n" * 900)
+    granule_size = granule.stat().st_size
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["write"], {"scope": "product"}).model_copy(
+        update={"formats": ["fake-passthrough"]}
+    )
+    result = run_dataset_benchmark(
+        cfg, _write_ds_cfg("test-netcdf-granule", src), str(output)
+    )
+
+    run = result.per_product[0]
+    throughput = next(m for m in run.metrics if m.name == "write_throughput")
+    assert "bytes_in" in throughput.detail, "bytes_in missing for netCDF granule source"
+    # Must equal the granule size exactly — not 3× (one per CF variable).
+    assert throughput.detail["bytes_in"] == granule_size
+    assert throughput.detail["components"] == 3
