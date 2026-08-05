@@ -30,8 +30,10 @@ result artifact (`result.json` + `summary.md`) back to MinIO.
 
 ```bash
 docker build -f docker/Dockerfile.runner -t cng-benchmark-runner:dev .
+docker build -f docker/Dockerfile.tiler -t cng-benchmark-tiler:dev .
 cd deploy
-RUNNER_IMAGE=cng-benchmark-runner:dev docker compose up --wait
+RUNNER_IMAGE=cng-benchmark-runner:dev TITILER_IMAGE=cng-benchmark-tiler:dev \
+  docker compose up --wait
 # host ports (9000/9001/8000) are inspection-only and overridable:
 #   MINIO_PORT=19000 TITILER_PORT=18000 docker compose up --wait
 docker compose down -v
@@ -59,6 +61,7 @@ helm template t deploy/helm/cng-benchmark \
 
 kind create cluster --name cngbench
 kind load docker-image cng-benchmark-runner:ci --name cngbench
+kind load docker-image cng-benchmark-tiler:ci --name cngbench
 helm install bench deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/values-local.yaml
 kubectl wait --for=condition=complete --timeout=240s job/bench-cng-benchmark-runner
 ```
@@ -105,10 +108,32 @@ CI change. For docker-compose, drop the YAML under `configs/benchmarks/` (it is
 mounted into the runner) and reference it on the runner command. See
 [Configuration](configuration.md).
 
+### GeoZarr display readers
+
+`titiler` here is the bench's own application (`tiler/`, built into
+`docker/Dockerfile.tiler`), not stock TiTiler — one process, three routers,
+each bound to a different reader, so a display measurement's only variable
+is which reader served it:
+
+| Router | Reader | What it measures |
+| --- | --- | --- |
+| `/cog` | rasterio/GDAL | the COG baseline |
+| `/zarr` | TiTiler's stock xarray defaults | "TiTiler out of the box" against a GeoZarr store |
+| `/geozarr` | `titiler-eopf`'s `GeoZarrReader` (`create_default_indexes=False`, zoom-matched multiscale level, cached datatree open) | a tuned, index-free GeoZarr reader |
+
+A GeoZarr arm's `params.display_titiler_path` picks the router (`zarr` by
+default; see [Configuration](configuration.md)) — comparing the same store's
+`display_*` numbers across `zarr` and `geozarr` arms splits how much of any
+GeoZarr display gap is intrinsic to the format from how much is fixed by a
+better reader. Every `display_*` metric's `detail` records `path_prefix`,
+and each run's `tool_versions` records the tiler's resolved package versions
+(`titiler_core`/`titiler_xarray`/`titiler_eopf`/`tiler_rasterio`/…, read from
+`/healthz`), so no published number is ambiguous about what produced it.
+
 ### Inspecting a run in the TiTiler viewer
 
 Because the chart keeps TiTiler running, a port-forward lets you eyeball a run's
-output in the browser. The basic `titiler.application` has no STAC API and no
+output in the browser. The bench tiler has no STAC API and no
 band-combination UI, so for a COG arm over a multi-band dataset (Sentinel-2,
 Sentinel-1) the runner writes **RGB composite VRTs** at the run's root —
 `run-natural.vrt`, `run-color-infrared.vrt`, `run-swir.vrt` (Sentinel-2),

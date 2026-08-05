@@ -31,7 +31,7 @@ from cng_benchmark.datasets import Product, build_dataset
 from cng_benchmark.datasets.base import Dataset
 from cng_benchmark.formats.base import FormatAdapter, ObjectKind
 from cng_benchmark.gdal_env import gdal_session
-from cng_benchmark.metrics.display import measure_display
+from cng_benchmark.metrics.display import fetch_titiler_versions, measure_display
 from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.metrics.read import (
     measure_copc_read,
@@ -93,6 +93,19 @@ def _log_write_done(
     logger.info("%swrite done (%.1fs%s)", prefix, elapsed, tput_str)
 
 
+def _tool_versions(titiler_endpoint: str | None) -> dict[str, str]:
+    """``cng_benchmark``'s own version, plus the tiler's if reachable.
+
+    Best-effort: a display metric already records which router (``path_prefix``)
+    served each tile, but not which build of that router — this makes the run's
+    ``tool_versions`` the place a report resolves "which reader" to "which code".
+    """
+    versions = {"cng_benchmark": __version__}
+    if titiler_endpoint:
+        versions.update(fetch_titiler_versions(titiler_endpoint))
+    return versions
+
+
 def _measure_object_read(adapter: FormatAdapter, object_uri: str) -> list[MetricResult]:
     """Read part of the produced object back, per its object kind.
 
@@ -137,7 +150,7 @@ def run_benchmark(
     params = {**config.params, "grouping_lever": adapter.describe_grouping_lever()}
     return BenchmarkRun(
         timestamp=datetime.now(UTC),
-        tool_versions={"cng_benchmark": __version__},
+        tool_versions=_tool_versions(None),
         dataset_id=config.dataset,
         format_id=chosen,
         params=params,
@@ -236,7 +249,7 @@ def run_conversion_benchmark(
     params = {**config.params, "grouping_lever": adapter.describe_grouping_lever()}
     return BenchmarkRun(
         timestamp=datetime.now(UTC),
-        tool_versions={"cng_benchmark": __version__},
+        tool_versions=_tool_versions(titiler_endpoint),
         dataset_id=config.dataset,
         format_id=chosen,
         params=params,
@@ -437,7 +450,7 @@ def _run_product(
     }
     run = BenchmarkRun(
         timestamp=datetime.now(UTC),
-        tool_versions={"cng_benchmark": __version__},
+        tool_versions=_tool_versions(titiler_endpoint),
         dataset_id=config.dataset,
         format_id=chosen,
         params=params,
@@ -639,10 +652,13 @@ def _measure_display_object(
     network), times them via TiTiler against the uploaded object, and (best-effort)
     renders the block/chunk-grid + tile-footprint ``display_chunk_layout.png`` next
     to it. Branches on the object kind: a raster file uses TiTiler's ``/cog``
-    endpoints + the rasterio grid; a zarr store uses TiTiler's built-in ``/zarr``
-    endpoint (available since TiTiler 2.0, no separate titiler-xarray needed) at
-    the path set by ``display_titiler_path`` (default ``"zarr"``) + the zarr chunk
-    grid + the ``variable`` query.
+    endpoints + the rasterio grid; a zarr store is served by the router named by
+    ``display_titiler_path`` (default ``"zarr"``, the bench tiler's stock-xarray
+    router; ``"geozarr"`` selects its ``GeoZarrReader``-backed one instead) + the
+    zarr chunk grid. The two routers address the array differently -- the stock
+    router has no multiscale awareness and needs the finest level's ``group=``
+    explicit, while ``GeoZarrReader`` resolves the pyramid itself and addresses
+    the array as ``{group}:{name}`` -- so the query is built per router.
     """
     if not titiler_endpoint:
         raise ValueError("the display metric requires a TiTiler endpoint")
@@ -658,16 +674,27 @@ def _measure_display_object(
 
     targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
     if adapter.object_kind is ObjectKind.ZARR_STORE:
-        from cng_benchmark.formats.geozarr import DATA_VAR
+        from cng_benchmark.formats.geozarr import DATA_VAR, finest_level_group
 
         tiles = select_zarr_chunk_tiles(local_target, targets=targets)
         prefix = str(config.params.get("display_titiler_path", "zarr"))
+        if prefix == "geozarr":
+            # GeoZarrReader addresses a variable as "{group}:{name}", where
+            # `group` is the group that declares the zarr_conventions
+            # multiscales entry -- this writer's store root ("/") -- and
+            # resolves the multiscale level from the requested zoom itself.
+            extra_query = {"variables": f"/:{DATA_VAR}"}
+        else:
+            extra_query = {"variable": DATA_VAR}
+            level = finest_level_group(local_target)
+            if level is not None:
+                extra_query["group"] = level
         metrics = measure_display(
             titiler_endpoint,
             object_uri,
             tiles,
             path_prefix=prefix,
-            extra_query={"variable": DATA_VAR},
+            extra_query=extra_query,
         )
         render = render_zarr_chunk_layout
     else:
@@ -818,7 +845,7 @@ def run_dataset_benchmark(
     rollup_profile = profile_object_sizes(pooled_sizes, policy)
     rollup = BenchmarkRun(
         timestamp=datetime.now(UTC),
-        tool_versions={"cng_benchmark": __version__},
+        tool_versions=_tool_versions(titiler_endpoint),
         dataset_id=config.dataset,
         format_id=chosen,
         params={

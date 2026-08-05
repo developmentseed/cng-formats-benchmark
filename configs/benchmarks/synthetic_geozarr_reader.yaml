@@ -1,0 +1,27 @@
+# Synthetic GeoZarr benchmark descriptor, GeoZarrReader display (#88).
+#
+# Identical to synthetic_geozarr.yaml except `display_titiler_path: geozarr`,
+# so the display metric runs through the bench tiler's GeoZarrReader-backed
+# router instead of its stock-xarray one. Used to prove the /geozarr router
+# is reachable and correctly wired end-to-end against a real (if tiny)
+# multiscale GeoZarr store, without needing real mission data.
+id: synthetic-geozarr-reader-end-to-end
+dataset: synthetic-cog
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: warm
+    min_object_bytes: 33554432   # 32 MiB
+  - name: cold
+    min_object_bytes: 104857600  # 100 MiB
+params:
+  chunk_shape: [128, 128]
+  shard_shape: [256, 256]
+  codec: zstd
+  multiscale_levels: auto
+  display_titiler_path: geozarr

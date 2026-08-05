@@ -39,7 +39,7 @@ params:
   samples:
     read: 1
     display: 1
-  # GeoZarr display is served by a multidim/xarray TiTiler surface, not the COG
-  # endpoints; `display_titiler_path` selects that router (deploy-specific). The
-  # in-stack `titiler-xarray` serves at the root, so leave this empty.
-  display_titiler_path: ""
+  # GeoZarr display is served by the bench tiler's stock-xarray router at
+  # /zarr, not the COG endpoints; set to "geozarr" to compare against its
+  # GeoZarrReader-backed router instead (#88).
+  display_titiler_path: zarr

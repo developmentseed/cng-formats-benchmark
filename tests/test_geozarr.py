@@ -21,6 +21,7 @@ from cng_benchmark.formats.geozarr import (  # noqa: E402
     _write_sharded,
     describe_store_layout,
     enumerate_store_objects,
+    finest_level_group,
 )
 
 #: A real UTM 31N WKT — the CRS a MAJA tile carries. Verbatim (rather than
@@ -605,6 +606,16 @@ def test_rioxarray_georeferences_every_level_from_the_conventions(tmp_path):
         assert da.rio.transform()[0] == pytest.approx(cell)
         # Every level covers the same ground; only the cells grow.
         assert da.rio.bounds() == pytest.approx(extent)
+
+
+def test_finest_level_group_finds_the_native_level(tmp_path):
+    # A pyramid store: DATA_VAR lives under numbered level groups, "0" native.
+    assert finest_level_group(_store(tmp_path, name="pyramid.zarr")) == "0"
+
+
+def test_finest_level_group_is_none_for_a_flat_store(tmp_path):
+    # No pyramid: DATA_VAR sits directly at the root, no group to select.
+    assert finest_level_group(_flat_store(tmp_path)) is None
 
 
 def test_a_pyramid_store_opens_as_a_datatree(tmp_path):

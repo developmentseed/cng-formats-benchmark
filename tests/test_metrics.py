@@ -53,6 +53,15 @@ def test_display_measures_tiles_with_fake_titiler(monkeypatch):
     detail = next(m.detail for m in metrics if m.name == "display_1chunk_latency_mean")
     assert detail["chunks"] == 1
     assert "cold_s" in detail
+    # Every metric records which router served it (#88) — no figure ambiguous
+    # about which reader produced it.
+    assert detail["path_prefix"] == "cog"
+    p50_detail = next(
+        m.detail for m in metrics if m.name == "display_1chunk_latency_p50"
+    )
+    assert p50_detail["path_prefix"] == "cog"
+    scenarios_detail = next(m.detail for m in metrics if m.name == "display_scenarios")
+    assert scenarios_detail["path_prefix"] == "cog"
     # /cog/info once, then samples fetches per tile (1 + 2*3 = 7 calls).
     assert calls[0].startswith("http://titiler:8000/cog/info?url=")
     assert len(calls) == 1 + len(_TILES) * 3
@@ -71,6 +80,9 @@ def test_display_handles_no_reachable_scenarios(monkeypatch):
 
 
 class _Resp:
+    def __init__(self, body: bytes = b""):
+        self._body = body
+
     def __enter__(self):
         return self
 
@@ -78,7 +90,7 @@ class _Resp:
         return False
 
     def read(self):
-        return b""
+        return self._body
 
 
 def test_display_raises_clear_error_on_http_failure(monkeypatch):
@@ -97,6 +109,51 @@ def test_display_rejects_zero_samples():
         display.measure_display(
             "http://titiler:8000", "s3://b/k.tif", _TILES, samples=0
         )
+
+
+def test_display_records_a_non_default_path_prefix(monkeypatch):
+    # The geozarr arm (#88): a GeoZarrReader-backed router, addressed with
+    # `variables` (not `variable`) per its own query contract.
+    monkeypatch.setattr(
+        display.urllib.request, "urlopen", lambda url, timeout=None: _Resp(b"tile")
+    )
+    metrics = display.measure_display(
+        "http://titiler:8000",
+        "s3://b/k.zarr",
+        _TILES[:1],
+        path_prefix="geozarr",
+        extra_query={"variables": "/:data"},
+    )
+    detail = next(m.detail for m in metrics if m.name == "display_1chunk_latency_mean")
+    assert detail["path_prefix"] == "geozarr"
+
+
+def test_fetch_titiler_versions_parses_healthz(monkeypatch):
+    body = (
+        b'{"versions": {"titiler_core": "2.2.1", "titiler_eopf": "0.10.0", '
+        b'"rasterio": "1.5.0"}}'
+    )
+    monkeypatch.setattr(
+        display.urllib.request, "urlopen", lambda url, timeout=None: _Resp(body)
+    )
+    versions = display.fetch_titiler_versions("http://titiler:8000")
+    # titiler_* keys pass through as-is; the generic GDAL-stack ones get a
+    # `tiler_` prefix so they don't collide with the harness's own versions.
+    assert versions == {
+        "titiler_core": "2.2.1",
+        "titiler_eopf": "0.10.0",
+        "tiler_rasterio": "1.5.0",
+    }
+
+
+def test_fetch_titiler_versions_is_best_effort_on_failure(monkeypatch):
+    import urllib.error
+
+    def boom(url, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(display.urllib.request, "urlopen", boom)
+    assert display.fetch_titiler_versions("http://titiler:8000") == {}
 
 
 # --- write + read need rasterio -------------------------------------------------
