@@ -10,14 +10,15 @@ COG, with the read metric an octree-node spatial query
 (:func:`cng_benchmark.metrics.read.measure_copc_read`) rather than a raster
 window. There is no display surface (a point cloud is not a TiTiler raster tile).
 
-A SWOT PIXC ``pixel_cloud`` group is **content-complete**: not just the geometry
-(lon/lat/height → x/y/z) but every other per-point variable (``sig0``,
-``water_frac``, ``classification``, the quality flags, …) is carried as a LAS
+A converted cloud is **content-complete**: not just the geometry
+(lon/lat/height → x/y/z) but every other per-point value is carried as a LAS
 **extra dimension**, preserving dtype — so the produced COPC's size is a
-like-for-like basis for comparison with the source netCDF, not a geometry-only
-fraction (issue #36). The carried set is configurable from the dataset ``options``
-(see :mod:`cng_benchmark.datasets.swot_pixc`); by default every variable on the
-point dimension is carried.
+like-for-like basis for comparison with the source, not a geometry-only fraction
+(issue #36). For a SWOT PIXC ``pixel_cloud`` group that is every per-point
+variable (``sig0``, ``water_frac``, ``classification``, the quality flags, …),
+configurable from the dataset ``options`` (see
+:mod:`cng_benchmark.datasets.swot_pixc`); for a CO3D CARS LAZ tile (see
+:mod:`cng_benchmark.datasets.co3d`) it is the rest of the tile's point record.
 
 The point record is built with :mod:`laspy` (its extra-dimension API is
 numpy-native and lays out LAS ExtraBytes correctly), and the COPC octree container
@@ -70,6 +71,11 @@ _SAFETY_MAX_DEPTH = 21
 
 #: Max length of a LAS extra-dimension name (the ExtraBytes name field is 32 bytes).
 _MAX_EB_NAME = 32
+
+#: LAS dimensions holding the raw scaled integer geometry. They are the same
+#: information as the x/y/z the loader already returns, so they are never carried
+#: as extra dimensions.
+_LAS_RAW_GEOMETRY_DIMS = ("X", "Y", "Z")
 
 #: PIXC ``pixel_cloud`` coordinate variables, tried in order (X, Y, Z).
 _LON_NAMES = ("longitude", "lon")
@@ -135,8 +141,9 @@ def _load_points(source: str, *, role: str = "source"):
 
     Dispatches on the source form: a ``PIXC:`` URI reads the netCDF group's
     lon/lat/height plus its other point variables with ``xarray`` (the SWOT PIXC
-    pixel cloud); a ``.las``/``.laz`` path reads its geometry with ``laspy`` (the
-    CO3D CARS reuse). ``extras`` maps a variable name to its per-point array.
+    pixel cloud); a ``.las``/``.laz`` path reads its geometry plus the rest of its
+    point record with ``laspy`` (the CO3D CARS tile). ``extras`` maps a variable
+    name to its per-point array.
     Points with a non-finite coordinate are dropped from every array together.
     """
     import numpy as np
@@ -147,8 +154,7 @@ def _load_points(source: str, *, role: str = "source"):
             granule_uri, group, role=role, include=include, exclude=exclude
         )
     elif source.lower().endswith((".las", ".laz")):
-        x, y, z = _read_las(source)
-        extras = {}
+        x, y, z, extras = _read_las(source, role=role)
     else:
         raise ValueError(
             f"COPC source {source!r} is neither a PIXC netCDF group "
@@ -249,13 +255,51 @@ def _pick_var(ds, names: tuple[str, ...]) -> str:
     raise KeyError(f"none of {names} found in group variables {list(ds.variables)}")
 
 
-def _read_las(path: str):
-    """Read ``(x, y, z)`` from a LAS/LAZ file with laspy."""
-    import laspy
+def _read_las(path: str, *, role: str = "source"):
+    """Read ``(x, y, z, extras)`` from a LAS/LAZ tile with laspy.
 
-    with laspy.open(path) as f:
-        las = f.read()
-    return las.x, las.y, las.z
+    Content-complete like the PIXC group read: every non-geometry dimension the
+    tile's point record declares — the standard LAS fields it carries (intensity,
+    classification, the CARS colour channels, …) *and* its own extra dimensions —
+    travels in ``extras``, so the produced COPC is a like-for-like basis for
+    comparison with the source tile rather than a geometry-only fraction (#36).
+    ``X``/``Y``/``Z`` are the raw scaled integers of the geometry already carried
+    as ``x``/``y``/``z``, so they are skipped; a name that collides with a
+    reserved dimension of the *target* point format is suffixed by the writer
+    (:func:`_sanitize_eb_name`).
+
+    laspy needs a local, seekable file — a LAZ chunk table is read by random
+    access — so an S3 tile is downloaded first, as the PIXC granule read is.
+    """
+    import laspy
+    import numpy as np
+
+    from cng_benchmark import storage
+
+    uri = storage.from_gdal_path(path)
+    tmp_download: str | None = None
+    if storage.is_s3(uri):
+        with tempfile.NamedTemporaryFile(suffix=".laz", delete=False) as tmp:
+            tmp_download = tmp.name
+        storage.download_s3_object(uri, tmp_download, role=role)
+        handle = tmp_download
+    elif uri.startswith("file://"):
+        handle = uri[len("file://") :]
+    else:
+        handle = uri
+
+    try:
+        with laspy.open(handle) as reader:
+            las = reader.read()
+        extras = {
+            name: np.asarray(las[name])
+            for name in las.point_format.dimension_names
+            if name not in _LAS_RAW_GEOMETRY_DIMS
+        }
+        return las.x, las.y, las.z, extras
+    finally:
+        if tmp_download is not None:
+            os.unlink(tmp_download)
 
 
 def _las_extra_dtype(dtype):

@@ -138,6 +138,23 @@ def test_example_swot_pixc_configs_validate():
     assert "display" not in cfg.metrics
 
 
+def test_example_co3d_cars_configs_validate():
+    ds = load_dataset_config("configs/datasets/example_co3d_cars.yaml")
+    assert ds.reader == "co3d-cars"
+    assert ds.target_formats == ["copc"]
+    assert ds.options["tile_suffix"] == ".laz"
+
+    cfg = load_benchmark_config("configs/benchmarks/example_co3d_cars_copc.yaml")
+    assert cfg.formats == ["copc"]
+    assert cfg.params["span"] == 128
+    # One delivery is one product; the fan-out (and the size profile) is over its
+    # tiles, which are the components.
+    assert cfg.params["scope"] == "product"
+    # A point-cloud arm: a read metric, but no display metric.
+    assert "read" in cfg.metrics
+    assert "display" not in cfg.metrics
+
+
 def test_example_benchmark_config_validates():
     cfg = load_benchmark_config(BENCHMARK_EXAMPLE)
     assert cfg.dataset == "example-raster"

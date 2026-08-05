@@ -653,6 +653,53 @@ def test_point_cloud_object_flows_through_per_component_path(tmp_path):
     assert (output / "objects" / "sceneZ" / "granule0" / "copc.laz").is_file()
 
 
+def test_cars_tiles_convert_to_one_copc_each(tmp_path):
+    """The CO3D CARS arm end to end: a LAZ tile set → one COPC object per tile."""
+    pytest.importorskip("copclib")
+    laspy = pytest.importorskip("laspy")
+    np = pytest.importorskip("numpy")
+    # As in the other runner tests: the runner opens a GDAL session around the
+    # convert regardless of object kind.
+    pytest.importorskip("rasterio")
+
+    src = tmp_path / "CO3D_CARS"
+    src.mkdir()
+    rng = np.random.default_rng(5)
+    for tile in ("0_0", "0_1", "1_0"):
+        las = laspy.LasData(laspy.LasHeader(point_format=3))
+        las.x = rng.uniform(300000, 300500, 5_000)
+        las.y = rng.uniform(4900000, 4900500, 5_000)
+        las.z = rng.uniform(0, 100, 5_000)
+        las.write(str(src / f"{tile}.laz"))
+    output = tmp_path / "out"
+
+    cfg = _benchmark(
+        ["write", "object_size", "read"],
+        {"scope": "product", "span": 16, "max_depth": 4},
+    ).model_copy(update={"formats": ["copc"]})
+    ds_cfg = DatasetConfig.model_validate(
+        {
+            "id": "co3d-cars",
+            "reader": "co3d-cars",
+            "source": str(src),
+            "baseline_format": "laz",
+            "target_formats": ["copc"],
+        }
+    )
+    result = run_dataset_benchmark(cfg, ds_cfg, str(output))
+
+    run = result.per_product[0]
+    # One product (the delivery), one COPC object per tile — so the object-size
+    # profile is the per-tile distribution.
+    assert len(result.per_product) == 1
+    assert run.params["product_id"] == "CO3D_CARS"
+    assert run.object_profile.count == 3
+    assert [ly.name for ly in run.object_layouts] == ["0_0", "0_1", "1_0"]
+    assert all(ly.point_count == 5_000 for ly in run.object_layouts)
+    assert all(ly.max_depth >= 0 for ly in run.object_layouts)
+    assert (output / "objects" / "CO3D_CARS" / "0_0" / "copc.laz").is_file()
+
+
 # --- bytes_in source-size coverage across source layouts -----------------------
 
 
