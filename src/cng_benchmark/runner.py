@@ -97,10 +97,11 @@ def _measure_object_read(adapter: FormatAdapter, object_uri: str) -> list[Metric
     """Read part of the produced object back, per its object kind.
 
     A zarr store is read zarr-natively over fsspec (GDAL cannot read the
-    ``sharding_indexed`` codec); a GeoParquet file is read with a bbox/row-group
-    spatial query over fsspec; a COPC file is read with an octree-node spatial
-    query over fsspec; a raster file is read window-by-window with rasterio under
-    the sink role's ``/vsis3`` session.
+    ``sharding_indexed`` codec); a vector file is read with a bbox spatial query —
+    pushed down to the row groups of a GeoParquet over fsspec, or to the packed
+    R-tree of a FlatGeobuf through OGR; a COPC file is read with an octree-node
+    spatial query over fsspec; a raster file is read window-by-window with rasterio
+    under the sink role's ``/vsis3`` session.
     """
     if adapter.object_kind is ObjectKind.ZARR_STORE:
         return measure_zarr_read(object_uri, role="sink")

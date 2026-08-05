@@ -9,6 +9,7 @@ from cng_benchmark.models import (
     BenchmarkRun,
     CogLayout,
     CopcLayout,
+    FlatGeobufLayout,
     GeoParquetLayout,
     GeoZarrLayout,
     MetricResult,
@@ -108,6 +109,34 @@ def test_summary_renders_geoparquet_row_group_layout():
     # No raster-only tables for a GeoParquet run.
     assert "## Tiling layout" not in md
     assert "## Chunk/shard layout" not in md
+
+
+def test_summary_renders_flatgeobuf_spatial_index_layout():
+    run = _sample_run()
+    run.format_id = "flatgeobuf"
+    run.object_layouts = [
+        FlatGeobufLayout(
+            name="LakeSP_048",
+            size_bytes=3000,
+            geometry_type="MultiPolygon",
+            num_features=200,
+            has_spatial_index=True,
+            index_node_size=16,
+            header_bytes=200,
+            index_bytes=800,
+            feature_bytes=1988,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "## Spatial-index layout" in md
+    assert "Packed Hilbert R-tree:** 1/1 file(s)" in md
+    # What the index costs, in bytes and as a share of the stored object.
+    assert "Index cost:** 800 B (26.7% of the stored bytes)" in md
+    assert "| LakeSP_048 | MultiPolygon | 200 | yes | 16 | 800 B |" in md
+    assert "none | 1.00× |" in md
+    # No other-format tables for a FlatGeobuf run.
+    assert "## Tiling layout" not in md
+    assert "## Row-group layout" not in md
 
 
 def test_summary_renders_copc_octree_layout():

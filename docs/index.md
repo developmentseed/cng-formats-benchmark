@@ -1,9 +1,9 @@
 # cng-formats-benchmark
 
 A reusable, **deployable** benchmarking system for cloud-native geospatial
-formats (COG, GeoZarr v3, COPC, GeoParquet, and their baselines). It measures
-read, write, and display performance plus the **object-size distribution** that
-decides whether a layout fits a tiered object store.
+formats (COG, GeoZarr v3, COPC, GeoParquet, FlatGeobuf, and their baselines).
+It measures read, write, and display performance plus the **object-size
+distribution** that decides whether a layout fits a tiered object store.
 
 The methodology is opinionated and reproducible: **describe your datasets in
 config files, deploy the stack, and run.** Nothing about a particular dataset or

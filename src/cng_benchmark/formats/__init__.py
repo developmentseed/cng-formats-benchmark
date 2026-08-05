@@ -10,6 +10,7 @@ from __future__ import annotations
 from cng_benchmark.formats import (  # noqa: F401
     cog,  # noqa: F401
     copc,
+    flatgeobuf,
     geoparquet,
     geozarr,
 )

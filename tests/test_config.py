@@ -91,7 +91,8 @@ def test_example_maja_geozarr_benchmark_config_validates():
 def test_example_swot_lakesp_configs_validate():
     ds = load_dataset_config("configs/datasets/example_swot_lakesp_prior.yaml")
     assert ds.reader == "swot-lakesp-prior"
-    assert ds.target_formats == ["geoparquet"]
+    # Both cloud-native vector candidates target this delivery.
+    assert "geoparquet" in ds.target_formats
     # The vector reader takes no options.
     assert ds.options == {}
 
@@ -100,6 +101,23 @@ def test_example_swot_lakesp_configs_validate():
     )
     assert cfg.formats == ["geoparquet"]
     assert cfg.params["row_group_rows"] == 50000
+    # A vector arm: a read metric, but no display metric.
+    assert "read" in cfg.metrics
+    assert "display" not in cfg.metrics
+
+
+def test_example_swot_lakesp_flatgeobuf_config_validates():
+    # The second vector candidate runs on the *same* dataset as the GeoParquet
+    # arms, which is what makes the two comparable on one source (#83).
+    ds = load_dataset_config("configs/datasets/example_swot_lakesp_prior.yaml")
+    assert ds.target_formats == ["geoparquet", "flatgeobuf"]
+
+    cfg = load_benchmark_config(
+        "configs/benchmarks/example_swot_lakesp_flatgeobuf.yaml"
+    )
+    assert cfg.dataset == "example-swot-lakesp-prior"
+    assert cfg.formats == ["flatgeobuf"]
+    assert cfg.params["spatial_index"] is True  # the index is the candidate
     # A vector arm: a read metric, but no display metric.
     assert "read" in cfg.metrics
     assert "display" not in cfg.metrics

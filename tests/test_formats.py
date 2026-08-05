@@ -11,6 +11,7 @@ EXPECTED_LEVERS = {
     "geozarr": "Zarr v3 chunk and shard shape",
     "copc": "COPC octree",
     "geoparquet": "GeoParquet row-group size",
+    "flatgeobuf": "FlatGeobuf packed Hilbert R-tree",
 }
 
 
@@ -26,6 +27,7 @@ EXPECTED_KINDS = {
     "cog": (ObjectKind.RASTER_FILE, "cog.tif"),
     "geozarr": (ObjectKind.ZARR_STORE, "geozarr.zarr"),
     "geoparquet": (ObjectKind.VECTOR_FILE, "geoparquet.parquet"),
+    "flatgeobuf": (ObjectKind.VECTOR_FILE, "flatgeobuf.fgb"),
     "copc": (ObjectKind.POINT_CLOUD_FILE, "copc.laz"),
 }
 

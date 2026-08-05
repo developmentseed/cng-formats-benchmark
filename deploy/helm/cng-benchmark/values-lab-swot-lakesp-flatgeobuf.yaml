@@ -1,0 +1,84 @@
+# Lab overlay: SWOT-B — LakeSP Prior shapefile -> FlatGeobuf, on the Scaleway cluster.
+#
+# The second cloud-native vector candidate on the *same* staged samples as
+# `values-lab-swot-lakesp.yaml` (Scaleway `s3://cnes-cng-study/LakeSP_Prior_Nom_France/`),
+# so the source zip, the GeoParquet and the FlatGeobuf are three measurements of
+# one delivery (#83). Run both overlays against the same prefix and limit, then
+# read the two `summary.md` files side by side: size, compression ratio, and the
+# bbox read latency + spread.
+#
+# It is the control for the GeoParquet +14 %-vs-shapefile finding (#73): if an
+# uncompressed, index-carrying FlatGeobuf lands in the same place, the growth is
+# the price of a cloud-native vector layout, not a GeoParquet artefact.
+#
+# Prerequisite — create the Scaleway sink credentials secret in the namespace:
+#   kubectl create secret generic cng-benchmark-s3 \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
+#
+# Install:
+#   helm install swot-lakesp-fgb deploy/helm/cng-benchmark \
+#     -f deploy/helm/cng-benchmark/values-lab-swot-lakesp-flatgeobuf.yaml
+
+image:
+  repository: ghcr.io/developmentseed/cng-benchmark-runner
+  tag: ""
+  pullPolicy: Always
+
+minio:
+  enabled: false
+seed:
+  enabled: false
+
+s3:
+  endpoint: https://s3.fr-par.scw.cloud
+  region: fr-par
+  existingSecret: cng-benchmark-s3
+
+# A vector table has no display metric, so no tile server is needed.
+titiler:
+  enabled: false
+
+nodeSelector:
+  k8s.scaleway.com/pool-name: pool-bench
+
+runner:
+  configFile: swot_lakesp_flatgeobuf.yaml
+  datasetFile: swot_lakesp_prior.yaml
+  output: s3://cnes-cng-study/benchmark-results/swot-lakesp-flatgeobuf/
+
+configs:
+  swot_lakesp_flatgeobuf.yaml: |
+    id: swot-lakesp-flatgeobuf
+    dataset: swot-lakesp-prior
+    formats:
+      - flatgeobuf
+    metrics:
+      - write
+      - object_size
+      - read
+    tiers:
+      - name: tier2-disk
+        min_object_bytes: 33554432
+      - name: tier3-tape
+        min_object_bytes: 104857600
+    params:
+      # The packed Hilbert R-tree is the candidate; its node size is fixed by the
+      # format, so this is the only writer lever.
+      spatial_index: true
+      # The same passes and the same read sampling as the GeoParquet overlay, so
+      # the two arms are comparable.
+      scope: product-set
+      products:
+        prefix: ""
+        limit: 3
+      samples:
+        read: 1
+  swot_lakesp_prior.yaml: |
+    id: swot-lakesp-prior
+    description: SWOT L2 HR LakeSP Prior pass (zipped shapefile -> FlatGeobuf).
+    source: s3://cnes-cng-study/LakeSP_Prior_Nom_France/
+    baseline_format: shapefile
+    reader: swot-lakesp-prior
+    target_formats:
+      - flatgeobuf

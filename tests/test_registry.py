@@ -40,5 +40,5 @@ def test_unknown_name_lists_available():
 
 
 def test_builtin_formats_registered():
-    for name in ("cog", "geozarr", "copc", "geoparquet"):
+    for name in ("cog", "geozarr", "copc", "geoparquet", "flatgeobuf"):
         assert name in FORMATS

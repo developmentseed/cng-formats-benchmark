@@ -26,13 +26,16 @@ RUN apt-get update \
 # + rioxarray + zarr-cm + s3fs) to convert GeoTIFF -> a sharded, multiscale
 # GeoZarr and read it back,
 # `geoparquet` (geopandas + pyarrow + shapely + pyogrio + s3fs) to convert a
-# shapefile -> GeoParquet and run the bbox/row-group read, and `copc` (copclib +
-# laspy + xarray + h5netcdf) to convert a SWOT PIXC pixel cloud -> COPC and run the
-# octree-node read. rasterio/pyogrio bundle GDAL and copclib bundles the COPC C++
-# library in their manylinux wheels, so no system GDAL or PDAL is needed.
+# shapefile -> GeoParquet and run the bbox/row-group read, `flatgeobuf` (the same
+# vector stack without pyarrow) to convert a shapefile -> an indexed FlatGeobuf and
+# run the bbox read through its R-tree, and `copc` (copclib + laspy + xarray +
+# h5netcdf) to convert a SWOT PIXC pixel cloud -> COPC and run the octree-node
+# read. rasterio/pyogrio bundle GDAL and copclib bundles the COPC C++ library in
+# their manylinux wheels, so no system GDAL or PDAL is needed.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN uv sync --no-dev --extra s3 --extra cog --extra geozarr --extra geoparquet --extra copc
+RUN uv sync --no-dev --extra s3 --extra cog --extra geozarr --extra geoparquet \
+    --extra flatgeobuf --extra copc
 
 # Several per-arm capabilities are bundled, unpinned, inside a wheel — notably the
 # GDAL netCDF driver (in rasterio's wheel, for the SWOT Raster100m arm) and the

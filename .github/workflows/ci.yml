@@ -130,7 +130,8 @@ jobs:
         # broken bundled config or display wiring fails the PR, not a lab install.
         run: |
           for v in values-local values-lab \
-                   values-lab-swot-raster100m values-lab-swot-lakesp values-lab-swot-pixc; do
+                   values-lab-swot-raster100m values-lab-swot-lakesp \
+                   values-lab-swot-lakesp-flatgeobuf values-lab-swot-pixc; do
             helm lint deploy/helm/cng-benchmark -f deploy/helm/cng-benchmark/$v.yaml
             helm template t deploy/helm/cng-benchmark \
               -f deploy/helm/cng-benchmark/$v.yaml | kubeconform -strict -summary

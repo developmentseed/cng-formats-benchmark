@@ -1,0 +1,47 @@
+# Example benchmark arm: SWOT L2 HR LakeSP Prior -> FlatGeobuf (milestone SWOT-B).
+#
+# The *second* cloud-native vector candidate of the CNES study (D2 ch. 2, ch. 4,
+# ch. 6.4), on the same source as the GeoParquet arms — so the zipped shapefile,
+# GeoParquet and FlatGeobuf are three points on one delivery (#83).
+#
+# It is also the control for #73: the LakeSP GeoParquet output is ~14 % larger than
+# the source zipped shapefile, and that arm already writes zstd, so the codec does
+# not explain it. If FlatGeobuf — a self-describing, index-carrying, *uncompressed*
+# layout — lands in the same place, the growth is the price of the cloud-native
+# vector layout, not a GeoParquet artefact.
+#
+# The object-grouping lever is the packed Hilbert R-tree: FlatGeobuf's addressable
+# unit is the feature, and the index is what makes it reachable by a bbox query.
+# The `read` metric is that bbox query, pushed through the index (partial access),
+# NOT a raster window, and there is NO `display` metric (a vector table is not a
+# TiTiler raster tile). Profiles the per-pass object-size distribution + a
+# set-level roll-up, like the GeoParquet arms.
+#
+# Run with `--dataset configs/datasets/example_swot_lakesp_prior.yaml` (chart:
+# runner.datasetFile). `output` is supplied by the deployment.
+id: example-swot-lakesp-flatgeobuf
+dataset: example-swot-lakesp-prior
+formats:
+  - flatgeobuf
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # The index is the whole point of the candidate, so it is on: it orders the
+  # features along the Hilbert curve and writes the R-tree a bbox query walks.
+  # Its node size (16) is fixed by the format, so unlike GeoParquet's row-group
+  # size there is nothing to sweep here — `spatial_index: false` only measures
+  # what the index costs and what it buys.
+  spatial_index: true
+  scope: product-set     # product (one pass) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1

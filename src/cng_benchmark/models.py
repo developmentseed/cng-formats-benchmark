@@ -178,6 +178,37 @@ class GeoParquetLayout(ObjectLayout):
     compression_ratio: float = 0.0
 
 
+class FlatGeobufLayout(ObjectLayout):
+    """A FlatGeobuf file's spatial-index layout.
+
+    The addressable unit is the **feature**, and the packed Hilbert R-tree in front
+    of the feature data is what makes it reachable: a reader with a bbox predicate
+    walks the tree, then range-reads only the features it selects. So the index is
+    the FlatGeobuf answer to the same partial-access question a COG answers with
+    internal tiling. ``has_spatial_index`` says whether that tree is present (an
+    unindexed FlatGeobuf can only be scanned), ``index_node_size`` is its branching
+    factor — how many child nodes one tree node holds, i.e. how coarse the search
+    is — and ``index_bytes`` is what the tree costs in the stored object, beside
+    ``feature_bytes`` (the data) and ``header_bytes`` (the schema).
+
+    ``codec`` is always ``none``: FlatGeobuf stores raw flatbuffers and defines no
+    compression, so ``compression_ratio`` is 1.0 by construction. Both fields are
+    carried anyway, because the comparison against a compressed vector arm
+    (GeoParquet) is exactly what they answer.
+    """
+
+    kind: Literal["flatgeobuf"] = "flatgeobuf"
+    geometry_type: str
+    num_features: int
+    has_spatial_index: bool
+    index_node_size: int
+    header_bytes: int = 0
+    index_bytes: int = 0
+    feature_bytes: int = 0
+    codec: str = "none"
+    compression_ratio: float = 1.0
+
+
 class CopcLayout(ObjectLayout):
     """A COPC file's octree-node layout.
 
@@ -207,7 +238,7 @@ class CopcLayout(ObjectLayout):
 #: Discriminated union over the per-format layouts, so a ``BenchmarkRun`` keeps
 #: each layout's subclass fields through pydantic validation and JSON round-trips.
 AnyObjectLayout = Annotated[
-    CogLayout | GeoZarrLayout | GeoParquetLayout | CopcLayout,
+    CogLayout | GeoZarrLayout | GeoParquetLayout | FlatGeobufLayout | CopcLayout,
     Field(discriminator="kind"),
 ]
 
