@@ -45,6 +45,42 @@ def _subdataset_vsi_uri(granule_uri: str, variable: str) -> str:
     return f'NETCDF:"{storage.to_gdal_path(granule_uri)}":{variable}'
 
 
+def _list_cf_subdatasets(granule_uri: str) -> list[str]:
+    """Enumerate every raster-shaped CF variable in a netCDF/HDF5 granule.
+
+    Opens the granule *container* (not a specific subdataset) and reads GDAL's
+    ``subdatasets`` metadata — the ``NETCDF:"<path>":<variable>`` strings it
+    exposes for each >=2-D CF variable, the same syntax :func:`_subdataset_vsi_uri`
+    composes — and returns just the trailing variable names, in file order.
+    Backs a reader's ``variables: all``/``"*"`` pick (SWOT Raster100m, #86), so
+    profiling every variable in a granule needs no hand-maintained list; an
+    explicit ``variables`` list stays the way to pin a deterministic subset.
+    """
+    try:
+        import rasterio
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
+        raise RuntimeError(
+            'enumerating every CF variable (variables: all / "*") requires '
+            "the 'cog' extra; install with `uv sync --extra cog` "
+            "(or `pip install cng-benchmark[cog]`)"
+        ) from exc
+
+    with rasterio.open(storage.to_gdal_path(granule_uri)) as src:
+        return [_subdataset_variable_name(sub) for sub in src.subdatasets]
+
+
+def _subdataset_variable_name(subdataset: str) -> str:
+    """Extract the trailing variable name from a GDAL subdataset string.
+
+    GDAL/rasterio versions format a netCDF subdataset differently — quoted
+    (``NETCDF:"<path>":<var>``, what :func:`_subdataset_vsi_uri` composes) or
+    not (``netcdf:<path>:<var>``, seen from ``rasterio``'s own normalization) —
+    but a GDAL VSI path never itself contains a ``:``, so the variable name is
+    reliably whatever follows the *last* one.
+    """
+    return subdataset.rsplit(":", 1)[-1]
+
+
 class GranuleDataset(Dataset):
     """One granule file per product under ``source``; components chosen by subclass."""
 

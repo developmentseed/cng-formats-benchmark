@@ -324,13 +324,19 @@ def _run_product(
     extra_metrics: list[MetricResult] = []
     extra_artifacts: list[Artifact] = []
 
-    # For zip-delivered products all components live in one .zip object.  Size
-    # that container once and charge it to component 0 only — summing the zip
-    # size N times in _aggregate_write_metrics would give N×zip_size.
+    # A zip-delivered product's components all live in one .zip object; a
+    # multi-variable netCDF granule's components (SWOT Raster100m's
+    # ``variables: all``) all live in one .nc object. Either way, size that
+    # container once and charge it to component 0 only — summing the container
+    # size N times in _aggregate_write_metrics would give N×container_size.
     _first_uri = product.components[0].uri if product.components else ""
-    _zip_uri = storage.zip_source_uri(_first_uri)
-    _zip_source_size = (
-        storage.object_size(_zip_uri, "source") if _zip_uri is not None else None
+    _container_uri = storage.zip_source_uri(_first_uri) or storage.netcdf_source_uri(
+        _first_uri
+    )
+    _container_source_size = (
+        storage.object_size(_container_uri, "source")
+        if _container_uri is not None
+        else None
     )
     n_comp = len(product.components)
 
@@ -343,8 +349,8 @@ def _run_product(
                 workdir, f"{component.name}-{adapter.target_basename()}"
             )
             source_path = storage.to_gdal_path(component.uri)
-            if _zip_uri is not None:
-                source_size = _zip_source_size if i == 0 else None
+            if _container_uri is not None:
+                source_size = _container_source_size if i == 0 else None
             else:
                 source_size = storage.object_size(component.uri, "source")
             # Merge the reader's per-component pixel-interpretation metadata into

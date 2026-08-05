@@ -1,0 +1,32 @@
+# Example granule dataset descriptor: a SWOT L2 HR Raster 100m delivery,
+# profiled content-complete (every CF variable, not just `wse`).
+#
+# Same granule layout as example_swot_raster100m.yaml — one netCDF file per
+# granule, flat under `source` — but `options.variables: all` enumerates every
+# CF variable the granule carries (roughly fifteen to twenty for this product)
+# instead of a hand-picked subset, so the produced object set is a
+# like-for-like comparison against the as-delivered ~50-71 MB `.nc`. Profiling
+# `wse` alone against that multi-variable granule measures dropped content, not
+# compression (CNES consolidated-metrics gap 1, #86). The France-wide
+# geographic scope is applied at the benchmark level (`params.products.pattern`
+# in example_swot_raster100m_cog_allvars.yaml / _geozarr_allvars.yaml), not
+# here — this descriptor just names the granule root and the content pick.
+# `source` is the granule root; replace it with a reachable prefix — nothing
+# here is provider-specific.
+id: example-swot-raster100m-allvars
+description: >-
+  Example SWOT L2 HR Raster 100m granule, content-complete (every CF variable)
+  -> COG / GeoZarr.
+source: s3://example-bucket/Raster100m_Nom_France/
+baseline_format: netcdf
+reader: swot-raster100m
+target_formats:
+  - cog
+  - geozarr
+options:
+  variables: all
+grouping_lever:
+  # Each candidate format clears the object-size tiers with its own lever: COG
+  # internal tiling, Zarr v3 sharding. Both are swept against the tier thresholds.
+  cog_block_size: [256, 512, 1024]
+  zarr_shard_shape: [[1024, 1024], [2048, 2048]]

@@ -428,6 +428,28 @@ def zip_source_uri(vsi_path: str) -> str | None:
     return zip_gdal
 
 
+def netcdf_source_uri(gdal_subdataset_path: str) -> str | None:
+    """Extract the container URI from a GDAL CF subdataset path, or ``None``.
+
+    Maps ``NETCDF:"/vsis3/bucket/key.nc":variable`` -> ``s3://bucket/key.nc`` and
+    ``NETCDF:"/local/path.nc":variable`` -> ``/local/path.nc``. Used by the
+    runner to resolve a multi-variable netCDF granule's delivery object for
+    ``bytes_in`` sizing — the granule is the honest storage footprint, and
+    sizing it once (not once per selected CF variable) avoids
+    N×granule_size double-counting when several components share one granule
+    (the SWOT Raster100m ``variables: all`` arm).
+    """
+    if not gdal_subdataset_path.startswith('NETCDF:"'):
+        return None
+    inner = gdal_subdataset_path[len('NETCDF:"') :]
+    path, sep, _variable = inner.partition('":')
+    if not sep:
+        return None
+    if path.startswith("/vsis3/"):
+        return "s3://" + path[len("/vsis3/") :]
+    return path
+
+
 def open_seekable(uri: str, role: str = "source"):
     """Open ``uri`` as a seekable binary file object (local file or S3 range).
 

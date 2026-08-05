@@ -138,6 +138,44 @@ def test_example_swot_pixc_configs_validate():
     assert "display" not in cfg.metrics
 
 
+def test_example_swot_raster100m_configs_validate():
+    ds = load_dataset_config("configs/datasets/example_swot_raster100m.yaml")
+    assert ds.reader == "swot-raster100m"
+    assert ds.options["variables"] == ["wse"]
+
+    cfg = load_benchmark_config(
+        "configs/benchmarks/example_swot_raster100m_geozarr.yaml"
+    )
+    assert cfg.dataset == "example-swot-raster100m"
+    assert cfg.formats == ["geozarr"]
+
+
+def test_example_swot_raster100m_allvars_configs_validate():
+    # The content-complete + France-filtered pair closing CNES gaps 1 and 5 (#86).
+    ds = load_dataset_config("configs/datasets/example_swot_raster100m_allvars.yaml")
+    assert ds.reader == "swot-raster100m"
+    assert ds.options["variables"] == "all"
+    assert ds.target_formats == ["cog", "geozarr"]
+
+    cog_cfg = load_benchmark_config(
+        "configs/benchmarks/example_swot_raster100m_cog_allvars.yaml"
+    )
+    assert cog_cfg.dataset == "example-swot-raster100m-allvars"
+    assert cog_cfg.formats == ["cog"]
+    assert cog_cfg.params["products"]["pattern"] == "UTM3[0-2][NS]"
+
+    geozarr_cfg = load_benchmark_config(
+        "configs/benchmarks/example_swot_raster100m_geozarr_allvars.yaml"
+    )
+    assert geozarr_cfg.formats == ["geozarr"]
+    assert geozarr_cfg.params["products"]["pattern"] == "UTM3[0-2][NS]"
+    # Both arms filter the same product set — an honest before/after basis.
+    assert (
+        cog_cfg.params["products"]["pattern"]
+        == geozarr_cfg.params["products"]["pattern"]
+    )
+
+
 def test_example_sentinel2_l2b_snow_lis_configs_validate():
     ds = load_dataset_config("configs/datasets/example_sentinel2_l2b_snow_lis.yaml")
     assert ds.reader == "sentinel2-l2b-snow-lis"
