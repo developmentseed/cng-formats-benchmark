@@ -58,6 +58,38 @@ jobs:
         # arm) must be present, not incidentally bundled and silently droppable.
         run: docker run --rm cng-benchmark-runner:ci check-drivers
 
+  build-tiler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build tiler image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.tiler
+          push: false
+          load: true
+          tags: cng-benchmark-tiler:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke-test the three routers respond
+        run: |
+          docker run -d --rm --name tiler-ci -p 18000:8000 cng-benchmark-tiler:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:18000/healthz && break
+            sleep 1
+          done
+          curl -fsS http://localhost:18000/healthz | tee /dev/stderr | grep -q titiler_eopf
+          # A 422 (missing required `url`) proves the route is registered and
+          # reachable; a 404 would mean the router never mounted.
+          for prefix in cog zarr geozarr; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:18000/$prefix/info")
+            echo "$prefix/info -> $code"
+            test "$code" = "422"
+          done
+          docker stop tiler-ci
+
   # Deployability proves the stack STANDS UP and runs end-to-end against a tiny
   # synthetic fixture in a disposable MinIO — never a benchmark on real data.
 
