@@ -83,9 +83,23 @@ def test_example_maja_geozarr_benchmark_config_validates():
     assert cfg.formats == ["geozarr"]
     assert cfg.params["shard_shape"] == [2048, 2048]
     assert cfg.params["codec"] == "zstd"
+    assert cfg.params["display_titiler_path"] == "zarr"
     # The MAJA dataset offers both candidate formats.
     ds = load_dataset_config(MAJA_DATASET_EXAMPLE)
     assert "geozarr" in ds.target_formats
+
+
+def test_example_maja_geozarr_reader_benchmark_config_validates():
+    # The GeoZarrReader-vs-stock-xarray display comparison arm (#88): same
+    # dataset/format/params as the stock-router arm, only the reader differs.
+    cfg = load_benchmark_config(
+        "configs/benchmarks/example_sentinel2_maja_geozarr_reader.yaml"
+    )
+    stock_cfg = load_benchmark_config(MAJA_GEOZARR_BENCHMARK_EXAMPLE)
+    assert cfg.formats == ["geozarr"]
+    assert cfg.params["display_titiler_path"] == "geozarr"
+    assert cfg.dataset == stock_cfg.dataset
+    assert cfg.params["shard_shape"] == stock_cfg.params["shard_shape"]
 
 
 def test_example_swot_lakesp_configs_validate():

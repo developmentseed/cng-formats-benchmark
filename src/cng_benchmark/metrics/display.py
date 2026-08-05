@@ -16,6 +16,7 @@ in as :class:`TileSpec` values, so this module imports no rasterio/morecantile.
 
 from __future__ import annotations
 
+import json
 import time
 import urllib.error
 import urllib.request
@@ -55,6 +56,25 @@ def _fetch(url: str, timeout: float) -> bytes:
         raise RuntimeError(f"TiTiler unreachable at {url}: {exc.reason}") from exc
 
 
+def fetch_titiler_versions(endpoint: str, *, timeout: float = 5.0) -> dict[str, str]:
+    """Best-effort ``/healthz`` versions, so a run records which reader build
+    produced its display numbers (``titiler_core``/``titiler_xarray``/
+    ``titiler_eopf`` as-is; the generic GDAL-stack keys prefixed ``tiler_`` so
+    they don't collide with the harness's own tool versions). Returns ``{}``
+    on any failure (unreachable endpoint, unexpected payload) — this is
+    recording, not a metric, so it must never fail a run.
+    """
+    try:
+        body = _fetch(f"{endpoint.rstrip('/')}/healthz", timeout)
+        versions = json.loads(body)["versions"]
+    except Exception:  # noqa: BLE001 - best-effort, never fails a run
+        return {}
+    return {
+        (k if k.startswith("titiler_") else f"tiler_{k}"): str(v)
+        for k, v in versions.items()
+    }
+
+
 def measure_display(
     endpoint: str,
     cog_uri: str,
@@ -77,9 +97,11 @@ def measure_display(
     reachable for this object).
 
     ``path_prefix`` selects the tiler router — ``"cog"`` for a COG against
-    TiTiler's COG endpoints, or the multidim/xarray router (e.g. a titiler-xarray
-    surface) for a GeoZarr store — and ``extra_query`` carries any extra query
-    parameters that router needs (e.g. ``{"variable": "data"}`` to pick the array).
+    TiTiler's COG endpoints, ``"zarr"``/``"geozarr"`` for a GeoZarr store's
+    stock-xarray or ``GeoZarrReader`` router — and ``extra_query`` carries any
+    extra query parameters that router needs (e.g. ``{"variable": "data"}`` to
+    pick the array). Every metric's ``detail`` records ``path_prefix``, so a
+    report is never ambiguous about which reader produced a given number.
     """
     if samples < 1:
         raise ValueError("samples must be >= 1")
@@ -120,12 +142,14 @@ def measure_display(
                     "approx": spec.approx,
                     "bytes_total": bytes_total,
                     "cold_s": latencies[0],
+                    "path_prefix": path_prefix,
                 },
             ),
             MetricResult(
                 name=f"display_{spec.label}_latency_p50",
                 value=float(median(latencies)),
                 unit="s",
+                detail={"path_prefix": path_prefix},
             ),
         ]
 
@@ -136,6 +160,7 @@ def measure_display(
             detail={
                 "tile_matrix_set": tile_matrix_set,
                 "samples": samples,
+                "path_prefix": path_prefix,
                 "scenarios": [
                     {"label": s.label, "tile": f"{s.z}/{s.x}/{s.y}", "chunks": s.chunks}
                     for s in tiles

@@ -137,6 +137,12 @@ Performance-tuning vars follow https://developmentseed.org/titiler/advanced/perf
   value: {{ $endpoint | quote }}
 - name: AWS_ENDPOINT_URL_S3
   value: {{ $endpoint | quote }}
+{{/* obstore's Rust S3 client (GeoZarrReader, in the tiler) refuses a
+non-TLS endpoint unless told to allow it -- boto3/GDAL don't read this
+var, so it's a no-op for the runner. Harmless for a real https endpoint
+(this only permits http, never forces it). */}}
+- name: AWS_ALLOW_HTTP
+  value: "true"
 {{- end }}
 {{- end }}
 

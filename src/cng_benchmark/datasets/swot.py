@@ -6,7 +6,8 @@ products as one netCDF file per granule, flat under ``source``
 on a 100 m UTM grid. There is no new display surface and no new format: each
 selected CF variable becomes one component, converted to a sharded 2D GeoZarr v3
 store by the existing GeoZarr adapter (the same per-component path proven on
-S1/S2), and displayed through titiler-xarray. Only the reader is new.
+S1/S2), and displayed through the bench tiler's GeoZarr router. Only the
+reader is new.
 
 A variable is read in place through GDAL's CF subdataset syntax
 (:func:`~cng_benchmark.datasets.granule._subdataset_vsi_uri`), so the

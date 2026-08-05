@@ -179,7 +179,7 @@ name and reads what it needs, so adding a format never changes the schema:
 | Format | `params` levers |
 | --- | --- |
 | `cog` | `block_size` (internal tiling), `codec` (`deflate`/`zstd`/`lzw`/`packbits`/`lzma`/`webp`/`lerc`/`raw`; `deflate` by default) |
-| `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels` (overview-pyramid depth, `auto` by default), `scale_offset` (apply a packed source's scale in the array's codec pipeline), `standard_name` (the CF quantity, normally supplied by the dataset reader); `display_titiler_path` selects the multidim/xarray TiTiler router for display |
+| `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels` (overview-pyramid depth, `auto` by default), `scale_offset` (apply a packed source's scale in the array's codec pipeline), `standard_name` (the CF quantity, normally supplied by the dataset reader); `display_titiler_path` selects the bench tiler's GeoZarr router for display — `zarr` (stock xarray defaults, the default) or `geozarr` (`titiler-eopf`'s `GeoZarrReader`) |
 | `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` (`zstd`/`snappy`/`gzip`/`brotli`/`none`; `zstd` by default — not geopandas'/pyarrow's own `snappy` default), `compression_level` (codec effort; `null` uses the codec's default), `data_page_size` (parquet page size in bytes, within a row group; `null` uses pyarrow's default) |
 | `flatgeobuf` | `spatial_index` (write the packed Hilbert R-tree and order the features along the Hilbert curve; `true` by default) |
 | `copc` | `span` (per-node voxel-grid edge — the per-node point budget ≈ `span**3`), `max_depth` (octree depth; `null` derives it from point density), `scale` (`null` derives LAS quantisation from the extent) |
@@ -326,9 +326,11 @@ the coldest (highest) one — or none, if the objects are too small for any tier
 | `display` | `metrics/display.py` (+ `display_tiles.py`) | per chunk-bucket `display_{1,2,4,9}chunk_latency_mean/p50`, `display_scenarios`, plus a `display_chunk_layout.png` artifact |
 
 `read` and `display` adapt to the produced object kind: a COG is read with
-rasterio over `/vsis3` and served by TiTiler's `/cog` endpoints; a GeoZarr store
-is read zarr-natively over fsspec (GDAL cannot read the `sharding_indexed` codec)
-and served by a multidim/xarray TiTiler surface (`params.display_titiler_path`); a
+rasterio over `/vsis3` and served by the bench tiler's `/cog` router; a GeoZarr
+store is read zarr-natively over fsspec (GDAL cannot read the `sharding_indexed`
+codec) and served by the bench tiler's `/zarr` or `/geozarr` router
+(`params.display_titiler_path`, `zarr` by default — see
+[GeoZarr display readers](deployment.md#geozarr-display-readers)); a
 GeoParquet file is read with a bbox/row-group spatial query over fsspec (only the
 row groups whose covering bbox overlaps are fetched); a FlatGeobuf file is read
 with the same bbox query through OGR, pushed down to its packed Hilbert R-tree

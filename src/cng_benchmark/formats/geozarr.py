@@ -34,13 +34,34 @@ from cng_benchmark.formats.base import FormatAdapter, ObjectKind
 from cng_benchmark.models import GeoZarrLayout
 from cng_benchmark.registry import FORMATS
 
-#: The single data variable each per-component store holds (titiler-xarray and the
-#: read metric address the array by this name).
+#: The single data variable each per-component store holds (the display and read
+#: metrics address the array by this name).
 DATA_VAR = "data"
 
 #: Defaults when the config carries no lever value (spatial y, x).
 DEFAULT_CHUNK = (1024, 1024)
 DEFAULT_SHARD = (2048, 2048)
+
+
+def finest_level_group(store: str) -> str | None:
+    """The zarr group holding the native-resolution :data:`DATA_VAR` array.
+
+    ``None`` for a flat store (``DATA_VAR`` at the root); the lowest-numbered
+    multiscale level group (``"0"``, native resolution — see
+    :mod:`~cng_benchmark.formats.geozarr_multiscales`) otherwise. TiTiler's
+    stock xarray router has no multiscale awareness and needs this explicitly
+    as its ``group=`` query; a reader that resolves the pyramid itself (e.g.
+    ``GeoZarrReader``) does not. Mirrors the array lookup
+    :func:`cng_benchmark.metrics.read._open_zarr_array` does for the read
+    metric.
+    """
+    import zarr
+
+    root = zarr.open_group(store, mode="r")
+    if DATA_VAR in root:
+        return None
+    level_keys = sorted((k for k in root.group_keys()), key=int)
+    return level_keys[0]
 
 
 class GeoZarrParams(BaseModel):

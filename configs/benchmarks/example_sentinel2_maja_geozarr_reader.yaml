@@ -1,0 +1,40 @@
+# Example benchmark arm: Sentinel-2 L2A MAJA -> GeoZarr v3, GeoZarrReader display.
+#
+# Identical to example_sentinel2_maja_geozarr.yaml except for one param:
+# `display_titiler_path: geozarr` routes the display metric through the bench
+# tiler's GeoZarrReader-backed router instead of its stock-xarray one (#88).
+# Comparing this arm's display_* numbers against the stock-router arm's is the
+# format-vs-reader split: how much of the GeoZarr display gap is intrinsic to
+# the format, and how much is fixed by a better reader.
+#
+# Run with `--dataset configs/datasets/example_sentinel2_maja.yaml` (chart:
+# runner.datasetFile). `output` (and the TiTiler endpoint for display) are
+# supplied by the deployment.
+id: example-sentinel2-l2a-maja-geozarr-reader
+dataset: example-sentinel2-l2a-maja
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  chunk_shape: [1024, 1024]
+  shard_shape: [2048, 2048]
+  codec: zstd
+  multiscale_levels: auto
+  scale_offset: true
+  scope: product-set     # product (one scene) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1
+    display: 1
+  display_titiler_path: geozarr
