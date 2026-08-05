@@ -89,6 +89,12 @@ shape as the S1/S2 readers, but each pass's zip holds an ESRI Shapefile: every
 `/vsizip//vsis3` (the OGR driver finds the `.shx`/`.dbf`/`.prj` sidecars inside
 the archive) and converted to a GeoParquet file by the GeoParquet adapter.
 
+The study names **two** cloud-native vector candidates, so the same reader also
+feeds the `flatgeobuf` adapter (a second benchmark arm on the same dataset). Run
+both arms on one delivery and the source zip, the GeoParquet and the FlatGeobuf
+are three measurements of the same features — which is what separates the cost of
+a *format* from the cost of a cloud-native vector layout in general.
+
 The `swot-pixc` reader is the *point-cloud* arm — the same granule layout as
 `swot-raster100m`, but a component is a netCDF **group** read as points rather
 than a CF raster variable. Each selected `group` (default `pixel_cloud`) becomes
@@ -150,7 +156,15 @@ name and reads what it needs, so adding a format never changes the schema:
 | `cog` | `block_size` (internal tiling), `codec` (`deflate`/`zstd`/`lzw`/`packbits`/`lzma`/`webp`/`lerc`/`raw`; `deflate` by default) |
 | `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels` (overview-pyramid depth, `auto` by default), `scale_offset` (apply a packed source's scale in the array's codec pipeline), `standard_name` (the CF quantity, normally supplied by the dataset reader); `display_titiler_path` selects the multidim/xarray TiTiler router for display |
 | `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` (`zstd`/`snappy`/`gzip`/`brotli`/`none`; `zstd` by default — not geopandas'/pyarrow's own `snappy` default), `compression_level` (codec effort; `null` uses the codec's default), `data_page_size` (parquet page size in bytes, within a row group; `null` uses pyarrow's default) |
+| `flatgeobuf` | `spatial_index` (write the packed Hilbert R-tree and order the features along the Hilbert curve; `true` by default) |
 | `copc` | `span` (per-node voxel-grid edge — the per-node point budget ≈ `span**3`), `max_depth` (octree depth; `null` derives it from point density), `scale` (`null` derives LAS quantisation from the extent) |
+
+FlatGeobuf has a single lever because the format leaves nothing else to choose:
+its addressable unit is the **feature**, the R-tree node size is fixed at 16 (the
+GDAL driver exposes no creation option for it), and the format defines no
+compression. What a run decides is whether the index is written at all — and
+without it a client can only scan the file, so `spatial_index: false` is a
+measurement of what the index costs and buys, not a production setting.
 
 GeoZarr is a **per-component, 2D** adapter: each source raster becomes one sharded
 2D store (a directory of shard objects), the per-component analogue of the COG arm,
@@ -290,7 +304,11 @@ rasterio over `/vsis3` and served by TiTiler's `/cog` endpoints; a GeoZarr store
 is read zarr-natively over fsspec (GDAL cannot read the `sharding_indexed` codec)
 and served by a multidim/xarray TiTiler surface (`params.display_titiler_path`); a
 GeoParquet file is read with a bbox/row-group spatial query over fsspec (only the
-row groups whose covering bbox overlaps are fetched); a COPC file is read with an
+row groups whose covering bbox overlaps are fetched); a FlatGeobuf file is read
+with the same bbox query through OGR, pushed down to its packed Hilbert R-tree
+(only the features the tree selects are fetched — the metric's
+`read_decoded_throughput` detail carries a `spatial_index` flag saying whether the
+driver really used the index or fell back to a scan); a COPC file is read with an
 octree-node spatial query over fsspec (only the octree nodes that overlap the bbox
 are fetched). The vector and point-cloud arms have **no `display` metric** — a
 table or point cloud is not a TiTiler raster tile. All raster paths emit the same
@@ -340,6 +358,14 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
   - `geoparquet` → a `GeoParquetLayout`: `geometry_column`, `num_rows`,
     `num_row_groups`, `row_group_rows` (the addressable unit a bbox query fetches),
     and `has_bbox_covering` (whether spatial pushdown to row groups is possible).
+  - `flatgeobuf` → a `FlatGeobufLayout`: `num_features` (the addressable units),
+    `has_spatial_index` (whether a bbox query can select features rather than scan
+    the file), `index_node_size` (the R-tree branching factor), and the object split
+    into `header_bytes` / `index_bytes` / `feature_bytes` — so what the index costs
+    is answerable beside the size it is paid in. `codec` is always `none` and
+    `compression_ratio` 1.0: FlatGeobuf stores raw flatbuffers, which is the number
+    to read a GeoParquet arm's compression ratio against. `summary.md` renders a
+    "Spatial-index layout" table plus the index share of the stored bytes.
   - `copc` → a `CopcLayout`: `num_nodes` (octree nodes — the addressable units),
     `max_depth`, `point_count`, `points_per_node` (the largest node, i.e. the
     realised per-node point budget), and `extra_dimensions` (the carried point

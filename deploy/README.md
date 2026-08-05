@@ -59,7 +59,13 @@ read the source from the CNES Datalake instead.
 | --- | --- | --- | --- |
 | SWOT-A | `values-lab-swot-raster100m.yaml` | Raster100m → GeoZarr | yes (TiTiler /zarr) |
 | SWOT-B | `values-lab-swot-lakesp.yaml` | LakeSP Prior → GeoParquet | no |
+| SWOT-B | `values-lab-swot-lakesp-flatgeobuf.yaml` | LakeSP Prior → FlatGeobuf | no |
 | SWOT-C | `values-lab-swot-pixc.yaml` | PIXC pixel cloud → COPC | no |
+
+SWOT-B has **two** overlays because the study names two cloud-native vector
+candidates. They read the same staged passes with the same product limit, so
+running both and reading the two `summary.md` files side by side compares the
+source zip, GeoParquet and FlatGeobuf on one delivery.
 
 Each overlay bundles its benchmark + dataset config into `configs` and points
 `runner.configFile` / `runner.datasetFile` at them, so the only prerequisite is

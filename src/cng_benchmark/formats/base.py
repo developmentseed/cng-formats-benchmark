@@ -24,9 +24,10 @@ class ObjectKind(StrEnum):
     """The kind of object an adapter materialises at the conversion target.
 
     A COG is a single ``RASTER_FILE`` (one openable raster); a GeoZarr array is a
-    ``ZARR_STORE`` (a directory tree of shard objects + metadata); a GeoParquet
-    file is a single ``VECTOR_FILE`` (one openable table whose row groups are the
-    addressable byte ranges); a COPC file is a single ``POINT_CLOUD_FILE`` (one
+    ``ZARR_STORE`` (a directory tree of shard objects + metadata); a GeoParquet or
+    FlatGeobuf file is a single ``VECTOR_FILE`` (one openable table whose row
+    groups — or whose R-tree-indexed features — are the addressable byte ranges);
+    a COPC file is a single ``POINT_CLOUD_FILE`` (one
     openable LAZ whose octree nodes are the addressable byte ranges). The runner
     branches on this for the few things that genuinely differ per kind — output
     naming, upload (single file vs tree), the read collector (rasterio window vs

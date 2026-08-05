@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import random
 import time
+from contextlib import contextmanager
 from statistics import median, pstdev
 
 from cng_benchmark.models import MetricResult
@@ -239,20 +240,28 @@ def measure_vector_read(
     queries: int = 8,
     seed: int = 0,
 ) -> list[MetricResult]:
-    """Run ``queries`` random bbox spatial queries against the GeoParquet at ``uri``.
+    """Run ``queries`` random bbox spatial queries against the vector file at ``uri``.
 
-    The vector counterpart to :func:`measure_read`: each query passes a bbox
-    predicate to ``geopandas.read_parquet``, which pushes it down to the row
-    groups whose covering bbox overlaps — only those row groups are fetched (HTTP
-    range requests against the file when ``uri`` is S3), so this measures the
-    realistic partial-access pattern for a GeoParquet, not a full table scan. The
-    file's total extent (read once, untimed) seeds the random query positions;
-    ``seed`` makes the sample reproducible across runs. Emits the same
-    ``read_latency_*`` / ``read_decoded_throughput`` family as the raster path,
-    counting returned features rather than pixels.
+    The vector counterpart to :func:`measure_read`, for either cloud-native vector
+    candidate — a ``.fgb`` goes to :func:`measure_flatgeobuf_read` (bbox pushed
+    through the packed R-tree), anything else is read as GeoParquet. Both fetch
+    only the part of the file the query selects, and both emit the same metric
+    names, so the two candidates are compared on the same query.
+
+    For GeoParquet, each query passes a bbox predicate to
+    ``geopandas.read_parquet``, which pushes it down to the row groups whose
+    covering bbox overlaps — only those row groups are fetched (HTTP range
+    requests against the file when ``uri`` is S3), so this measures the realistic
+    partial-access pattern, not a full table scan. The file's total extent (read
+    once, untimed) seeds the random query positions; ``seed`` makes the sample
+    reproducible across runs. Emits the same ``read_latency_*`` /
+    ``read_decoded_throughput`` family as the raster path, counting returned
+    features rather than pixels.
     """
     if queries < 1:
         raise ValueError("queries must be >= 1")
+    if is_flatgeobuf(uri):
+        return measure_flatgeobuf_read(uri, role=role, queries=queries, seed=seed)
     gpd = _require_vector()
     storage_options = _vector_storage_options(uri, role)
     rng = random.Random(seed)
@@ -290,6 +299,96 @@ def _vector_total_bounds(
     geom = gpd.read_parquet(uri, storage_options=storage_options)
     minx, miny, maxx, maxy = (float(v) for v in geom.total_bounds)
     return (minx, miny, maxx, maxy)
+
+
+def is_flatgeobuf(uri: str) -> bool:
+    """True when ``uri`` names a FlatGeobuf file (by extension)."""
+    return uri.split("?")[0].lower().endswith(".fgb")
+
+
+def _require_ogr():
+    """Return ``pyogrio``, the OGR stack the FlatGeobuf read goes through.
+
+    ``read_dataframe`` returns a GeoDataFrame, so geopandas is required with it;
+    both come from the same extra, so one check covers the pair.
+    """
+    try:
+        import geopandas  # noqa: F401
+        import pyogrio
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
+        raise RuntimeError(
+            "the FlatGeobuf read metric requires the 'flatgeobuf' extra; install "
+            "with `uv sync --extra flatgeobuf` "
+            "(or `pip install cng-benchmark[flatgeobuf]`)"
+        ) from exc
+
+    return pyogrio
+
+
+@contextmanager
+def _ogr_session(uri: str, role: str):
+    """Scope the role's GDAL ``/vsis3`` config to the block, for an S3 ``uri`` only.
+
+    pyogrio reads a remote FlatGeobuf through its own bundled GDAL, which needs the
+    sink role's endpoint and credentials; :func:`~cng_benchmark.gdal_env.gdal_session`
+    supplies them (it overlays ``os.environ`` for exactly this non-rasterio case).
+    A local file needs none of that, and asking for it would pull in rasterio, so
+    the local path stays free of the ``cog`` extra.
+    """
+    from cng_benchmark.storage import is_s3
+
+    if not is_s3(uri):
+        yield
+        return
+    from cng_benchmark.gdal_env import gdal_session
+
+    with gdal_session(role):
+        yield
+
+
+def measure_flatgeobuf_read(
+    uri: str,
+    *,
+    role: str = "sink",
+    queries: int = 8,
+    seed: int = 0,
+) -> list[MetricResult]:
+    """Run ``queries`` random bbox spatial queries against the FlatGeobuf at ``uri``.
+
+    Each query passes a bbox to ``pyogrio.read_dataframe``, which hands it to the
+    OGR FlatGeobuf driver as a spatial filter: the driver walks the file's packed
+    Hilbert R-tree and range-reads only the features the tree selects (HTTP range
+    requests against the file when ``uri`` is S3), so this is the FlatGeobuf
+    counterpart of the row-group pruning the GeoParquet path measures — not a full
+    scan. The file's extent and whether the driver reports a *fast* spatial filter
+    (i.e. the index is really being used, not emulated by a scan) are read from the
+    header first, untimed; the latter travels in the throughput metric's detail so
+    a result says which of the two it measured. Emits the same metric family as the
+    GeoParquet path.
+    """
+    if queries < 1:
+        raise ValueError("queries must be >= 1")
+    pyogrio = _require_ogr()
+    path = to_gdal_path(uri)
+    rng = random.Random(seed)
+
+    latencies: list[float] = []
+    features = 0
+    decoded_bytes = 0
+    with _ogr_session(uri, role):
+        info = pyogrio.read_info(path)
+        bounds = tuple(float(v) for v in info["total_bounds"])
+        indexed = bool(info.get("capabilities", {}).get("fast_spatial_filter"))
+        for bbox in _random_bboxes(bounds, queries, rng):
+            start = time.perf_counter()
+            sub = pyogrio.read_dataframe(path, bbox=bbox)
+            latencies.append(time.perf_counter() - start)
+            features += len(sub)
+            decoded_bytes += int(sub.memory_usage(deep=True).sum())
+
+    return _vector_read_metrics(
+        latencies, decoded_bytes, features, extra_detail={"spatial_index": indexed}
+    )
 
 
 def _require_pointcloud():
@@ -421,13 +520,19 @@ def _pointcloud_read_metrics(
 
 
 def _vector_read_metrics(
-    latencies: list[float], decoded_bytes: int, features: int
+    latencies: list[float],
+    decoded_bytes: int,
+    features: int,
+    *,
+    extra_detail: dict | None = None,
 ) -> list[MetricResult]:
     """Assemble the ``read_*`` metrics from per-query latencies (vector path).
 
     Mirrors :func:`_read_metrics` so the vector and raster arms report the same
     latency/throughput names; throughput is *decoded* in-memory bytes per second
-    and the partial-access unit is a bbox query, not a raster window.
+    and the partial-access unit is a bbox query, not a raster window. Shared by
+    both vector candidates, so ``extra_detail`` carries what only one of them can
+    report (the FlatGeobuf index flag) without splitting the metric names.
     """
     total = sum(latencies)
     throughput = decoded_bytes / total if total > 0 else float("inf")
@@ -445,6 +550,10 @@ def _vector_read_metrics(
             name="read_decoded_throughput",
             value=throughput,
             unit="decoded-bytes/s",
-            detail={"decoded_bytes": decoded_bytes, "features": features},
+            detail={
+                "decoded_bytes": decoded_bytes,
+                "features": features,
+                **(extra_detail or {}),
+            },
         ),
     ]

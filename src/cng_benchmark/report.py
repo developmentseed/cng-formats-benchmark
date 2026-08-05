@@ -110,6 +110,7 @@ def _render_object_layouts(layouts: list) -> list[str]:
     cog = [ly for ly in layouts if ly.kind == "cog"]
     geozarr = [ly for ly in layouts if ly.kind == "geozarr"]
     geoparquet = [ly for ly in layouts if ly.kind == "geoparquet"]
+    flatgeobuf = [ly for ly in layouts if ly.kind == "flatgeobuf"]
     copc = [ly for ly in layouts if ly.kind == "copc"]
     lines: list[str] = []
     if cog:
@@ -118,6 +119,8 @@ def _render_object_layouts(layouts: list) -> list[str]:
         lines += _render_chunk_shard_layout(geozarr)
     if geoparquet:
         lines += _render_row_group_layout(geoparquet)
+    if flatgeobuf:
+        lines += _render_spatial_index_layout(flatgeobuf)
     if copc:
         lines += _render_octree_layout(copc)
     return lines
@@ -250,6 +253,50 @@ def _render_row_group_layout(layouts: list) -> list[str]:
     return lines
 
 
+def _render_spatial_index_layout(layouts: list) -> list[str]:
+    """Render the FlatGeobuf per-file index layout: a coverage line plus a table.
+
+    Leads with how many files carry the packed Hilbert R-tree (whether a bbox query
+    can select features at all, rather than scan), then one row per file (geometry
+    type, feature count, node size, what the index costs) — the FlatGeobuf answer to
+    the same partial-access question COG answers with internal tiling. The index
+    share is quoted because it is the format's own overhead, and the only part of a
+    FlatGeobuf that is not the data itself.
+    """
+    indexed = sum(1 for ly in layouts if ly.has_spatial_index)
+    index_bytes = sum(ly.index_bytes for ly in layouts)
+    total = sum(ly.size_bytes for ly in layouts)
+    share = f" ({100 * index_bytes / total:.1f}% of the stored bytes)" if total else ""
+    lines = [
+        "",
+        "## Spatial-index layout",
+        "",
+        f"- **Packed Hilbert R-tree:** {indexed}/{len(layouts)} file(s) "
+        "(bbox selection of features, not a scan)",
+        f"- **Index cost:** {_format_bytes(index_bytes)}{share}",
+        "",
+        "| Object | Geometry | Features | Indexed | Node size | Index"
+        " | Features bytes | Codec | Compression |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for ly in layouts:
+        ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
+        lines.append(
+            f"| {ly.name} | {ly.geometry_type} | {ly.num_features} | "
+            f"{'yes' if ly.has_spatial_index else 'no'} | {ly.index_node_size} | "
+            f"{_format_bytes(ly.index_bytes)} | {_format_bytes(ly.feature_bytes)} | "
+            f"{ly.codec} | {ratio} |"
+        )
+    lines += [
+        "",
+        "> FlatGeobuf stores raw flatbuffers and defines no compression, so the"
+        " stored bytes are the uncompressed bytes (1.00×). That is the number to"
+        " read a GeoParquet arm's compression ratio against: the two are the"
+        " vector candidates on the same source.",
+    ]
+    return lines
+
+
 def _render_octree_layout(layouts: list) -> list[str]:
     """Render the COPC per-file octree layout: a coverage line plus a table.
 
@@ -329,8 +376,8 @@ def render_product_set_summary(result: ProductSetResult) -> str:
             return "-"
         # A format-agnostic structural digest: COG reports its range-read-friendly
         # (tiled) fraction; GeoZarr reports its shard-object count; GeoParquet, the
-        # row-group count (its addressable units) — each format's own answer to the
-        # partial-access question.
+        # row-group count (its addressable units); FlatGeobuf, the indexed fraction
+        # — each format's own answer to the partial-access question.
         cog = [ly for ly in layouts if ly.kind == "cog"]
         if cog:
             return f"{sum(1 for ly in cog if ly.is_tiled)}/{len(cog)} tiled"
@@ -338,6 +385,10 @@ def render_product_set_summary(result: ProductSetResult) -> str:
         if geoparquet:
             groups = sum(ly.num_row_groups for ly in geoparquet)
             return f"{groups} row groups"
+        flatgeobuf = [ly for ly in layouts if ly.kind == "flatgeobuf"]
+        if flatgeobuf:
+            indexed = sum(1 for ly in flatgeobuf if ly.has_spatial_index)
+            return f"{indexed}/{len(flatgeobuf)} indexed"
         copc = [ly for ly in layouts if ly.kind == "copc"]
         if copc:
             return f"{sum(ly.num_nodes for ly in copc)} octree nodes"

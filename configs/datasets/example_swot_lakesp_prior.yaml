@@ -7,15 +7,27 @@
 # driver finds the .shx/.dbf/.prj sidecars inside the archive). `reader` selects
 # the SwotLakeSpPriorDataset; it takes no options. `source` is the pass root;
 # replace it with a reachable prefix — nothing here is provider-specific.
+#
+# Two cloud-native vector candidates target this one delivery — GeoParquet and
+# FlatGeobuf — so the same passes are measured twice, by the two benchmark arms
+# that name them. Reading both against the source zip is what separates the cost
+# of *this* format from the cost of a cloud-native vector layout in general (#83).
 id: example-swot-lakesp-prior
-description: Example SWOT L2 HR LakeSP Prior pass (zipped shapefile -> GeoParquet).
+description: >-
+  Example SWOT L2 HR LakeSP Prior pass
+  (zipped shapefile -> GeoParquet / FlatGeobuf).
 source: s3://example-bucket/LakeSP_Prior_Nom_France/
 baseline_format: shapefile
 reader: swot-lakesp-prior
 target_formats:
   - geoparquet
+  - flatgeobuf
 grouping_lever:
   # The object-grouping lever is the GeoParquet row-group size plus spatial
   # partitioning: sweep the rows-per-group against the tiers (the passes are
   # tiny, so this is the sub-Tier-2 fan-out story, like the S2 snow masks).
   geoparquet_row_group_rows: [25000, 100000]
+  # FlatGeobuf has no equivalent sweep: its addressable unit is the feature and
+  # the R-tree node size is fixed by the format, so the only writer choice is
+  # whether the index is written at all.
+  flatgeobuf_spatial_index: [true]

@@ -66,6 +66,19 @@ REQUIRED: tuple[Capability, ...] = (
     ),
     Capability("geoparquet", PYTHON, "geopandas", "write GeoParquet + bbox read"),
     Capability("geoparquet", PYTHON, "pyarrow", "row-group layout + parquet IO"),
+    Capability(
+        "flatgeobuf",
+        OGR_VECTOR,
+        "ESRI Shapefile",
+        "read the zipped shapefile source (SWOT-B / LakeSP)",
+    ),
+    Capability(
+        "flatgeobuf",
+        OGR_VECTOR,
+        "FlatGeobuf",
+        "write the indexed .fgb + read it back through its R-tree",
+    ),
+    Capability("flatgeobuf", PYTHON, "pyogrio", "the OGR write/read stack"),
     Capability("copc", PYTHON, "copclib", "write the COPC octree (SWOT-C / CARS)"),
     Capability("copc", PYTHON, "laspy", "octree-node spatial-query read"),
     Capability(
