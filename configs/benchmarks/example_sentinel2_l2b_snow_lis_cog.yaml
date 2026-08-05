@@ -1,0 +1,32 @@
+# Example fan-out benchmark: profile a Sentinel-2 L2B snow (LIS) tile as COG.
+#
+# Pairs with datasets/example_sentinel2_l2b_snow_lis.yaml (run with
+# `--dataset`). This is the **per-file baseline**: the runner still converts
+# one component to one produced object, so with `scope: product-set` the
+# object count and size distribution reported here is exactly the "before vs
+# after" the issue asks for (#84) — the fan-out is the headline, not the byte
+# saving. Bump `products.limit` to cover more dates for a real small-file run;
+# `products.limit: 3` here is the lightweight validation default the other
+# example arms use. The aggregated variant (many dates -> one object) is the
+# separate aggregation arm (#85), not run here.
+id: example-sentinel2-l2b-snow-lis-cog
+dataset: example-sentinel2-l2b-snow-lis
+formats:
+  - cog
+metrics:
+  - write
+  - object_size
+  - read
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  block_size: 512
+  scope: product-set              # one date (product) | many (product-set)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1                       # sample one component per product for read

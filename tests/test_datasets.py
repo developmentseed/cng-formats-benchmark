@@ -37,6 +37,7 @@ def test_builtin_readers_registered():
         "swot-raster100m",
         "swot-lakesp-prior",
         "swot-pixc",
+        "sentinel2-l2b-snow-lis",
     ):
         assert name in DATASETS
 
@@ -514,6 +515,66 @@ def test_pixc_enumerates_granules_from_local_files(tmp_path):
     assert [c.name for c in products[0].components] == ["pixel_cloud"]
     uri = products[0].components[0].uri
     assert uri.startswith("PIXC:") and uri.endswith(".nc::pixel_cloud")
+
+
+# --- Sentinel-2 L2B snow (Let-it-Snow / LIS) --------------------------------
+
+
+def test_lis_selects_the_whole_granule_as_one_component():
+    ds = build_dataset(
+        _dataset_config(reader="sentinel2-l2b-snow-lis", source="s3://bucket/T31TCH/")
+    )
+    granule = "s3://bucket/T31TCH/T31TCH_20200105.tif"
+    components = ds._select_components(granule)
+    assert [c.name for c in components] == ["20200105"]
+    # No `/vsizip` member or CF subdataset split — the whole file is read directly.
+    assert components[0].uri == granule
+
+
+def test_lis_falls_back_to_the_filename_when_no_date_is_found():
+    ds = build_dataset(
+        _dataset_config(reader="sentinel2-l2b-snow-lis", source="s3://bucket/T31TCH/")
+    )
+    granule = "s3://bucket/T31TCH/snow_mask.tif"
+    components = ds._select_components(granule)
+    assert [c.name for c in components] == ["snow_mask"]
+
+
+def test_lis_rejects_unknown_option():
+    with pytest.raises(ValidationError):
+        build_dataset(
+            _dataset_config(
+                reader="sentinel2-l2b-snow-lis",
+                source="s3://bucket/T31TCH/",
+                options={"bogus": 1},
+            )
+        )
+
+
+def test_lis_enumerates_the_small_file_fan_out_from_local_files(tmp_path):
+    # A synthetic small-file set: one loose GeoTIFF per date under a tile
+    # prefix — the anti-pattern this reader exists to profile (#84).
+    tile_root = tmp_path / "T31TCH"
+    tile_root.mkdir()
+    dates = ["20200101", "20200102", "20200103"]
+    for date in dates:
+        (tile_root / f"T31TCH_{date}.tif").write_bytes(b"\0" * 1024)
+    # A non-granule sibling is ignored (suffix match only).
+    (tile_root / "manifest.json").write_bytes(b"{}")
+
+    cfg = _dataset_config(reader="sentinel2-l2b-snow-lis", source=str(tile_root))
+    ds = build_dataset(cfg)
+
+    products = ds.products()
+    assert [p.id for p in products] == [f"T31TCH_{d}" for d in dates]
+    # One component per raster, each product's date visible on its component.
+    for product, date in zip(products, dates, strict=True):
+        assert [c.name for c in product.components] == [date]
+
+    # Prefix + limit bound a product-set enumeration — the fan-out over many
+    # tiny files is exactly what a run needs to bound before profiling it.
+    bounded = ds.products(prefix="T31TCH_2020010", limit=2)
+    assert [p.id for p in bounded] == ["T31TCH_20200101", "T31TCH_20200102"]
 
 
 def test_zip_delivery_enumerates_scenes_from_local_zips(tmp_path):

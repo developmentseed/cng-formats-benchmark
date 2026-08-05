@@ -120,6 +120,27 @@ def test_example_swot_pixc_configs_validate():
     assert "display" not in cfg.metrics
 
 
+def test_example_sentinel2_l2b_snow_lis_configs_validate():
+    ds = load_dataset_config("configs/datasets/example_sentinel2_l2b_snow_lis.yaml")
+    assert ds.reader == "sentinel2-l2b-snow-lis"
+    assert ds.target_formats == ["cog", "geozarr"]
+    # The reader takes no options — one component is the whole granule.
+    assert ds.options == {}
+
+    cog_cfg = load_benchmark_config(
+        "configs/benchmarks/example_sentinel2_l2b_snow_lis_cog.yaml"
+    )
+    assert cog_cfg.dataset == "example-sentinel2-l2b-snow-lis"
+    assert cog_cfg.formats == ["cog"]
+    assert cog_cfg.params["scope"] == "product-set"
+
+    geozarr_cfg = load_benchmark_config(
+        "configs/benchmarks/example_sentinel2_l2b_snow_lis_geozarr.yaml"
+    )
+    assert geozarr_cfg.formats == ["geozarr"]
+    assert geozarr_cfg.params["shard_shape"] == [2048, 2048]
+
+
 def test_example_benchmark_config_validates():
     cfg = load_benchmark_config(BENCHMARK_EXAMPLE)
     assert cfg.dataset == "example-raster"
