@@ -1,0 +1,43 @@
+# Example benchmark arm: Sentinel-2 L2B snow (LIS) -> GeoZarr v3 (per-date, 2D).
+#
+# The GeoZarr side of the LIS small-file arm (#84), head-to-head against the
+# COG arm from the same per-date source. Like the COG arm this is still the
+# **per-file baseline** — one date's raster in, one sharded store out — since
+# stacking dates into a `time` dimension is the aggregation arm (#85). Run
+# with `--dataset configs/datasets/example_sentinel2_l2b_snow_lis.yaml`.
+# `output` (and the TiTiler endpoint for display) are supplied by the
+# deployment.
+id: example-sentinel2-l2b-snow-lis-geozarr
+dataset: example-sentinel2-l2b-snow-lis
+formats:
+  - geozarr
+metrics:
+  - write
+  - object_size
+  - read
+  - display
+tiers:
+  - name: tier2-disk
+    min_object_bytes: 33554432    # 32 MiB
+  - name: tier3-tape
+    min_object_bytes: 104857600   # 100 MiB
+params:
+  # Zarr v3 sharding is the object-grouping lever (chunk = addressable unit,
+  # shard = stored object); a LIS tile is small enough that even the smaller
+  # shard size may not clear Tier 2 per date — the sub-Tier-2 fan-out this arm
+  # exists to measure.
+  chunk_shape: [1024, 1024]
+  shard_shape: [2048, 2048]
+  codec: zstd
+  multiscale_levels: auto
+  scope: product-set     # product (one date) | product-set (many)
+  products:
+    prefix: ""
+    limit: 3
+  samples:
+    read: 1
+    display: 1
+  # GeoZarr display is served by a multidim/xarray TiTiler surface, not the
+  # COG endpoints; the in-stack titiler-xarray serves at the root, so leave
+  # this empty.
+  display_titiler_path: ""

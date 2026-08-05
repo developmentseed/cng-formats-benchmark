@@ -17,8 +17,10 @@ and a fan-out of small masks — which only appears once the masks are included.
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 
 from cng_benchmark.datasets.base import DatasetOptions, RgbComposite, SourceObject
+from cng_benchmark.datasets.granule import GranuleDataset
 from cng_benchmark.datasets.zip_delivery import ZipDeliveryDataset, _member_vsi_uri
 from cng_benchmark.registry import DATASETS
 
@@ -150,3 +152,43 @@ class Sentinel2MajaDataset(ZipDeliveryDataset):
                     )
                 )
         return composites
+
+
+# --- Sentinel-2 L2B snow (Let-it-Snow / LIS) --------------------------------
+#
+# The Datalake `sentinel2-l2b-snow-sprid` bucket stages Let-it-Snow (LIS)
+# output as **loose per-date GeoTIFFs** under a tile prefix (`T31TCH/…`), not a
+# zip-per-scene archive — the small-file anti-pattern the study's ch. 7.3
+# tier-remediation priority names. Each date is one self-contained raster, so a
+# component is the whole granule file, addressed directly (no `/vsizip` member
+# decomposition, no CF subdataset split) — the granule base's prefix-listing
+# with a single-object read per file, mirroring how :mod:`swot` addresses a
+# netCDF granule but without the subdataset step.
+
+#: An 8-digit ``YYYYMMDD`` acquisition date, wherever it falls in the filename.
+_LIS_DATE_RE = re.compile(r"(\d{8})")
+
+
+@DATASETS.register("sentinel2-l2b-snow-lis")
+class Sentinel2LisDataset(GranuleDataset):
+    """Enumerate the per-date snow-mask GeoTIFFs under a LIS tile prefix.
+
+    One granule file = one product = one component: LIS delivers a single
+    raster per date, so there is no band/mask pick to carry in ``options``
+    (the default, empty :class:`~cng_benchmark.datasets.base.DatasetOptions`
+    applies). The component is named for its acquisition date (extracted from
+    the filename) rather than a fixed variable name, so the per-date fan-out
+    that is the whole point of profiling this arm (#84) stays visible in the
+    per-component results even when many dates are pooled into one dataset
+    run. The product id (the filename stem) already carries the date too;
+    naming the component the same way keeps every reported label
+    self-describing without cross-referencing the product.
+    """
+
+    granule_suffix = ".tif"
+
+    def _select_components(self, granule_uri: str) -> list[SourceObject]:
+        stem = PurePosixPath(granule_uri.split("://", 1)[-1]).stem
+        match = _LIS_DATE_RE.search(stem)
+        name = match.group(1) if match else stem
+        return [SourceObject(name=name, uri=granule_uri)]

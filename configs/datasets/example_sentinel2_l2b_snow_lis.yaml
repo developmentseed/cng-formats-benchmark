@@ -1,0 +1,24 @@
+# Example small-file dataset descriptor: a Sentinel-2 L2B snow (Let-it-Snow) tile.
+#
+# The clearest small-file anti-pattern in the study: LIS delivers one loose
+# GeoTIFF per date under a tile prefix, not a zip — `reader` selects the
+# Sentinel2LisDataset, which enumerates each date as its own product with a
+# single component (the whole raster), named for its acquisition date so the
+# per-date fan-out stays visible when many dates are pooled into one run
+# (#84). `source` is the tile root; dates live under it. Replace it with a
+# reachable prefix; nothing here is provider-specific.
+id: example-sentinel2-l2b-snow-lis
+description: Example Sentinel-2 L2B snow (Let-it-Snow) tile (per-date small-file fan-out).
+source: s3://example-bucket/sentinel2-l2b-snow-sprid/T31TCH/
+baseline_format: geotiff
+reader: sentinel2-l2b-snow-lis
+target_formats:
+  - cog
+  - geozarr
+grouping_lever:
+  # Each candidate format clears the object-size tiers with its own lever: COG
+  # internal tiling, Zarr v3 sharding. Neither lever groups *across* dates —
+  # that is the aggregation arm (#85); this sweep is the per-file baseline to
+  # beat.
+  cog_block_size: [256, 512, 1024]
+  zarr_shard_shape: [[1024, 1024], [2048, 2048]]

@@ -57,6 +57,7 @@ one registry line; the core config and runner are untouched.
 | `swot-raster100m` | one netCDF granule per file under `source` (SWOT L2 HR Raster 100m) | `variables` (CF variables; default `wse`) |
 | `swot-lakesp-prior` | a `.zip`-per-pass shapefile delivery under `source` (SWOT L2 HR LakeSP Prior) | none (one `.shp` member = one component) |
 | `swot-pixc` | one netCDF point-cloud granule per file under `source` (SWOT L2 HR PIXC) | `groups` (default `pixel_cloud`); `point_variables` (allow-list of carried point vars; default all) / `exclude_variables` (deny-list) |
+| `sentinel2-l2b-snow-lis` | one loose GeoTIFF per date, flat under a tile `source` (Sentinel-2 L2B snow / Let-it-Snow) | none (one file = one component) |
 
 ```yaml
 id: sentinel2-l2a-maja
@@ -109,6 +110,18 @@ geometry-only fraction). `point_variables` (allow-list) and `exclude_variables`
 variable. A variable whose name collides with a reserved LAS dimension (e.g.
 `classification`) is carried under a suffixed name. The COPC adapter and this
 point-cloud path are reused by the CO3D CARS arm (tiled LAZ → COPC).
+
+The `sentinel2-l2b-snow-lis` reader is the **small-file** arm — the clearest
+anti-pattern in the study, not the biggest object. Let-it-Snow output is
+delivered as loose GeoTIFFs, one per date, flat under a tile prefix (not a
+zip), so it reuses the *granule* base's prefix-listing but skips both the
+`/vsizip` member step and the CF subdataset step: one file **is** one product
+**is** one component, read directly. The component is named for its
+acquisition date (parsed from the filename) rather than a fixed variable name,
+so the per-date fan-out — the object count and size distribution, which is the
+headline here, not the byte saving — stays visible per product. Converting
+each date independently is the **per-file baseline to beat**; grouping many
+dates into one object is the separate aggregation arm.
 
 ## Benchmark descriptor
 
