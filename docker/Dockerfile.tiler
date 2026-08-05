@@ -45,4 +45,9 @@ print('cng-benchmark-tiler: /cog, /zarr, /geozarr all registered')"
 
 EXPOSE 8000
 
-ENTRYPOINT ["uv", "run", "uvicorn", "cng_benchmark_tiler.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# ENTRYPOINT stays generic (unlike Dockerfile.runner's fixed entrypoint) so
+# both Kubernetes `args:` and docker-compose `command:` -- which only replace
+# CMD, not ENTRYPOINT -- can vary workers/port without a workaround. CMD is a
+# workable standalone default (single worker) for a bare `docker run`.
+ENTRYPOINT ["uv", "run", "uvicorn"]
+CMD ["cng_benchmark_tiler.main:app", "--host", "0.0.0.0", "--port", "8000"]
