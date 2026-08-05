@@ -1,0 +1,48 @@
+# Bench TiTiler image.
+#
+# The bench's own TiTiler application: one process, three tile routers
+# (/cog rasterio-GDAL, /zarr stock xarray, /geozarr titiler-eopf's
+# GeoZarrReader), so a display measurement's only variable is which reader
+# served it. This image is what the docker-compose stack and the Helm chart
+# deploy as the `titiler` service, replacing the unpinned stock
+# ghcr.io/developmentseed/titiler image. CI only proves it builds and that
+# its three routers + health endpoint respond; it never runs a benchmark.
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1
+
+# rasterio ships GDAL in its wheel, but GDAL still dynamically links a few base
+# system libraries that the slim image omits (notably libexpat). Install them so
+# `import rasterio` works without pulling a full system GDAL. `git` is needed at
+# build time only, to resolve `titiler.eopf`'s git dependency (not on PyPI).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libexpat1 git \
+    && rm -rf /var/lib/apt/lists/*
+
+# This app lives in its own subdirectory with its own pyproject.toml/lockfile,
+# separate from the harness's `cng_benchmark` package at the repo root, so
+# the runner image's dependency tree stays free of the full TiTiler/GDAL/
+# GeoZarr-reader stack (and vice versa).
+COPY tiler/pyproject.toml tiler/uv.lock tiler/README.md ./
+COPY tiler/src ./src
+RUN uv sync --locked --no-dev
+
+# Build-time self-check: import the app and assert all three routers
+# registered, so a broken binding (e.g. an upstream titiler-eopf release that
+# renames GeoZarrReader's path_dependency hook) fails THIS build, not a
+# production deploy on the cluster.
+RUN uv run python -c "\
+from cng_benchmark_tiler.main import app; \
+paths = app.openapi()['paths']; \
+missing = [p for p in ('/cog', '/zarr', '/geozarr') if not any(k.startswith(p) for k in paths)]; \
+assert not missing, f'missing routers: {missing}'; \
+print('cng-benchmark-tiler: /cog, /zarr, /geozarr all registered')"
+
+EXPOSE 8000
+
+ENTRYPOINT ["uv", "run", "uvicorn", "cng_benchmark_tiler.main:app", "--host", "0.0.0.0", "--port", "8000"]

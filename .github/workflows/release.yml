@@ -16,6 +16,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/developmentseed/cng-benchmark-runner
+  IMAGE_TILER: ghcr.io/developmentseed/cng-benchmark-tiler
 
 jobs:
   release-please:
@@ -58,6 +59,34 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Versioned tiler image, same release version as the runner (this repo is
+  # single-package/single-version in release-please), only when a release was
+  # just created.
+  publish-release-tiler:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the released tiler image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.tiler
+          push: true
+          tags: |
+            ${{ env.IMAGE_TILER }}:${{ needs.release-please.outputs.version }}
+            ${{ env.IMAGE_TILER }}:${{ needs.release-please.outputs.major }}.${{ needs.release-please.outputs.minor }}
+            ${{ env.IMAGE_TILER }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # Moving edge image on every push to main.
   publish-edge:
     runs-on: ubuntu-latest
@@ -81,6 +110,35 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.runner
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Moving edge tiler image on every push to main.
+  publish-edge-tiler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_TILER }}
+          tags: |
+            type=raw,value=edge
+            type=sha,prefix=sha-,format=short
+      - name: Build and push the edge tiler image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.tiler
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
