@@ -22,6 +22,10 @@ pulls the matching released image; override image.tag for a local/edge image.
 {{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
 {{- end }}
 
+{{- define "cng-benchmark.titilerImage" -}}
+{{- printf "%s:%s" .Values.titiler.image.repository (.Values.titiler.image.tag | default .Chart.AppVersion) -}}
+{{- end }}
+
 {{- define "cng-benchmark.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 app.kubernetes.io/name: {{ include "cng-benchmark.name" . }}

@@ -80,12 +80,19 @@ minio:
   rootUser: minioadmin
   rootPassword: minioadmin
 
-# TiTiler tile service. Health-probed on /healthz; the display metric measures
-# tiles against it. Serves both COG (/cog) and GeoZarr (/zarr) since TiTiler 2.0
-# — no separate titiler-xarray service is needed.
+# TiTiler tile service — the bench's own image (tiler/, docker/Dockerfile.tiler),
+# not stock TiTiler: one process, three routers (/cog rasterio-GDAL, /zarr stock
+# xarray, /geozarr titiler-eopf's GeoZarrReader), so a display measurement's only
+# variable is which reader served it. Health-probed on /healthz; the display
+# metric measures tiles against it.
 titiler:
   enabled: true
-  image: ghcr.io/developmentseed/titiler:latest
+  image:
+    # `tag` empty → the chart's appVersion, same released-version convention as
+    # the runner's `image.tag` above.
+    repository: ghcr.io/developmentseed/cng-benchmark-tiler
+    tag: ""
+    pullPolicy: IfNotPresent
   port: 8000
   replicas: 1
   # uvicorn worker count. 1 is safe for local/CI (single-core); bump to (2×CPUs)+1

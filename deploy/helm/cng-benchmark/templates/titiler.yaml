@@ -22,10 +22,13 @@ spec:
     spec:
       containers:
         - name: titiler
-          image: {{ .Values.titiler.image | quote }}
-          command:
-            - uvicorn
-            - titiler.application.main:app
+          image: {{ include "cng-benchmark.titilerImage" . | quote }}
+          imagePullPolicy: {{ .Values.titiler.image.pullPolicy }}
+          # `args:` (CMD), not `command:` (ENTRYPOINT) -- the image's ENTRYPOINT
+          # is `uv run uvicorn`; this only supplies its arguments, same
+          # convention as runner-job.yaml's normal (non wait-display) containers.
+          args:
+            - cng_benchmark_tiler.main:app
             - --host
             - 0.0.0.0
             - --port

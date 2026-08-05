@@ -26,3 +26,8 @@ runner:
 
 titiler:
   enabled: true
+  image:
+    # The image built locally and loaded into kind (not pulled from a registry).
+    repository: cng-benchmark-tiler
+    tag: ci
+    pullPolicy: IfNotPresent
