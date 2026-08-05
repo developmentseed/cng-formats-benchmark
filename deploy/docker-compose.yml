@@ -69,9 +69,10 @@ services:
       "
 
   titiler:
-    image: ghcr.io/developmentseed/titiler:latest
+    image: ${TITILER_IMAGE:-cng-benchmark-tiler:dev}
+    # Replaces the image's CMD (its ENTRYPOINT, `uv run uvicorn`, is unchanged).
     command:
-      ["uvicorn", "titiler.application.main:app", "--host", "0.0.0.0", "--port", "8000",
+      ["cng_benchmark_tiler.main:app", "--host", "0.0.0.0", "--port", "8000",
        "--workers", "2"]
     environment:
       <<: [*s3-env, *gdal-env]

@@ -108,10 +108,21 @@ jobs:
           tags: cng-benchmark-runner:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build tiler image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.tiler
+          push: false
+          load: true
+          tags: cng-benchmark-tiler:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Stand up the stack and run end-to-end
         working-directory: deploy
         env:
           RUNNER_IMAGE: cng-benchmark-runner:ci
+          TITILER_IMAGE: cng-benchmark-tiler:ci
         run: |
           # `up --wait` brings the infra healthy and starts the (one-shot) seed
           # and runner; it returns once the runner is *running*, not *exited*.
@@ -152,6 +163,16 @@ jobs:
           tags: cng-benchmark-runner:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build tiler image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.tiler
+          push: false
+          load: true
+          tags: cng-benchmark-tiler:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - uses: azure/setup-helm@v4
       - name: Install kubeconform
         run: |
@@ -174,6 +195,8 @@ jobs:
           cluster_name: cngbench
       - name: Load runner image into kind
         run: kind load docker-image cng-benchmark-runner:ci --name cngbench
+      - name: Load tiler image into kind
+        run: kind load docker-image cng-benchmark-tiler:ci --name cngbench
       - name: Install the chart (local overlay)
         run: |
           helm install bench deploy/helm/cng-benchmark \
