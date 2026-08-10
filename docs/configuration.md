@@ -365,6 +365,67 @@ overridden via `params.display_chunk_targets`. A `display_chunk_layout.png`
 overlaying each served tile on the block/chunk grid is written alongside the
 object.
 
+## Run protocol (replicates, cache, concurrency)
+
+A single measurement on one machine hides two kinds of spread: run-to-run
+variance (the same arm, measured again) and run-*condition* variance (cold vs
+warm cache, alone vs under load) — the 9x swing between an isolated and a
+co-scheduled read observed in practice is a condition effect, not noise.
+`params.run_protocol` (issue #87) repeats the `read` metric under a declared
+condition matrix and reports the spread, additively — it never changes what
+`metrics` reports, it only adds a `conditions` section:
+
+```yaml
+params:
+  run_protocol:
+    replicates: 5                          # measured passes per condition (default 1)
+    conditions:                            # the read-phase condition matrix
+      - {cache: warm, concurrency: 1}      # isolated, warm (default when omitted)
+      - {cache: cold, concurrency: 1}      # isolated, cold
+      - {cache: warm, concurrency: 4}      # 4 concurrent workers, warm pool
+```
+
+| Field | Meaning |
+| --- | --- |
+| `replicates` | how many timed passes each condition runs (default 1 — one pass, today's behaviour) |
+| `conditions` | the matrix to run; each entry is a `cache` + `concurrency` pair (default: one `{cache: warm, concurrency: 1}` condition) |
+| `conditions[].cache` | `cold` (a fresh, freshly-spawned subprocess per replicate — no reused GDAL block cache, vsicurl connection, or fsspec state) or `warm` (one persistent worker pool for the whole condition, warmed up by an untimed pass before the first timed replicate) |
+| `conditions[].concurrency` | worker count the read phase runs with; `1` is isolated, `>1` fires that many workers at the object simultaneously (each on its own random window/query sample) and reports both the pooled result and each worker's value |
+
+Applies only to `read`. Its caches (GDAL's block cache, the vsicurl connection
+pool, fsspec's own caching) are entirely client-side and under the harness's
+control, so a genuinely cold or concurrent read is something this process can
+produce by itself — a cold replicate really does start from a bare
+interpreter (`multiprocessing`'s `spawn` start method, not `fork`, which would
+silently inherit the parent's already-warm state).
+
+`display` only honours `replicates` — a genuine cold or concurrent *display*
+condition would mean bouncing the TiTiler deployment between passes (its
+cache is the deployed tiler pod's own, out of the harness process's reach),
+which is cluster-level work this harness does not attempt. A `display`
+condition in the result is always reported as `cache: "warm"`,
+`concurrency: 1`, however many replicates ran.
+
+`write` is never replicated — it is expensive (it re-converts the source), so
+the produced object is written once and re-read `replicates` times instead.
+
+A cold replicate's subprocess-spawn overhead (importing rasterio/zarr/numpy in
+a fresh interpreter, roughly a second or more per replicate) is the cost of
+the fidelity: size `replicates` and the product sample count
+(`params.samples.read`, on the dataset fan-out path) with that in mind rather
+than defaulting to a large matrix on every arm.
+
+The result (`result.json`) carries the full detail on `BenchmarkRun.conditions`
+— a list of `{phase, cache, concurrency, replicates, aggregate}`, where
+`replicates` is every timed pass's raw metrics and `aggregate` is, per metric
+name, the cross-replicate mean (`value`) plus `median`/`stdev`/
+`replicate_values` in `detail`. `summary.md` renders it as a "Run protocol"
+table — one row per `(phase, cache, concurrency, metric)` — the "cold isolated
+/ warm isolated / cold concurrent" comparison per format the study asks for.
+On a dataset fan-out run, the roll-up pools every sampled product's replicates
+for a given condition before recomputing the aggregate, so the roll-up's
+spread is the honest set-level spread, not just one product's.
+
 ## The result
 
 A run produces a `BenchmarkRun` (`cng_benchmark.models`):
@@ -409,6 +470,9 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
   point-cloud structural artifact; its sink URI is in the `octree_lod` metric
   detail.
 - `metrics` — a list of `{name, value, unit, detail}` scalars
+- `conditions` — the run-protocol condition matrix (see above), empty unless
+  `params.run_protocol` is set: a list of `{phase, cache, concurrency,
+  replicates, aggregate}`
 
 It is written as `result.json` and rendered to `summary.md`
 ([report.py](https://github.com/developmentseed/cng-formats-benchmark/blob/main/src/cng_benchmark/report.py)).

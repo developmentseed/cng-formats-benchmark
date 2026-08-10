@@ -71,10 +71,46 @@ def render_markdown_summary(run: BenchmarkRun) -> str:
         for m in run.metrics:
             lines.append(f"| {m.name} | {m.value:g} | {m.unit or ''} |")
 
+    lines += _render_conditions(run.conditions)
     lines += _render_artifacts(run.artifacts)
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _render_conditions(conditions: list) -> list[str]:
+    """Render the run-protocol condition matrix (issue #87).
+
+    One row per ``(phase, cache, concurrency, metric)`` — mean, median and
+    spread across the condition's replicates — the "cold isolated / warm
+    isolated / cold concurrent" table the study wants per format. Empty when
+    the run carries no ``run_protocol`` (the common case).
+    """
+    if not conditions:
+        return []
+    lines = [
+        "",
+        "## Run protocol",
+        "",
+        "| Phase | Cache | Concurrency | Replicates | Metric | Mean | Median"
+        " | Spread | Unit |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for c in conditions:
+        isolation = (
+            "isolated" if c.concurrency == 1 else f"concurrent ({c.concurrency})"
+        )
+        n = len(c.replicates)
+        for m in c.aggregate:
+            med = m.detail.get("median")
+            spread = m.detail.get("stdev")
+            med_str = f"{med:g}" if isinstance(med, int | float) else "—"
+            spread_str = f"{spread:g}" if isinstance(spread, int | float) else "—"
+            lines.append(
+                f"| {c.phase} | {c.cache} | {isolation} | {n} | {m.name} | "
+                f"{m.value:g} | {med_str} | {spread_str} | {m.unit or ''} |"
+            )
+    return lines
 
 
 def _render_artifacts(artifacts: list) -> list[str]:
@@ -412,6 +448,7 @@ def render_product_set_summary(result: ProductSetResult) -> str:
             f"| **{_format_bytes(roll.mean)}** | **{roll.highest_tier or 'none'}** "
             f"| **{_layout(result.rollup)}** |"
         )
+    lines += _render_conditions(result.rollup.conditions)
     lines += _render_artifacts(result.rollup.artifacts)
     lines.append("")
     return "\n".join(lines)
