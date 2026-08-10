@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.6.0...v0.7.0) (2026-08-10)
+
+
+### Features
+
+* **cog:** make the COG codec configurable for a matched-codec comparison ([#79](https://github.com/developmentseed/cng-formats-benchmark/issues/79)) ([6bdbd93](https://github.com/developmentseed/cng-formats-benchmark/commit/6bdbd9398c7b74bfdd9d71651cce64870c32585b))
+* **deploy:** wire Helm/compose to the bench tiler image ([#94](https://github.com/developmentseed/cng-formats-benchmark/issues/94)) ([aa2dac4](https://github.com/developmentseed/cng-formats-benchmark/commit/aa2dac45d3f246a837845723fe63ac47b39c8210))
+* **flatgeobuf:** add a FlatGeobuf writer and a LakeSP FlatGeobuf arm ([#90](https://github.com/developmentseed/cng-formats-benchmark/issues/90)) ([1be803e](https://github.com/developmentseed/cng-formats-benchmark/commit/1be803ea9b9ad3b521e791f257ced835de9486d4))
+* **geoparquet:** codec-sweep example arms and finer compression levers ([#80](https://github.com/developmentseed/cng-formats-benchmark/issues/80)) ([329250c](https://github.com/developmentseed/cng-formats-benchmark/commit/329250c0feb9b9ec7742fe4b3093f9535900d5a3))
+* **geozarr:** build a multiscale pyramid by default, described by the Zarr conventions ([#78](https://github.com/developmentseed/cng-formats-benchmark/issues/78)) ([ed5122b](https://github.com/developmentseed/cng-formats-benchmark/commit/ed5122b1696761f68281bbe4f76629aaae0cdc96))
+* **geozarr:** encode a packed source's scale with the scale_offset codec ([#77](https://github.com/developmentseed/cng-formats-benchmark/issues/77)) ([664f37e](https://github.com/developmentseed/cng-formats-benchmark/commit/664f37e75f04653c35fd1f95722a420a9b79bfe2))
+* **harness:** route GeoZarr display through /geozarr, record the reader ([#95](https://github.com/developmentseed/cng-formats-benchmark/issues/95)) ([6dbbd80](https://github.com/developmentseed/cng-formats-benchmark/commit/6dbbd80e4567385adbe3e790d090688df43276ba))
+* **runner:** add a run protocol (replicates, cold/warm cache, concurrency) ([#97](https://github.com/developmentseed/cng-formats-benchmark/issues/97)) ([b2d5ace](https://github.com/developmentseed/cng-formats-benchmark/commit/b2d5ace107a01de6b4353a92748fce2e76da9e46))
+* **sentinel2:** add a sentinel2-l2b-snow-lis reader and small-file arm configs ([#91](https://github.com/developmentseed/cng-formats-benchmark/issues/91)) ([ae6ab20](https://github.com/developmentseed/cng-formats-benchmark/commit/ae6ab20bec02f54e41c09f3300b5aa20c3ca7fe7))
+* **swot:** content-complete all-variable arm + France-filtered product set ([#92](https://github.com/developmentseed/cng-formats-benchmark/issues/92)) ([d976d3a](https://github.com/developmentseed/cng-formats-benchmark/commit/d976d3ab63e9595b9528e2f65ace79f3038c7334))
+* **tiler:** bench TiTiler app with GeoZarrReader-backed /geozarr router ([#93](https://github.com/developmentseed/cng-formats-benchmark/issues/93)) ([6ddeba7](https://github.com/developmentseed/cng-formats-benchmark/commit/6ddeba7eb89f67ea258ca24673ec19d4cf64efaf))
+
+
+### Bug Fixes
+
+* **read:** random subset-read sampling + spread metric ([#81](https://github.com/developmentseed/cng-formats-benchmark/issues/81)) ([fc8f7aa](https://github.com/developmentseed/cng-formats-benchmark/commit/fc8f7aa54130d19060607ef215154188ca25bcae))
+* **sentinel2:** propagate MAJA nodata and reflectance scale to both outputs ([#75](https://github.com/developmentseed/cng-formats-benchmark/issues/75)) ([c179010](https://github.com/developmentseed/cng-formats-benchmark/commit/c17901093f4a520be46a08b6274fa983d9276ad0))
+
 ## [0.6.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.5.0...v0.6.0) (2026-06-30)
 
 
