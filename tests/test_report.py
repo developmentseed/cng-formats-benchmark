@@ -8,6 +8,8 @@ from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.models import (
     BenchmarkRun,
     CogLayout,
+    ConditionReplicate,
+    ConditionResult,
     CopcLayout,
     FlatGeobufLayout,
     GeoParquetLayout,
@@ -181,6 +183,62 @@ def test_write_artifacts_writes_both_files(tmp_path):
     payload = json.loads(result_path.read_text())
     assert payload["dataset_id"] == "synthetic-cog"
     assert payload["object_profile"]["count"] == 3
+
+
+def test_summary_omits_run_protocol_section_without_conditions():
+    md = render_markdown_summary(_sample_run())
+    assert "## Run protocol" not in md
+
+
+def test_summary_renders_run_protocol_condition_matrix():
+    run = _sample_run()
+    run.conditions = [
+        ConditionResult(
+            phase="read",
+            cache="warm",
+            concurrency=1,
+            replicates=[
+                ConditionReplicate(
+                    index=0,
+                    metrics=[
+                        MetricResult(name="read_latency_mean", value=0.01, unit="s")
+                    ],
+                ),
+            ],
+            aggregate=[
+                MetricResult(
+                    name="read_latency_mean",
+                    value=0.01,
+                    unit="s",
+                    detail={"replicate_values": [0.01], "median": 0.01, "stdev": 0.0},
+                )
+            ],
+        ),
+        ConditionResult(
+            phase="read",
+            cache="cold",
+            concurrency=4,
+            replicates=[],
+            aggregate=[
+                MetricResult(
+                    name="read_latency_mean",
+                    value=0.05,
+                    unit="s",
+                    detail={
+                        "replicate_values": [0.04, 0.06],
+                        "median": 0.05,
+                        "stdev": 0.01,
+                    },
+                )
+            ],
+        ),
+    ]
+    md = render_markdown_summary(run)
+    assert "## Run protocol" in md
+    assert (
+        "| read | warm | isolated | 1 | read_latency_mean | 0.01 | 0.01 | 0 | s |" in md
+    )
+    assert "| read | cold | concurrent (4) |" in md
 
 
 def test_summary_flags_the_scale_offset_encoding():

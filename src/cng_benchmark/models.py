@@ -243,6 +243,47 @@ AnyObjectLayout = Annotated[
 ]
 
 
+class ConditionReplicate(BaseModel):
+    """One replicate's raw measurement under a run-protocol condition.
+
+    ``metrics`` is the same shape a single-shot read/display measurement
+    produces (e.g. the ``read_*`` family from :mod:`cng_benchmark.metrics.read`)
+    — a condition is just that measurement repeated under a declared cache
+    state and worker count, so each replicate's payload is directly comparable
+    to the run's top-level ``metrics``.
+    """
+
+    index: int
+    metrics: list[MetricResult]
+
+
+class ConditionResult(BaseModel):
+    """Replicated measurements for one run-protocol condition (issue #87).
+
+    A condition is a ``(phase, cache, concurrency)`` triple: which metric
+    phase was repeated (``"read"`` or ``"display"``), the declared cache state
+    (``cold`` — a fresh subprocess per replicate, no reused GDAL/fsspec state;
+    ``warm`` — one persistent worker pool, warmed up before the first timed
+    replicate), and how many workers ran concurrently (``1`` = isolated).
+
+    ``replicates`` carries every timed pass; ``aggregate`` carries, per metric
+    name that appeared in the replicates, the cross-replicate mean as
+    ``value`` plus ``median``/``stdev``/``replicate_values`` in ``detail`` —
+    the spread the roll-up and the report table read.
+
+    The ``display`` phase only ever varies ``replicates``: TiTiler's cache is a
+    server-side property of the deployed tiler pod, so the harness cannot force
+    it cold, and is always reported here as ``cache="warm"``,
+    ``concurrency=1``.
+    """
+
+    phase: str  # "read" | "display"
+    cache: Literal["cold", "warm"]
+    concurrency: int
+    replicates: list[ConditionReplicate]
+    aggregate: list[MetricResult] = Field(default_factory=list)
+
+
 class BenchmarkRun(BaseModel):
     """The full, serialisable record of one benchmark run.
 
@@ -251,7 +292,10 @@ class BenchmarkRun(BaseModel):
     were exercised. ``object_profile`` carries the object-size differentiator,
     ``metrics`` holds additional scalar measurements, and ``artifacts`` holds the
     non-metric side-outputs (chunk-layout PNGs, octree LOD, RGB VRTs) produced
-    alongside the measurements.
+    alongside the measurements. ``conditions`` is additive: populated only when
+    the config declares a ``params.run_protocol`` (issue #87) — ``metrics`` is
+    always the same single-shot measurement it has always been, regardless of
+    whether a run protocol also repeated it under a condition matrix.
     """
 
     timestamp: datetime
@@ -263,3 +307,4 @@ class BenchmarkRun(BaseModel):
     object_layouts: list[AnyObjectLayout] = Field(default_factory=list)
     metrics: list[MetricResult] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
+    conditions: list[ConditionResult] = Field(default_factory=list)

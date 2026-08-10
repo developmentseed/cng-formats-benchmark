@@ -355,6 +355,39 @@ def test_product_set_rollup_pools_all_products(tmp_path):
     assert result.rollup.params["product_count"] == 2
 
 
+def test_product_set_rollup_pools_run_protocol_conditions(tmp_path):
+    src = tmp_path / "src"
+    _write_product(src, "scene1", n_components=2)
+    _write_product(src, "scene2", n_components=2)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(
+        ["object_size", "read"],
+        {
+            "scope": "product-set",
+            "run_protocol": {
+                "replicates": 2,
+                "conditions": [{"cache": "warm", "concurrency": 1}],
+            },
+        },
+    )
+    result = run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+    # Each product samples 1 component (default), 2 replicates each — the
+    # roll-up pools both products' replicates into one condition.
+    for run in result.per_product:
+        assert len(run.conditions) == 1
+        assert len(run.conditions[0].replicates) == 2
+
+    assert len(result.rollup.conditions) == 1
+    pooled = result.rollup.conditions[0]
+    assert pooled.phase == "read"
+    assert pooled.cache == "warm"
+    assert len(pooled.replicates) == 4  # 2 products × 2 replicates
+    latency = next(m for m in pooled.aggregate if m.name == "read_latency_mean")
+    assert len(latency.detail["replicate_values"]) == 4
+
+
 def test_product_set_bounded_by_limit(tmp_path):
     src = tmp_path / "src"
     _write_product(src, "scene1", n_components=1)

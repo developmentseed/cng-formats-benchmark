@@ -6,6 +6,8 @@ from cng_benchmark.models import (
     Artifact,
     BenchmarkRun,
     CogLayout,
+    ConditionReplicate,
+    ConditionResult,
     GeoZarrLayout,
     HistogramBin,
     MetricResult,
@@ -59,6 +61,7 @@ def test_benchmark_run_defaults_are_empty():
     assert run.object_profile is None
     assert run.object_layouts == []
     assert run.artifacts == []
+    assert run.conditions == []
 
 
 def test_artifacts_round_trip():
@@ -123,3 +126,51 @@ def test_object_layouts_union_round_trips_subclass_fields():
     cog, geozarr = reloaded.object_layouts
     assert cog.kind == "cog" and cog.internal_tiles == 16
     assert geozarr.kind == "geozarr" and geozarr.chunks_per_shard == 4
+
+
+def test_condition_result_round_trips():
+    run = BenchmarkRun(
+        timestamp=datetime(2026, 6, 17, tzinfo=UTC),
+        dataset_id="example-raster",
+        format_id="cog",
+        conditions=[
+            ConditionResult(
+                phase="read",
+                cache="cold",
+                concurrency=1,
+                replicates=[
+                    ConditionReplicate(
+                        index=0,
+                        metrics=[
+                            MetricResult(name="read_latency_mean", value=0.01, unit="s")
+                        ],
+                    ),
+                    ConditionReplicate(
+                        index=1,
+                        metrics=[
+                            MetricResult(name="read_latency_mean", value=0.03, unit="s")
+                        ],
+                    ),
+                ],
+                aggregate=[
+                    MetricResult(
+                        name="read_latency_mean",
+                        value=0.02,
+                        unit="s",
+                        detail={
+                            "replicate_values": [0.01, 0.03],
+                            "median": 0.02,
+                            "stdev": 0.01,
+                        },
+                    )
+                ],
+            )
+        ],
+    )
+    reloaded = BenchmarkRun.model_validate_json(run.model_dump_json())
+    assert reloaded == run
+    (condition,) = reloaded.conditions
+    assert condition.cache == "cold"
+    assert condition.concurrency == 1
+    assert len(condition.replicates) == 2
+    assert condition.aggregate[0].detail["median"] == 0.02
