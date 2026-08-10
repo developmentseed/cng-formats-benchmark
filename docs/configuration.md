@@ -181,7 +181,7 @@ name and reads what it needs, so adding a format never changes the schema:
 | `cog` | `block_size` (internal tiling), `codec` (`deflate`/`zstd`/`lzw`/`packbits`/`lzma`/`webp`/`lerc`/`raw`; `deflate` by default) |
 | `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels` (overview-pyramid depth, `auto` by default), `scale_offset` (apply a packed source's scale in the array's codec pipeline), `standard_name` (the CF quantity, normally supplied by the dataset reader); `display_titiler_path` selects the bench tiler's GeoZarr router for display — `zarr` (stock xarray defaults, the default) or `geozarr` (`titiler-eopf`'s `GeoZarrReader`) |
 | `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` (`zstd`/`snappy`/`gzip`/`brotli`/`none`; `zstd` by default — not geopandas'/pyarrow's own `snappy` default), `compression_level` (codec effort; `null` uses the codec's default), `data_page_size` (parquet page size in bytes, within a row group; `null` uses pyarrow's default) |
-| `flatgeobuf` | `spatial_index` (write the packed Hilbert R-tree and order the features along the Hilbert curve; `true` by default), `null_geometry` (`error`/`drop`/`sentinel`; `error` by default) |
+| `flatgeobuf` | `spatial_index` (write the packed Hilbert R-tree and order the features along the Hilbert curve; `true` by default), `null_geometry` (`error`/`drop`/`point_from`/`sentinel`; `error` by default), `null_geometry_point_from` (`[lon_column, lat_column]`, required for `null_geometry: point_from`) |
 | `copc` | `span` (per-node voxel-grid edge — the per-node point budget ≈ `span**3`), `max_depth` (octree depth; `null` derives it from point density), `scale` (`null` derives LAS quantisation from the extent) |
 
 FlatGeobuf has a single grouping lever because the format leaves nothing else to
@@ -193,27 +193,42 @@ measurement of what the index costs and buys, not a production setting.
 
 A source can carry features with **no geometry at all** — a prior-database
 delivery such as SWOT LakeSP Prior reports every prior feature in a pass's
-footprint and leaves the geometry NULL for the ones it did not observe (73% of
-features in the product that surfaced this, #98). FlatGeobuf's packed Hilbert
+footprint and leaves the geometry NULL for the ones it did not observe (77.6% of
+features in the pass that surfaced this, #98). FlatGeobuf's packed Hilbert
 R-tree cannot index a NULL geometry, so with `spatial_index: true` (the default)
 that is a hard format constraint, not a writer bug — the conversion fails before
-any bytes are written, naming the NULL count and share and the two ways out:
+any bytes are written, naming the NULL count and share and the ways out:
 
 - `null_geometry: drop` (default `error`) writes the non-null subset instead.
   The dropped count is recorded on `FlatGeobufLayout` (`features_dropped`,
   `content_subset: true`) and `summary.md`'s "Spatial-index layout" table flags
   it, so a smaller file is never read as the whole product.
-- `null_geometry: sentinel` keeps every feature. Each NULL geometry is replaced
-  by a minimal, same-broad-type placeholder (so the file's declared geometry
-  type stays meaningful) positioned just outside the real content's extent, so
-  it can never satisfy a bbox query scoped to the real data — "not searchable
-  as geometry", without dropping the row or its attributes. A `null_geometry`
-  boolean column flags the placeholder rows, and the count is recorded on
-  `FlatGeobufLayout` (`features_sentinel`, `geometry_fabricated: true`) and
-  flagged in `summary.md`: those bytes do not exist in the source, so this
-  arm's size is not comparable to a GeoParquet arm's — a NULL geometry costs
-  that format near nothing, where FlatGeobuf has to pay for a real, if tiny,
-  geometry to keep the row indexable.
+- `null_geometry: point_from` + `null_geometry_point_from: [lon_column,
+  lat_column]` keeps every feature behind a **real** geometry —
+  `Point(lon, lat)` built from those two columns — rather than dropping or
+  faking one. Investigating the LakeSP product found the NULL-geometry rows are
+  not actually positionless: they carry the prior lake's own reference
+  coordinates (`p_lon`/`p_lat`) on every row, geometry or not — the location
+  was never missing, only its geometry encoding was. A row missing a value in
+  either named column can't be synthesized and fails the conversion, naming it,
+  rather than guessing. The synthesized count is recorded on `FlatGeobufLayout`
+  (`features_synthesized`, `geometry_synthesized: true`) and flagged in
+  `summary.md` — a weaker caveat than the sentinel one below, since the
+  geometry is real, just reshaped from attribute columns the source already
+  carried. Prefer this over `sentinel` whenever the source has a usable
+  position for its NULL-geometry rows.
+- `null_geometry: sentinel` is the fallback for when it doesn't: every feature
+  is kept, with each NULL geometry replaced by a minimal, same-broad-type
+  placeholder (so the file's declared geometry type stays meaningful)
+  positioned just outside the real content's extent, so it can never satisfy a
+  bbox query scoped to the real data — "not searchable as geometry", without
+  dropping the row or its attributes. A `null_geometry` boolean column flags
+  the placeholder rows, and the count is recorded on `FlatGeobufLayout`
+  (`features_sentinel`, `geometry_fabricated: true`) and flagged in
+  `summary.md`: those bytes do not exist in the source, so this arm's size is
+  not comparable to a GeoParquet arm's — a NULL geometry costs that format near
+  nothing, where FlatGeobuf has to pay for a real, if tiny, geometry to keep
+  the row indexable.
 - `spatial_index: false` keeps every feature, NULL geometries included, without
   the index — the unindexed diagnostic arm, not the candidate.
 
@@ -482,10 +497,12 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
     `compression_ratio` 1.0: FlatGeobuf stores raw flatbuffers, which is the
     number to read a GeoParquet arm's compression ratio against. A NULL
     geometry (#98) adds `features_dropped` / `content_subset` (the
-    `null_geometry: drop` policy) and `features_sentinel` /
-    `geometry_fabricated` (the `null_geometry: sentinel` policy), all 0/false
-    for an ordinary run. `summary.md` renders a "Spatial-index layout" table
-    plus the index share of the stored bytes, flagging either case.
+    `null_geometry: drop` policy), `features_synthesized` /
+    `geometry_synthesized` (the `null_geometry: point_from` policy), and
+    `features_sentinel` / `geometry_fabricated` (the `null_geometry: sentinel`
+    policy), all 0/false for an ordinary run. `summary.md` renders a
+    "Spatial-index layout" table plus the index share of the stored bytes,
+    flagging whichever case applies.
   - `copc` → a `CopcLayout`: `num_nodes` (octree nodes — the addressable units),
     `max_depth`, `point_count`, `points_per_node` (the largest node, i.e. the
     realised per-node point budget), and `extra_dimensions` (the carried point

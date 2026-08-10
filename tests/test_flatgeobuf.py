@@ -239,11 +239,12 @@ def test_params_null_geometry_defaults_to_error():
 
 def test_null_geometry_policy_is_a_noop_without_nulls():
     gdf = _gdf(50)
-    out, dropped, sentinel = _apply_null_geometry_policy(
+    out, dropped, sentinel, synthesized = _apply_null_geometry_policy(
         gdf, FlatGeobufParams(null_geometry="drop")
     )
     assert dropped == 0
     assert sentinel == 0
+    assert synthesized == 0
     assert len(out) == len(gdf)
 
 
@@ -257,11 +258,12 @@ def test_null_geometry_error_is_fine_when_unindexed():
     # GDAL only refuses a NULL geometry when the spatial index is on; without
     # it, a NULL geometry is written without complaint.
     gdf = _gdf_with_nulls(200, null_every=4)
-    out, dropped, sentinel = _apply_null_geometry_policy(
+    out, dropped, sentinel, synthesized = _apply_null_geometry_policy(
         gdf, FlatGeobufParams(spatial_index=False, null_geometry="error")
     )
     assert dropped == 0
     assert sentinel == 0
+    assert synthesized == 0
     assert out.geometry.isna().sum() == 50
 
 
@@ -273,11 +275,12 @@ def test_null_geometry_all_null_raises_regardless_of_policy():
 
 def test_null_geometry_drop_removes_only_the_null_rows():
     gdf = _gdf_with_nulls(200, null_every=4)
-    out, dropped, sentinel = _apply_null_geometry_policy(
+    out, dropped, sentinel, synthesized = _apply_null_geometry_policy(
         gdf, FlatGeobufParams(null_geometry="drop")
     )
     assert dropped == 50
     assert sentinel == 0
+    assert synthesized == 0
     assert len(out) == 150
     assert not out.geometry.isna().any()
 
@@ -303,11 +306,12 @@ def test_convert_with_drop_writes_the_subset_and_flags_the_layout(tmp_path):
 
 def test_null_geometry_sentinel_keeps_every_row_and_flags_placeholders():
     gdf = _gdf_with_nulls(200, null_every=4)
-    out, dropped, sentinel = _apply_null_geometry_policy(
+    out, dropped, sentinel, synthesized = _apply_null_geometry_policy(
         gdf, FlatGeobufParams(null_geometry="sentinel")
     )
     assert dropped == 0
     assert sentinel == 50
+    assert synthesized == 0
     assert len(out) == 200  # no row dropped
     assert not out.geometry.isna().any()  # every geometry is now real
     assert int(out["null_geometry"].sum()) == 50
@@ -319,7 +323,7 @@ def test_null_geometry_sentinel_keeps_every_row_and_flags_placeholders():
 def test_null_geometry_sentinel_flag_column_is_collision_safe():
     gdf = _gdf_with_nulls(20, null_every=4)
     gdf["null_geometry"] = "pre-existing column"
-    out, _dropped, sentinel = _apply_null_geometry_policy(
+    out, _dropped, sentinel, _synthesized = _apply_null_geometry_policy(
         gdf, FlatGeobufParams(null_geometry="sentinel")
     )
     assert sentinel == 5
@@ -329,7 +333,7 @@ def test_null_geometry_sentinel_flag_column_is_collision_safe():
 
 def test_null_geometry_sentinel_placeholder_sits_outside_the_real_extent():
     gdf = _gdf_with_nulls(200, null_every=4)
-    out, _dropped, _sentinel = _apply_null_geometry_policy(
+    out, _dropped, _sentinel, _synthesized = _apply_null_geometry_policy(
         gdf, FlatGeobufParams(null_geometry="sentinel")
     )
     real_bounds = gdf.loc[~gdf.geometry.isna()].total_bounds
@@ -360,6 +364,101 @@ def test_convert_with_sentinel_writes_all_features_and_flags_fabrication(tmp_pat
     # Polygon + a hairline-Polygon sentinel promotes cleanly, unlike a bare
     # Point sentinel among polygons (which reports "Unknown").
     assert ly.geometry_type == "Polygon"
+
+
+def _gdf_with_nulls_and_priors(n=200, *, null_every=4):
+    """Like :func:`_gdf_with_nulls`, plus ``p_lon``/``p_lat`` on every row.
+
+    Mirrors what investigating the real LakeSP product found (#98): the
+    NULL-geometry rows are not positionless — they carry the prior lake's own
+    reference coordinates on every row, geometry or not.
+    """
+    gdf = _gdf_with_nulls(n, null_every=null_every)
+    gdf["p_lon"] = [(-10.0 + 0.1 * i) for i in range(n)]
+    gdf["p_lat"] = [(40.0 + 0.1 * i) for i in range(n)]
+    return gdf
+
+
+def test_null_geometry_point_from_requires_the_param():
+    gdf = _gdf_with_nulls_and_priors(200, null_every=4)
+    with pytest.raises(ValueError, match="requires null_geometry_point_from"):
+        _apply_null_geometry_policy(gdf, FlatGeobufParams(null_geometry="point_from"))
+
+
+def test_null_geometry_point_from_requires_the_named_columns_to_exist():
+    gdf = _gdf_with_nulls(200, null_every=4)  # no p_lon/p_lat
+    with pytest.raises(ValueError, match="'p_lon'.*not in the source"):
+        _apply_null_geometry_policy(
+            gdf,
+            FlatGeobufParams(
+                null_geometry="point_from", null_geometry_point_from=("p_lon", "p_lat")
+            ),
+        )
+
+
+def test_null_geometry_point_from_builds_real_points_from_named_columns():
+    gdf = _gdf_with_nulls_and_priors(200, null_every=4)
+    out, dropped, sentinel, synthesized = _apply_null_geometry_policy(
+        gdf,
+        FlatGeobufParams(
+            null_geometry="point_from", null_geometry_point_from=("p_lon", "p_lat")
+        ),
+    )
+    assert dropped == 0
+    assert sentinel == 0
+    assert synthesized == 50
+    assert len(out) == 200  # no row dropped
+    assert not out.geometry.isna().any()
+    assert int(out["null_geometry"].sum()) == 50
+
+    synthesized_rows = out.loc[out["null_geometry"]]
+    for _, row in synthesized_rows.iterrows():
+        assert row.geometry.x == pytest.approx(row["p_lon"])
+        assert row.geometry.y == pytest.approx(row["p_lat"])
+    # The real rows keep their real (polygon) geometry, untouched.
+    real = out.loc[~out["null_geometry"]]
+    assert real.geom_equals_exact(gdf.loc[real.index].geometry, tolerance=0).all()
+
+
+def test_null_geometry_point_from_raises_when_a_row_lacks_lon_lat_too():
+    gdf = _gdf_with_nulls_and_priors(200, null_every=4)
+    null_mask = gdf.geometry.isna()
+    first_null_idx = gdf.index[null_mask][0]
+    gdf.loc[first_null_idx, "p_lon"] = None
+
+    with pytest.raises(ValueError, match=r"1 of 50 NULL-geometry features"):
+        _apply_null_geometry_policy(
+            gdf,
+            FlatGeobufParams(
+                null_geometry="point_from", null_geometry_point_from=("p_lon", "p_lat")
+            ),
+        )
+
+
+def test_convert_with_point_from_writes_all_features_and_flags_synthesis(tmp_path):
+    source = _geojson_source(tmp_path, _gdf_with_nulls_and_priors(200, null_every=4))
+    target = str(tmp_path / "out.fgb")
+    FlatGeobufAdapter().convert(
+        source,
+        target,
+        {
+            "spatial_index": True,
+            "null_geometry": "point_from",
+            "null_geometry_point_from": ["p_lon", "p_lat"],
+        },
+    )
+
+    header = read_flatgeobuf_header(target)
+    assert header.features_count == 200  # every feature kept
+
+    ly = describe_flatgeobuf_layout(target, "lakes", features_synthesized=50)
+    assert ly.num_features == 200
+    assert ly.features_synthesized == 50
+    assert ly.geometry_synthesized is True
+    assert ly.features_dropped == 0
+    assert ly.content_subset is False
+    assert ly.features_sentinel == 0
+    assert ly.geometry_fabricated is False
 
 
 def test_convert_with_error_policy_fails_before_writing_any_bytes(tmp_path):

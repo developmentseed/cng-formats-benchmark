@@ -305,6 +305,7 @@ def _render_spatial_index_layout(layouts: list) -> list[str]:
     share = f" ({100 * index_bytes / total:.1f}% of the stored bytes)" if total else ""
     subset_files = [ly for ly in layouts if ly.content_subset]
     fabricated_files = [ly for ly in layouts if ly.geometry_fabricated]
+    synthesized_files = [ly for ly in layouts if ly.geometry_synthesized]
     lines = [
         "",
         "## Spatial-index layout",
@@ -319,6 +320,13 @@ def _render_spatial_index_layout(layouts: list) -> list[str]:
             f"- **Content subset:** {len(subset_files)} file(s) dropped "
             f"{dropped} feature(s) with a NULL geometry — not content-complete"
         )
+    if synthesized_files:
+        synthesized = sum(ly.features_synthesized for ly in synthesized_files)
+        lines.append(
+            f"- **Synthesized geometry:** {len(synthesized_files)} file(s) built "
+            f"{synthesized} geometry(ies) from attribute columns for features "
+            "with no real one"
+        )
     if fabricated_files:
         sentinel = sum(ly.features_sentinel for ly in fabricated_files)
         lines.append(
@@ -327,15 +335,16 @@ def _render_spatial_index_layout(layouts: list) -> list[str]:
         )
     lines += [
         "",
-        "| Object | Geometry | Features | Dropped | Sentinel | Indexed | Node size"
-        " | Index | Features bytes | Codec | Compression |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Object | Geometry | Features | Dropped | Synthesized | Sentinel | Indexed"
+        " | Node size | Index | Features bytes | Codec | Compression |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
         lines.append(
             f"| {ly.name} | {ly.geometry_type} | {ly.num_features} | "
-            f"{ly.features_dropped} | {ly.features_sentinel} | "
+            f"{ly.features_dropped} | {ly.features_synthesized} | "
+            f"{ly.features_sentinel} | "
             f"{'yes' if ly.has_spatial_index else 'no'} | {ly.index_node_size} | "
             f"{_format_bytes(ly.index_bytes)} | {_format_bytes(ly.feature_bytes)} | "
             f"{ly.codec} | {ratio} |"
@@ -355,6 +364,15 @@ def _render_spatial_index_layout(layouts: list) -> list[str]:
             " `Features`/`Dropped` columns above are not the full source, and"
             " this arm's size is not comparable to a content-complete arm on the"
             " same source without accounting for the drop.",
+        ]
+    if synthesized_files:
+        lines += [
+            "",
+            "> **Synthesized geometry:** `null_geometry: point_from` kept every"
+            " feature by building a real geometry from named lon/lat columns for"
+            " the ones with no real one (see the `Synthesized` column) — a"
+            " reshaping of source attributes, not fabricated data, but still"
+            " worth knowing which rows it applies to.",
         ]
     if fabricated_files:
         lines += [

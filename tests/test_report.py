@@ -134,13 +134,14 @@ def test_summary_renders_flatgeobuf_spatial_index_layout():
     assert "Packed Hilbert R-tree:** 1/1 file(s)" in md
     # What the index costs, in bytes and as a share of the stored object.
     assert "Index cost:** 800 B (26.7% of the stored bytes)" in md
-    assert "| LakeSP_048 | MultiPolygon | 200 | 0 | 0 | yes | 16 | 800 B |" in md
+    assert "| LakeSP_048 | MultiPolygon | 200 | 0 | 0 | 0 | yes | 16 | 800 B |" in md
     assert "none | 1.00× |" in md
     # No other-format tables for a FlatGeobuf run.
     assert "## Tiling layout" not in md
     assert "## Row-group layout" not in md
-    # An ordinary run (no NULL geometry) gets neither caveat.
+    # An ordinary run (no NULL geometry) gets none of the three caveats.
     assert "Content subset" not in md
+    assert "Synthesized geometry" not in md
     assert "Fabricated geometry" not in md
 
 
@@ -165,8 +166,9 @@ def test_summary_flags_a_flatgeobuf_content_subset_from_dropped_null_geometry():
     ]
     md = render_markdown_summary(run)
     assert "Content subset:** 1 file(s) dropped 50 feature(s)" in md
-    assert "| LakeSP_048 | MultiPolygon | 150 | 50 | 0 | yes |" in md
+    assert "| LakeSP_048 | MultiPolygon | 150 | 50 | 0 | 0 | yes |" in md
     assert "> **Content subset:**" in md
+    assert "Synthesized geometry" not in md
     assert "Fabricated geometry" not in md
 
 
@@ -192,9 +194,37 @@ def test_summary_flags_a_flatgeobuf_fabricated_sentinel_geometry():
     ]
     md = render_markdown_summary(run)
     assert "Fabricated geometry:** 1 file(s) hold 50 placeholder" in md
-    assert "| LakeSP_048 | MultiPolygon | 200 | 0 | 50 | yes |" in md
-    assert "> **Fabricated geometry:**" in md
+    assert "| LakeSP_048 | MultiPolygon | 200 | 0 | 0 | 50 | yes |" in md
+    assert "Synthesized geometry" not in md
     assert "Content subset" not in md
+
+
+def test_summary_flags_a_flatgeobuf_synthesized_point_from_geometry():
+    # #98: a null_geometry: point_from run keeps every row and builds a real
+    # geometry — a weaker caveat than the sentinel's "fabricated" one.
+    run = _sample_run()
+    run.format_id = "flatgeobuf"
+    run.object_layouts = [
+        FlatGeobufLayout(
+            name="LakeSP_048",
+            size_bytes=3200,
+            geometry_type="MultiPolygon",
+            num_features=200,
+            has_spatial_index=True,
+            index_node_size=16,
+            header_bytes=200,
+            index_bytes=800,
+            feature_bytes=2200,
+            features_synthesized=50,
+            geometry_synthesized=True,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "Synthesized geometry:** 1 file(s) built 50 geometry(ies)" in md
+    assert "| LakeSP_048 | MultiPolygon | 200 | 0 | 50 | 0 | yes |" in md
+    assert "> **Synthesized geometry:**" in md
+    assert "Content subset" not in md
+    assert "Fabricated geometry" not in md
 
 
 def test_summary_renders_copc_octree_layout():
