@@ -134,11 +134,67 @@ def test_summary_renders_flatgeobuf_spatial_index_layout():
     assert "Packed Hilbert R-tree:** 1/1 file(s)" in md
     # What the index costs, in bytes and as a share of the stored object.
     assert "Index cost:** 800 B (26.7% of the stored bytes)" in md
-    assert "| LakeSP_048 | MultiPolygon | 200 | yes | 16 | 800 B |" in md
+    assert "| LakeSP_048 | MultiPolygon | 200 | 0 | 0 | yes | 16 | 800 B |" in md
     assert "none | 1.00× |" in md
     # No other-format tables for a FlatGeobuf run.
     assert "## Tiling layout" not in md
     assert "## Row-group layout" not in md
+    # An ordinary run (no NULL geometry) gets neither caveat.
+    assert "Content subset" not in md
+    assert "Fabricated geometry" not in md
+
+
+def test_summary_flags_a_flatgeobuf_content_subset_from_dropped_null_geometry():
+    # #98: a null_geometry: drop run must be unmistakable from an ordinary one.
+    run = _sample_run()
+    run.format_id = "flatgeobuf"
+    run.object_layouts = [
+        FlatGeobufLayout(
+            name="LakeSP_048",
+            size_bytes=3000,
+            geometry_type="MultiPolygon",
+            num_features=150,
+            has_spatial_index=True,
+            index_node_size=16,
+            header_bytes=200,
+            index_bytes=600,
+            feature_bytes=2200,
+            features_dropped=50,
+            content_subset=True,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "Content subset:** 1 file(s) dropped 50 feature(s)" in md
+    assert "| LakeSP_048 | MultiPolygon | 150 | 50 | 0 | yes |" in md
+    assert "> **Content subset:**" in md
+    assert "Fabricated geometry" not in md
+
+
+def test_summary_flags_a_flatgeobuf_fabricated_sentinel_geometry():
+    # #98: a null_geometry: sentinel run keeps every row but must say the
+    # placeholder bytes are not source content.
+    run = _sample_run()
+    run.format_id = "flatgeobuf"
+    run.object_layouts = [
+        FlatGeobufLayout(
+            name="LakeSP_048",
+            size_bytes=3200,
+            geometry_type="MultiPolygon",
+            num_features=200,
+            has_spatial_index=True,
+            index_node_size=16,
+            header_bytes=200,
+            index_bytes=800,
+            feature_bytes=2200,
+            features_sentinel=50,
+            geometry_fabricated=True,
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "Fabricated geometry:** 1 file(s) hold 50 placeholder" in md
+    assert "| LakeSP_048 | MultiPolygon | 200 | 0 | 50 | yes |" in md
+    assert "> **Fabricated geometry:**" in md
+    assert "Content subset" not in md
 
 
 def test_summary_renders_copc_octree_layout():

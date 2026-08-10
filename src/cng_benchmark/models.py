@@ -195,6 +195,21 @@ class FlatGeobufLayout(ObjectLayout):
     compression, so ``compression_ratio`` is 1.0 by construction. Both fields are
     carried anyway, because the comparison against a compressed vector arm
     (GeoParquet) is exactly what they answer.
+
+    ``num_features`` is the count actually **written** — a NULL geometry cannot be
+    indexed by the packed R-tree (#98), so a ``null_geometry: drop`` run holds
+    fewer features than the source. ``features_dropped`` is that gap and
+    ``content_subset`` is true whenever it is nonzero, so a smaller file is never
+    mistaken for the whole product.
+
+    ``null_geometry: sentinel`` takes the other way out: every feature is kept,
+    with a NULL geometry replaced by a fabricated placeholder positioned outside
+    the real content's extent (so it can never satisfy a real bbox query).
+    ``features_sentinel`` is how many rows that is and ``geometry_fabricated`` is
+    true whenever it is nonzero — a signal that part of the stored size is not
+    source bytes, and should not be read into a size comparison against another
+    format's (near-free) NULL representation. All four fields are 0/false for an
+    ordinary run.
     """
 
     kind: Literal["flatgeobuf"] = "flatgeobuf"
@@ -207,6 +222,10 @@ class FlatGeobufLayout(ObjectLayout):
     feature_bytes: int = 0
     codec: str = "none"
     compression_ratio: float = 1.0
+    features_dropped: int = 0
+    content_subset: bool = False
+    features_sentinel: int = 0
+    geometry_fabricated: bool = False
 
 
 class CopcLayout(ObjectLayout):

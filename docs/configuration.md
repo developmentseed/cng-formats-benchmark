@@ -181,15 +181,41 @@ name and reads what it needs, so adding a format never changes the schema:
 | `cog` | `block_size` (internal tiling), `codec` (`deflate`/`zstd`/`lzw`/`packbits`/`lzma`/`webp`/`lerc`/`raw`; `deflate` by default) |
 | `geozarr` | `chunk_shape` (addressable unit), `shard_shape` (stored object), `codec` (`zstd`/`gzip`/`blosc`/`none`), `multiscale_levels` (overview-pyramid depth, `auto` by default), `scale_offset` (apply a packed source's scale in the array's codec pipeline), `standard_name` (the CF quantity, normally supplied by the dataset reader); `display_titiler_path` selects the bench tiler's GeoZarr router for display — `zarr` (stock xarray defaults, the default) or `geozarr` (`titiler-eopf`'s `GeoZarrReader`) |
 | `geoparquet` | `row_group_rows` (rows per row group — the addressable unit a bbox query fetches), `spatial_partitioning` (spatially order features so each group's covering bbox is tight), `compression` (`zstd`/`snappy`/`gzip`/`brotli`/`none`; `zstd` by default — not geopandas'/pyarrow's own `snappy` default), `compression_level` (codec effort; `null` uses the codec's default), `data_page_size` (parquet page size in bytes, within a row group; `null` uses pyarrow's default) |
-| `flatgeobuf` | `spatial_index` (write the packed Hilbert R-tree and order the features along the Hilbert curve; `true` by default) |
+| `flatgeobuf` | `spatial_index` (write the packed Hilbert R-tree and order the features along the Hilbert curve; `true` by default), `null_geometry` (`error`/`drop`/`sentinel`; `error` by default) |
 | `copc` | `span` (per-node voxel-grid edge — the per-node point budget ≈ `span**3`), `max_depth` (octree depth; `null` derives it from point density), `scale` (`null` derives LAS quantisation from the extent) |
 
-FlatGeobuf has a single lever because the format leaves nothing else to choose:
-its addressable unit is the **feature**, the R-tree node size is fixed at 16 (the
-GDAL driver exposes no creation option for it), and the format defines no
+FlatGeobuf has a single grouping lever because the format leaves nothing else to
+choose: its addressable unit is the **feature**, the R-tree node size is fixed at
+16 (the GDAL driver exposes no creation option for it), and the format defines no
 compression. What a run decides is whether the index is written at all — and
 without it a client can only scan the file, so `spatial_index: false` is a
 measurement of what the index costs and buys, not a production setting.
+
+A source can carry features with **no geometry at all** — a prior-database
+delivery such as SWOT LakeSP Prior reports every prior feature in a pass's
+footprint and leaves the geometry NULL for the ones it did not observe (73% of
+features in the product that surfaced this, #98). FlatGeobuf's packed Hilbert
+R-tree cannot index a NULL geometry, so with `spatial_index: true` (the default)
+that is a hard format constraint, not a writer bug — the conversion fails before
+any bytes are written, naming the NULL count and share and the two ways out:
+
+- `null_geometry: drop` (default `error`) writes the non-null subset instead.
+  The dropped count is recorded on `FlatGeobufLayout` (`features_dropped`,
+  `content_subset: true`) and `summary.md`'s "Spatial-index layout" table flags
+  it, so a smaller file is never read as the whole product.
+- `null_geometry: sentinel` keeps every feature. Each NULL geometry is replaced
+  by a minimal, same-broad-type placeholder (so the file's declared geometry
+  type stays meaningful) positioned just outside the real content's extent, so
+  it can never satisfy a bbox query scoped to the real data — "not searchable
+  as geometry", without dropping the row or its attributes. A `null_geometry`
+  boolean column flags the placeholder rows, and the count is recorded on
+  `FlatGeobufLayout` (`features_sentinel`, `geometry_fabricated: true`) and
+  flagged in `summary.md`: those bytes do not exist in the source, so this
+  arm's size is not comparable to a GeoParquet arm's — a NULL geometry costs
+  that format near nothing, where FlatGeobuf has to pay for a real, if tiny,
+  geometry to keep the row indexable.
+- `spatial_index: false` keeps every feature, NULL geometries included, without
+  the index — the unindexed diagnostic arm, not the candidate.
 
 GeoZarr is a **per-component, 2D** adapter: each source raster becomes one sharded
 2D store (a directory of shard objects), the per-component analogue of the COG arm,
@@ -447,14 +473,19 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
   - `geoparquet` → a `GeoParquetLayout`: `geometry_column`, `num_rows`,
     `num_row_groups`, `row_group_rows` (the addressable unit a bbox query fetches),
     and `has_bbox_covering` (whether spatial pushdown to row groups is possible).
-  - `flatgeobuf` → a `FlatGeobufLayout`: `num_features` (the addressable units),
-    `has_spatial_index` (whether a bbox query can select features rather than scan
-    the file), `index_node_size` (the R-tree branching factor), and the object split
-    into `header_bytes` / `index_bytes` / `feature_bytes` — so what the index costs
-    is answerable beside the size it is paid in. `codec` is always `none` and
-    `compression_ratio` 1.0: FlatGeobuf stores raw flatbuffers, which is the number
-    to read a GeoParquet arm's compression ratio against. `summary.md` renders a
-    "Spatial-index layout" table plus the index share of the stored bytes.
+  - `flatgeobuf` → a `FlatGeobufLayout`: `num_features` (the addressable units,
+    i.e. features actually written), `has_spatial_index` (whether a bbox query
+    can select features rather than scan the file), `index_node_size` (the
+    R-tree branching factor), and the object split into `header_bytes` /
+    `index_bytes` / `feature_bytes` — so what the index costs is answerable
+    beside the size it is paid in. `codec` is always `none` and
+    `compression_ratio` 1.0: FlatGeobuf stores raw flatbuffers, which is the
+    number to read a GeoParquet arm's compression ratio against. A NULL
+    geometry (#98) adds `features_dropped` / `content_subset` (the
+    `null_geometry: drop` policy) and `features_sentinel` /
+    `geometry_fabricated` (the `null_geometry: sentinel` policy), all 0/false
+    for an ordinary run. `summary.md` renders a "Spatial-index layout" table
+    plus the index share of the stored bytes, flagging either case.
   - `copc` → a `CopcLayout`: `num_nodes` (octree nodes — the addressable units),
     `max_depth`, `point_count`, `points_per_node` (the largest node, i.e. the
     realised per-node point budget), and `extra_dimensions` (the carried point
