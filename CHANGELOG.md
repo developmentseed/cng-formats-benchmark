@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.7.0...v0.7.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **flatgeobuf:** fail fast on NULL geometries, add drop/point_from/sentinel policies ([#99](https://github.com/developmentseed/cng-formats-benchmark/issues/99)) ([a3bc063](https://github.com/developmentseed/cng-formats-benchmark/commit/a3bc063d8d64b056fea5b74b00c9d2976f37d00b))
+
 ## [0.7.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.6.0...v0.7.0) (2026-08-10)
 
 
