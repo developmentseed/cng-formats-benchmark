@@ -8,6 +8,7 @@ from cng_benchmark.models import (
     CogLayout,
     ConditionReplicate,
     ConditionResult,
+    FlatGeobufLayout,
     GeoZarrLayout,
     HistogramBin,
     MetricResult,
@@ -126,6 +127,46 @@ def test_object_layouts_union_round_trips_subclass_fields():
     cog, geozarr = reloaded.object_layouts
     assert cog.kind == "cog" and cog.internal_tiles == 16
     assert geozarr.kind == "geozarr" and geozarr.chunks_per_shard == 4
+
+
+def test_flatgeobuf_layout_null_geometry_fields_default_to_an_ordinary_run():
+    ly = FlatGeobufLayout(
+        name="LakeSP_048",
+        size_bytes=100,
+        geometry_type="Polygon",
+        num_features=10,
+        has_spatial_index=True,
+        index_node_size=16,
+    )
+    assert ly.features_dropped == 0
+    assert ly.content_subset is False
+    assert ly.features_sentinel == 0
+    assert ly.geometry_fabricated is False
+
+
+def test_flatgeobuf_layout_null_geometry_fields_round_trip():
+    run = BenchmarkRun(
+        timestamp=datetime(2026, 6, 17, tzinfo=UTC),
+        dataset_id="swot-lakesp-prior",
+        format_id="flatgeobuf",
+        object_layouts=[
+            FlatGeobufLayout(
+                name="LakeSP_048",
+                size_bytes=100,
+                geometry_type="Polygon",
+                num_features=150,
+                has_spatial_index=True,
+                index_node_size=16,
+                features_dropped=50,
+                content_subset=True,
+            )
+        ],
+    )
+    reloaded = BenchmarkRun.model_validate_json(run.model_dump_json())
+    assert reloaded == run
+    (ly,) = reloaded.object_layouts
+    assert ly.features_dropped == 50
+    assert ly.content_subset is True
 
 
 def test_condition_result_round_trips():
