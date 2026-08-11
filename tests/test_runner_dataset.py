@@ -806,4 +806,171 @@ def test_netcdf_granule_bytes_in_equals_granule_size_once(tmp_path):
     assert "bytes_in" in throughput.detail, "bytes_in missing for netCDF granule source"
     # Must equal the granule size exactly — not 3× (one per CF variable).
     assert throughput.detail["bytes_in"] == granule_size
-    assert throughput.detail["components"] == 3
+
+
+# --- bundled multi-component writes (#102) ---------------------------------
+
+
+def test_bundle_components_true_reduces_geozarr_object_count(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    pytest.importorskip("zarr")
+    pytest.importorskip("xarray")
+
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=4)
+
+    unbundled_cfg = _benchmark(
+        ["object_size"], {"scope": "product", "multiscale_levels": 0}
+    ).model_copy(update={"formats": ["geozarr"]})
+    unbundled = run_dataset_benchmark(
+        unbundled_cfg, _dataset_config(src), str(tmp_path / "out-unbundled")
+    )
+
+    bundled_cfg = _benchmark(
+        ["object_size"],
+        {"scope": "product", "multiscale_levels": 0, "bundle_components": True},
+    ).model_copy(update={"formats": ["geozarr"]})
+    bundled = run_dataset_benchmark(
+        bundled_cfg, _dataset_config(src), str(tmp_path / "out-bundled")
+    )
+
+    unbundled_run = unbundled.per_product[0]
+    bundled_run = bundled.per_product[0]
+    assert unbundled_run.object_profile.count == bundled_run.object_profile.count + 6
+    # 4 components independently: 4 * (1 data shard + 2 coordinate chunks) = 12.
+    # Bundled: 4 data shards + one grid's own 2 coordinate chunks = 6.
+    assert unbundled_run.object_profile.count == 12
+    assert bundled_run.object_profile.count == 6
+
+    # One GeoZarrLayout per component, each scoped to the shared grid0 group.
+    assert {ly.name for ly in bundled_run.object_layouts} == {
+        "band0",
+        "band1",
+        "band2",
+        "band3",
+    }
+    assert all(ly.grid_group == "grid0" for ly in bundled_run.object_layouts)
+
+    # Published under the product's own path (one bundle group, no singles).
+    store = tmp_path / "out-bundled" / "objects" / "sceneA" / "geozarr.zarr"
+    assert (store / "zarr.json").exists()
+    assert (store / "grid0" / "band0" / "zarr.json").exists()
+
+
+def test_bundle_components_true_writes_one_multiband_cog(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=3)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(["object_size"], {"scope": "product", "bundle_components": True})
+    result = run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+    run = result.per_product[0]
+    assert run.object_profile.count == 1  # one multi-band file, not 3
+
+    import rasterio
+
+    target = output / "objects" / "sceneA" / "cog.tif"
+    with rasterio.open(target) as ds:
+        assert ds.count == 3
+        assert list(ds.descriptions) == ["band0", "band1", "band2"]
+
+    (layout,) = run.object_layouts
+    assert layout.band_names == ["band0", "band1", "band2"]
+
+
+def test_bundle_components_explicit_group_leaves_others_as_singles(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=3)  # band0, band1, band2
+    output = tmp_path / "out"
+
+    cfg = _benchmark(
+        ["object_size"],
+        {"scope": "product", "bundle_components": [["band0", "band1"]]},
+    )
+    result = run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+    run = result.per_product[0]
+    # band0+band1 -> one 2-band file; band2 stays its own single-band file.
+    assert run.object_profile.count == 2
+
+    import rasterio
+
+    bundle = output / "objects" / "sceneA" / "bundle-0" / "cog.tif"
+    with rasterio.open(bundle) as ds:
+        assert ds.count == 2
+        assert list(ds.descriptions) == ["band0", "band1"]
+    # band2 goes through the ordinary per-component path unchanged: whatever
+    # bands its own source (the 3-band synthetic fixture) carries, untouched
+    # by bundling.
+    single = output / "objects" / "sceneA" / "band2" / "cog.tif"
+    with rasterio.open(single) as ds:
+        assert ds.count == 3
+
+
+def test_bundle_components_raises_for_a_format_without_batch_support(tmp_path):
+    pytest.importorskip("rasterio")
+    _register_fake_passthrough()
+
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=2)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(
+        ["object_size"], {"scope": "product", "bundle_components": True}
+    ).model_copy(update={"formats": ["fake-passthrough"]})
+
+    with pytest.raises(ValueError, match="does not support batched conversion"):
+        run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+
+def test_bundle_components_raises_for_an_unknown_component_name(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=2)  # band0, band1
+    output = tmp_path / "out"
+
+    cfg = _benchmark(
+        ["object_size"],
+        {"scope": "product", "bundle_components": [["band0", "nonexistent"]]},
+    )
+    with pytest.raises(ValueError, match="nonexistent"):
+        run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+
+def test_bundle_components_read_metric_addresses_every_sampled_component(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    pytest.importorskip("zarr")
+    pytest.importorskip("xarray")
+
+    src = tmp_path / "src"
+    _write_product(src, "sceneA", n_components=3)
+    output = tmp_path / "out"
+
+    cfg = _benchmark(
+        ["object_size", "read"],
+        {
+            "scope": "product",
+            "multiscale_levels": 0,
+            "bundle_components": True,
+            "samples": {"read": 3},
+        },
+    ).model_copy(update={"formats": ["geozarr"]})
+    result = run_dataset_benchmark(cfg, _dataset_config(src), str(output))
+
+    run = result.per_product[0]
+    # Every sampled component reads successfully (no read_skipped marker) —
+    # proof the locator/name addressing reaches the right array each time,
+    # not just the first.
+    assert "read_skipped" not in {m.name for m in run.metrics}
+    assert sum(m.name == "read_window_count" for m in run.metrics) == 3

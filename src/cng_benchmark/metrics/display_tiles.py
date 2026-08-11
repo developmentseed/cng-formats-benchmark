@@ -91,13 +91,21 @@ def _read_cog_grid(cog_path: str) -> _Grid:
         )
 
 
-def _read_zarr_grid(store: str, role: str = "sink") -> _Grid:
+def _read_zarr_grid(
+    store: str,
+    role: str = "sink",
+    *,
+    group: str | None = None,
+    var_name: str | None = None,
+) -> _Grid:
     """Read the chunk/multiscale grid of a GeoZarr store (chunk = addressable unit).
 
     Chunk shape is the partial-read unit; multiscale levels become the available
     decimations ``[1, 2, 4, …]``; the CRS and the affine come from the store's
     own ``geo-proj`` / ``spatial`` convention attributes — the same ones any
     reader uses, not a CF grid-mapping variable written for GDAL's benefit.
+    ``group``/``var_name`` address one component of a bundled store (#102) —
+    ``None`` (the defaults) reproduce today's single-component addressing.
     """
     import zarr
     from affine import Affine
@@ -106,17 +114,19 @@ def _read_zarr_grid(store: str, role: str = "sink") -> _Grid:
     from cng_benchmark.formats.geozarr import DATA_VAR
     from cng_benchmark.storage import fsspec_storage_options, is_s3
 
+    name = var_name or DATA_VAR
     so = fsspec_storage_options(role) if is_s3(store) else None
-    group = zarr.open_group(store, mode="r", storage_options=so)
-    # The root describes the native grid either way: for a pyramid it is the
-    # multiscale group, for a flat store the array's own group.
-    attrs = dict(group.attrs)
-    if DATA_VAR in group:
-        arr, levels = group[DATA_VAR], 0
+    root = zarr.open_group(store, mode="r", storage_options=so, path=group or "")
+    # The pyramid-describing group either way: for a non-batched store that's
+    # its own root; for a bundled store, `group` (one grid's own subtree) —
+    # opened as if it were the root via zarr's `path=`.
+    attrs = dict(root.attrs)
+    if name in root:
+        arr, levels = root[name], 0
     else:
-        keys = sorted((k for k in group.group_keys()), key=lambda k: int(k))
+        keys = sorted((k for k in root.group_keys()), key=lambda k: int(k))
         levels = len(keys) - 1
-        arr = group[keys[0]][DATA_VAR]
+        arr = root[keys[0]][name]
 
     height, width = int(arr.shape[-2]), int(arr.shape[-1])
     block_h, block_w = int(arr.chunks[-2]), int(arr.chunks[-1])
@@ -248,15 +258,18 @@ def select_zarr_chunk_tiles(
     tile_matrix_set: str = "WebMercatorQuad",
     targets: tuple[int, ...] = DEFAULT_TARGETS,
     max_tiles_per_zoom: int = 4000,
+    group: str | None = None,
+    var_name: str | None = None,
 ) -> list[TileSpec]:
     """Select one tile per chunk-count bucket for the GeoZarr ``store``.
 
     The store counterpart to :func:`select_chunk_tiles`: a tile's cost is how many
     Zarr *chunks* its footprint straddles, the same partial-access question COG
-    answers with internal blocks.
+    answers with internal blocks. ``group``/``var_name`` address one component
+    of a bundled store (#102); ``None`` reproduces today's addressing.
     """
     return _select_from_grid(
-        _read_zarr_grid(store, role),
+        _read_zarr_grid(store, role, group=group, var_name=var_name),
         tile_matrix_set=tile_matrix_set,
         targets=targets,
         max_tiles_per_zoom=max_tiles_per_zoom,
@@ -390,10 +403,19 @@ def render_zarr_chunk_layout(
     *,
     role: str = "sink",
     tile_matrix_set: str = "WebMercatorQuad",
+    group: str | None = None,
+    var_name: str | None = None,
 ) -> str:
-    """Render the GeoZarr store's chunk grid with each tile's footprint."""
+    """Render the GeoZarr store's chunk grid with each tile's footprint.
+
+    ``group``/``var_name`` address one component of a bundled store (#102);
+    ``None`` reproduces today's addressing.
+    """
     return _render_from_grid(
-        _read_zarr_grid(store, role), tiles, out_path, tile_matrix_set=tile_matrix_set
+        _read_zarr_grid(store, role, group=group, var_name=var_name),
+        tiles,
+        out_path,
+        tile_matrix_set=tile_matrix_set,
     )
 
 

@@ -31,7 +31,9 @@ def _require_geo():
     return rasterio
 
 
-def describe_cog_layout(name: str, path: str, size_bytes: int) -> CogLayout:
+def describe_cog_layout(
+    name: str, path: str, size_bytes: int, *, band_names: list[str] | None = None
+) -> CogLayout:
     """Return the :class:`CogLayout` of the raster at ``path``.
 
     ``is_tiled`` is true when the block does not span the full raster width —
@@ -39,6 +41,13 @@ def describe_cog_layout(name: str, path: str, size_bytes: int) -> CogLayout:
     the block-grid cell count at full resolution. Raises ``RuntimeError`` when the
     geo stack is missing and propagates rasterio errors for an unreadable raster,
     so the caller can decide whether a missing layout is acceptable.
+
+    ``band_names`` is which component each band holds, in band order, for a
+    multi-band file a batched write bundled together (#102) — ``None`` for an
+    ordinary single-band COG. Bytes aren't separable per band in an interleaved
+    multi-band GeoTIFF (one shared block/tile/overview structure across every
+    band, already reflected in ``uncompressed``'s ``src.count`` factor), so this
+    is one layout for the whole file, not one per component.
     """
     import numpy as np
 
@@ -63,4 +72,5 @@ def describe_cog_layout(name: str, path: str, size_bytes: int) -> CogLayout:
         internal_tiles=int(internal_tiles),
         codec=codec,
         compression_ratio=compression_ratio,
+        band_names=band_names or [],
     )

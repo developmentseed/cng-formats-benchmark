@@ -350,6 +350,71 @@ Each run reuses the `BenchmarkRun` model; `params` carries `product_id` and
 `scope` (`product` / `rollup`) to tell the per-product runs apart from the pooled
 roll-up.
 
+### Bundling multi-component writes
+
+`FormatAdapter.convert()` is one-source-in, one-object-out, so the fan-out
+above converts a product's components **independently** by default — every
+CF variable, band or mask becomes its own store or file. For a GeoZarr store
+that means every component pays its own copy of the shared `x`/`y`
+coordinate arrays and pyramid metadata: measured on a 38-CF-variable SWOT
+Raster100m granule, that duplication alone was most of a 2640-vs-456 physical
+object gap against the COG arm on the same content (#102).
+
+`params.bundle_components` bundles a product's components into fewer objects
+— **opt-in and off by default**: no existing config's behaviour changes
+unless it explicitly asks for this, since auto-bundling everything would just
+as easily merge a Sentinel-2 scene's reflectance bands *and* masks into one
+object with no way to keep them apart.
+
+```yaml
+params:
+  bundle_components: true            # every component, one bundle
+# or:
+params:
+  bundle_components:                 # explicit groups; unnamed components
+    - [wse, sig0, water_area]        # stay on the per-component path
+```
+
+| Value | Effect |
+| --- | --- |
+| unset (the default) | every component converts independently — today's behaviour, unchanged |
+| `true` | every component of the product forms one bundle (the adapter's own grid-equality check splits it further if they don't all share one grid) |
+| a list of lists of component names | only the named components bundle, grouped exactly as listed; every component named nowhere stays on the per-component path |
+
+Only a format whose adapter declares batched-write support can be bundled —
+today, `geozarr` and `cog`. Naming `bundle_components` for a format that
+doesn't (`geoparquet`, `flatgeobuf`, `copc`, …) is a config error and raises,
+rather than silently converting per-component anyway.
+
+**GeoZarr** writes one store with a `<grid_id>/<level>/<component>` layout:
+components sharing a grid (shape, transform, CRS — checked, never assumed)
+share that grid's `x`/`y` coordinate arrays and pyramid metadata, written
+once by the first component; each component still gets its own shard files
+and its own `GeoZarrLayout` (`grid_group` names which grid it shares). A
+product spanning more than one grid gets `grid0`, `grid1`, … subtrees in the
+same store, not separate stores.
+
+**COG** stacks the bundled components into one multi-band GeoTIFF via a
+hand-built VRT (one band per component, in listed order) and requires the
+group to be homogeneous: every component must share one grid *and* one NODATA
+value (GDAL only carries a single dataset-level NODATA through the write, even
+though the VRT itself declares one per band) — a mismatched group raises,
+naming the odd one out, rather than writing something silently wrong. Bytes
+aren't separable per band in an interleaved multi-band GeoTIFF, so a bundle
+gets one `CogLayout` for the whole file (not one per component), with
+`band_names` recording which band is which component.
+
+`read`/`display` address each component correctly within a bundle (a GeoZarr
+array by its grid + name, a COG band by index) — verified in this repo's own
+test suite for the read metric (pure zarr-python/rasterio, no external
+service). The display metric's addressing is implemented the same way but
+**not verified against a live titiler-eopf/titiler-xarray instance**: a
+failure there surfaces as the harness's existing best-effort `display_skipped`
+marker, not a crash, but treat it as unconfirmed until someone runs it.
+`write`/`object_size` cover every bundle and every single exactly as they do
+today; the roll-up's `product_count` accounting and per-product tables are
+unaffected by whether a product happened to bundle.
+
 ## Tier policy
 
 Object size is a hard constraint on a tiered object store, so it is first-class.
@@ -478,13 +543,17 @@ A run produces a `BenchmarkRun` (`cng_benchmark.models`):
   format (discriminated by `kind`). Every format answers the same "can a client
   fetch part without the whole" question through its own structure:
   - `cog` → a `CogLayout`: `is_tiled` (range-read friendly vs striped),
-    `block_width`/`block_height`, `overview_decimations`, `internal_tiles`;
-    `summary.md` renders a "Tiling layout" table + a tiled/striped count.
+    `block_width`/`block_height`, `overview_decimations`, `internal_tiles`,
+    `band_names` (which component each band holds, for a bundled multi-band
+    file — #102, empty for an ordinary single-band COG); `summary.md` renders
+    a "Tiling layout" table + a tiled/striped count.
   - `geozarr` → a `GeoZarrLayout`: `chunk_shape` (addressable unit),
     `shard_shape` (stored object), `chunks_per_shard`, `codec`,
     `multiscale_levels` (the realised pyramid depth), `overview_bytes` (how much
-    of the size the pyramid accounts for), `shard_count`; `summary.md` renders a
-    "Chunk/shard layout" table + a shard-object count.
+    of the size the pyramid accounts for), `shard_count`, `grid_group` (which
+    grid subtree this array shares with other bundled components — #102,
+    `None` for an ordinary store); `summary.md` renders a "Chunk/shard layout"
+    table + a shard-object count.
   - `geoparquet` → a `GeoParquetLayout`: `geometry_column`, `num_rows`,
     `num_row_groups`, `row_group_rows` (the addressable unit a bbox query fetches),
     and `has_bbox_covering` (whether spatial pushdown to row groups is possible).
@@ -531,3 +600,13 @@ Register a `FormatAdapter` subclass (see `formats/cog.py`) under a name in
 `FORMATS`; the runner resolves it by the name used in a config's `formats`. No
 CI or manifest change is needed — see
 [Architecture › Plug-in seams](architecture.md#plug-in-seams).
+
+Batched multi-component writes (`params.bundle_components`, #102) are an
+optional part of the contract: set `supports_batch = True` and implement
+`convert_batch(sources: list[SourceObject], target, params)` (write every
+source into one bundled object at `target`) and `component_locator(target,
+name)` (return where `name`'s data landed — a format-specific address a
+read/display collector can act on; `None` for a target this adapter didn't
+batch-write). `geozarr.py`/`cog.py` are the worked examples; an adapter that
+doesn't implement these simply can't be named in `bundle_components` — the
+runner raises rather than silently falling back to per-component.

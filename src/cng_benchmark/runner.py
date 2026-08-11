@@ -17,12 +17,13 @@ new registered adapter, never a change here.
 
 from __future__ import annotations
 
+import functools
 import logging
 import multiprocessing
 import os
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from statistics import mean, median, pstdev
 
@@ -31,7 +32,7 @@ import cng_benchmark.formats  # noqa: F401  (registers the built-in adapters)
 from cng_benchmark import __version__, storage
 from cng_benchmark.config import BenchmarkConfig, DatasetConfig, tier_policy_from_config
 from cng_benchmark.datasets import Product, build_dataset
-from cng_benchmark.datasets.base import Dataset
+from cng_benchmark.datasets.base import Dataset, SourceObject
 from cng_benchmark.formats.base import FormatAdapter, ObjectKind
 from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import fetch_titiler_versions, measure_display
@@ -42,7 +43,7 @@ from cng_benchmark.metrics.read import (
     measure_vector_read,
     measure_zarr_read,
 )
-from cng_benchmark.metrics.write import measure_write
+from cng_benchmark.metrics.write import measure_write, measure_write_batch
 from cng_benchmark.models import (
     Artifact,
     BenchmarkRun,
@@ -117,7 +118,13 @@ def _tool_versions(titiler_endpoint: str | None) -> dict[str, str]:
 
 
 def _measure_object_read(
-    adapter: FormatAdapter, object_uri: str, *, role: str = "sink", seed: int = 0
+    adapter: FormatAdapter,
+    object_uri: str,
+    *,
+    role: str = "sink",
+    seed: int = 0,
+    locator: str | None = None,
+    name: str | None = None,
 ) -> list[MetricResult]:
     """Read part of the produced object back, per its object kind.
 
@@ -131,15 +138,25 @@ def _measure_object_read(
     ``role`` and ``seed`` are threaded through so a run-protocol replicate (a
     fresh subprocess, per issue #87) can address the object under the right
     credentials and sample a different window/query set than its siblings.
+
+    ``locator``/``name`` address one component of a batched adapter's bundled
+    object (#102) — ``locator`` is that adapter's own ``component_locator``
+    (a GeoZarr grid id, or a COG 1-based band index as a string) and ``name``
+    the component's own name (a bundled GeoZarr array is always named for its
+    component). Both ``None`` (the defaults) address a non-batched object,
+    unchanged.
     """
     if adapter.object_kind is ObjectKind.ZARR_STORE:
-        return measure_zarr_read(object_uri, role=role, seed=seed)
+        return measure_zarr_read(
+            object_uri, role=role, seed=seed, group=locator, var_name=name
+        )
     if adapter.object_kind is ObjectKind.VECTOR_FILE:
         return measure_vector_read(object_uri, role=role, seed=seed)
     if adapter.object_kind is ObjectKind.POINT_CLOUD_FILE:
         return measure_copc_read(object_uri, role=role, seed=seed)
     with gdal_session(role):
-        return measure_read(object_uri, seed=seed)
+        band = int(locator) if locator is not None else 1
+        return measure_read(object_uri, seed=seed, band=band)
 
 
 def run_benchmark(
@@ -308,12 +325,18 @@ class ProductSetResult:
 
 def _aggregate_write_metrics(
     per_component: list[list[MetricResult]],
+    *,
+    component_count: int | None = None,
 ) -> list[MetricResult]:
     """Pool per-component write metrics into one product-level write result.
 
     Elapsed times sum (the product's total conversion wall time) and throughput
     is recomputed from the pooled output bytes over that total, so a product's
-    write metric is comparable to a single object's.
+    write metric is comparable to a single object's. ``component_count``
+    defaults to ``len(per_component)`` (one write call per component, true
+    before #102) — a bundled write call covers several components in one
+    call, so a batched caller passes the real component count explicitly
+    rather than undercounting it as "one write call = one component".
     """
     total_elapsed = 0.0
     bytes_out = 0
@@ -329,7 +352,12 @@ def _aggregate_write_metrics(
                     bytes_in += int(m.detail["bytes_in"])
                     have_bytes_in = True
     throughput = bytes_out / total_elapsed if total_elapsed > 0 else float("inf")
-    detail: dict = {"bytes_out": bytes_out, "components": len(per_component)}
+    detail: dict = {
+        "bytes_out": bytes_out,
+        "components": component_count
+        if component_count is not None
+        else len(per_component),
+    }
     if have_bytes_in:
         detail["bytes_in"] = bytes_in
     return [
@@ -338,6 +366,57 @@ def _aggregate_write_metrics(
             name="write_throughput", value=throughput, unit="bytes/s", detail=detail
         ),
     ]
+
+
+def _parse_bundle_groups(
+    params: dict, components: list[SourceObject]
+) -> tuple[list[list[SourceObject]], list[SourceObject]]:
+    """Partition a product's components by ``params.bundle_components`` (#102).
+
+    Bundling is opt-in and off by default — it must never auto-trigger just
+    because a format could support it, or every component of an arm like S2
+    MAJA (bands *and* masks) would get silently merged into one object with
+    no way to opt out:
+
+    * unset / falsy (the default) — every component stays a "single"; the
+      existing per-component path, byte-for-byte unchanged.
+    * ``true`` — every component forms one implicit group (the format
+      adapter's own grid-equality detection splits it further if they don't
+      all share one grid).
+    * a list of lists of component names — only those named components
+      bundle, grouped exactly as listed; every component named nowhere stays
+      a single. A named group of one component is just that component,
+      unbundled (bundling one thing achieves nothing).
+
+    Raises ``ValueError`` for a name the product doesn't actually have — a
+    config/product mismatch should fail loudly, not silently drop the group.
+    """
+    spec = params.get("bundle_components")
+    if not spec:
+        return [], list(components)
+
+    by_name = {c.name: c for c in components}
+    if spec is True:
+        if len(components) <= 1:
+            return [], list(components)
+        return [list(components)], []
+
+    groups: list[list[SourceObject]] = []
+    bundled_names: set[str] = set()
+    for raw_group in spec:
+        missing = [n for n in raw_group if n not in by_name]
+        if missing:
+            raise ValueError(
+                f"params.bundle_components names {missing!r}, which "
+                f"{'is' if len(missing) == 1 else 'are'} not among this "
+                f"product's components ({sorted(by_name)})"
+            )
+        members = [by_name[n] for n in raw_group]
+        if len(members) > 1:
+            groups.append(members)
+            bundled_names.update(raw_group)
+    singles = [c for c in components if c.name not in bundled_names]
+    return groups, singles
 
 
 def _run_product(
@@ -353,11 +432,20 @@ def _run_product(
     """Convert every component of ``product`` and assemble its BenchmarkRun.
 
     ``object_size`` + ``write`` cover **all** components; ``read`` and
-    ``display`` run only on the first ``samples[...]`` components (a
-    representative sample, default 1). Each produced object is uploaded and its
-    local copy freed before the next component is converted, so local disk is
-    bounded by one component at a time regardless of product size. Returns the
-    run and the per-object sizes (for the roll-up to pool).
+    ``display`` run only on the first ``samples[...]`` components overall (a
+    representative sample, default 1 — counted across singles *and* bundled
+    components together, so the sample is "the first N of the product," not
+    "the first N of each path"). Each produced object is uploaded and its
+    local copy freed before the next one is converted, so local disk is
+    bounded by one component (or one bundle group) at a time regardless of
+    product size. Returns the run and the per-object sizes (for the roll-up
+    to pool).
+
+    ``params.bundle_components`` (#102) partitions the product's components
+    into bundle groups (converted together, one call, via
+    ``adapter.convert_batch``) and singles (the path above, unchanged) — see
+    :func:`_parse_bundle_groups`. Unset, every component is a single: this
+    function behaves exactly as it did before bundling existed.
     """
     chosen = adapter.name
     read_samples = int(samples.get("read", 1))
@@ -365,17 +453,25 @@ def _run_product(
 
     sizes: list[int] = []
     layouts: list[ObjectLayout] = []
-    write_per_component: list[list[MetricResult]] = []
+    write_calls: list[list[MetricResult]] = []
     extra_metrics: list[MetricResult] = []
     extra_artifacts: list[Artifact] = []
     conditions: list[ConditionResult] = []
     run_protocol = "run_protocol" in config.params
 
+    bundle_groups, singles = _parse_bundle_groups(config.params, product.components)
+    if bundle_groups and not getattr(adapter, "supports_batch", False):
+        raise ValueError(
+            f"benchmark {config.id!r} sets params.bundle_components, but "
+            f"format {chosen!r} does not support batched conversion"
+        )
+
     # A zip-delivered product's components all live in one .zip object; a
     # multi-variable netCDF granule's components (SWOT Raster100m's
     # ``variables: all``) all live in one .nc object. Either way, size that
-    # container once and charge it to component 0 only — summing the container
-    # size N times in _aggregate_write_metrics would give N×container_size.
+    # container once and charge it to whichever write call processes first —
+    # summing the container size N times in _aggregate_write_metrics would
+    # give N×container_size.
     _first_uri = product.components[0].uri if product.components else ""
     _container_uri = storage.zip_source_uri(_first_uri) or storage.netcdf_source_uri(
         _first_uri
@@ -385,10 +481,12 @@ def _run_product(
         if _container_uri is not None
         else None
     )
+    container_charged = False
     n_comp = len(product.components)
+    sample_index = 0  # "first N components of the product", singles + bundled alike
 
     with tempfile.TemporaryDirectory() as workdir:
-        for i, component in enumerate(product.components):
+        for i, component in enumerate(singles):
             logger.info(
                 "  [%d/%d] %s: convert → %s", i + 1, n_comp, component.name, chosen
             )
@@ -397,7 +495,8 @@ def _run_product(
             )
             source_path = storage.to_gdal_path(component.uri)
             if _container_uri is not None:
-                source_size = _container_source_size if i == 0 else None
+                source_size = _container_source_size if not container_charged else None
+                container_charged = True
             else:
                 source_size = storage.object_size(component.uri, "source")
             # Merge the reader's per-component pixel-interpretation metadata into
@@ -424,7 +523,7 @@ def _run_product(
                     convert_params,
                     source_size=source_size,
                 )
-            write_per_component.append(wm)
+            write_calls.append(wm)
             _log_write_done(wm, prefix=f"  [{i + 1}/{n_comp}] {component.name}: ")
 
             component_dir = storage.join(
@@ -439,11 +538,13 @@ def _run_product(
 
             # A point cloud has no display tiles; its structural artifact is the
             # octree level-of-detail figure (the COPC analogue of the COG chunk
-            # layout). Render it once per product, best-effort.
+            # layout). Render it once per product, best-effort. Point clouds
+            # never support batching, so `singles` is always the whole product
+            # for this kind and `i == 0` is still the product's first component.
             if adapter.object_kind is ObjectKind.POINT_CLOUD_FILE and i == 0:
                 extra_artifacts += _publish_copc_lod(local_target, component_dir)
 
-            if "read" in requested and i < read_samples:
+            if "read" in requested and sample_index < read_samples:
                 logger.info("  [%d/%d] %s: read metric", i + 1, n_comp, component.name)
                 extra_metrics += _safe_read_metrics(adapter, object_uri)
                 if run_protocol:
@@ -454,7 +555,7 @@ def _run_product(
                         component.name,
                     )
                     conditions += _run_read_conditions(config, chosen, object_uri)
-            if "display" in requested and i < display_samples:
+            if "display" in requested and sample_index < display_samples:
                 logger.info(
                     "  [%d/%d] %s: display metric", i + 1, n_comp, component.name
                 )
@@ -483,6 +584,114 @@ def _run_product(
                         component_dir,
                         titiler_endpoint,
                     )
+            sample_index += 1
+
+            _remove_target(local_target)
+
+        for g, group in enumerate(bundle_groups):
+            # A label is only needed to disambiguate multiple bundles (or a mix
+            # of bundles and singles) sharing one product; the common case —
+            # `bundle_components: true`, the whole product one group — writes
+            # straight to the product's own object path.
+            label = f"bundle-{g}" if (len(bundle_groups) > 1 or singles) else None
+            names = [c.name for c in group]
+            logger.info(
+                "  [bundle %d/%d] %s: convert %d components → %s",
+                g + 1,
+                len(bundle_groups),
+                label or product.id,
+                len(group),
+                chosen,
+            )
+            local_target = os.path.join(
+                workdir, f"{label or 'bundle'}-{adapter.target_basename()}"
+            )
+            if _container_uri is not None:
+                source_size = _container_source_size if not container_charged else None
+                container_charged = True
+            else:
+                source_size = sum(storage.object_size(c.uri, "source") for c in group)
+            sources = [replace(c, uri=storage.to_gdal_path(c.uri)) for c in group]
+            with gdal_session("source"):
+                wm = measure_write_batch(
+                    adapter,
+                    sources,
+                    local_target,
+                    dict(config.params),
+                    source_size=source_size,
+                )
+            write_calls.append(wm)
+            _log_write_done(
+                wm, prefix=f"  [bundle {g + 1}/{len(bundle_groups)}] {names}: "
+            )
+
+            bundle_dir = storage.join(
+                output_uri,
+                f"objects/{product.id}/{label}" if label else f"objects/{product.id}",
+            )
+            object_uri = storage.join(bundle_dir, adapter.target_basename())
+            _publish_object(adapter, local_target, object_uri)
+            logger.info(
+                "  [bundle %d/%d] uploaded (%s)", g + 1, len(bundle_groups), names
+            )
+            sizes += adapter.enumerate_objects(local_target)
+            # One call, per bundle: the adapter itself returns 1..N layouts
+            # (one per component for GeoZarr's sibling arrays; one for the
+            # whole file for a COG multi-band write — see FormatAdapter.
+            # describe_layout).
+            layouts += _safe_object_layouts(adapter, product.id, local_target)
+
+            for component in group:
+                locator = adapter.component_locator(local_target, component.name)
+                if "read" in requested and sample_index < read_samples:
+                    logger.info(
+                        "  [bundle %d/%d] %s: read metric",
+                        g + 1,
+                        len(bundle_groups),
+                        component.name,
+                    )
+                    extra_metrics += _safe_read_metrics(
+                        adapter, object_uri, locator=locator, name=component.name
+                    )
+                    if run_protocol:
+                        conditions += _run_read_conditions(
+                            config,
+                            chosen,
+                            object_uri,
+                            locator=locator,
+                            name=component.name,
+                        )
+                if "display" in requested and sample_index < display_samples:
+                    logger.info(
+                        "  [bundle %d/%d] %s: display metric",
+                        g + 1,
+                        len(bundle_groups),
+                        component.name,
+                    )
+                    display_metrics, display_artifacts = _safe_display_metrics(
+                        config,
+                        adapter,
+                        local_target,
+                        object_uri,
+                        bundle_dir,
+                        titiler_endpoint,
+                        locator=locator,
+                        name=component.name,
+                    )
+                    extra_metrics += display_metrics
+                    extra_artifacts += display_artifacts
+                    if run_protocol:
+                        conditions += _run_display_conditions(
+                            config,
+                            adapter,
+                            local_target,
+                            object_uri,
+                            bundle_dir,
+                            titiler_endpoint,
+                            locator=locator,
+                            name=component.name,
+                        )
+                sample_index += 1
 
             _remove_target(local_target)
 
@@ -491,7 +700,7 @@ def _run_product(
 
     metrics: list[MetricResult] = []
     if "write" in requested:
-        metrics += _aggregate_write_metrics(write_per_component)
+        metrics += _aggregate_write_metrics(write_calls, component_count=n_comp)
     if "object_size" in requested:
         metrics += [
             MetricResult(name="object_count", value=profile.count),
@@ -703,6 +912,9 @@ def _measure_display_object(
     object_uri: str,
     artifact_dir: str,
     titiler_endpoint: str | None,
+    *,
+    locator: str | None = None,
+    name: str | None = None,
 ) -> tuple[list[MetricResult], list[Artifact]]:
     """Run the display metric for one produced object and publish its chunk layout.
 
@@ -717,6 +929,13 @@ def _measure_display_object(
     router has no multiscale awareness and needs the finest level's ``group=``
     explicit, while ``GeoZarrReader`` resolves the pyramid itself and addresses
     the array as ``{group}:{name}`` -- so the query is built per router.
+
+    ``locator``/``name`` address one component of a batched adapter's bundled
+    object (#102) the same way :func:`_measure_object_read` does. This branch
+    is best-effort in a different sense than the others: it is not verified
+    against a live titiler-eopf/titiler-xarray instance in this codebase, since
+    that variable-addressing behaviour for a *nested* (non-root) group is an
+    external dependency's, not this harness's, to guarantee.
     """
     if not titiler_endpoint:
         raise ValueError("the display metric requires a TiTiler endpoint")
@@ -734,19 +953,27 @@ def _measure_display_object(
     if adapter.object_kind is ObjectKind.ZARR_STORE:
         from cng_benchmark.formats.geozarr import DATA_VAR, finest_level_group
 
-        tiles = select_zarr_chunk_tiles(local_target, targets=targets)
+        var_name = name or DATA_VAR
+        tiles = select_zarr_chunk_tiles(
+            local_target, targets=targets, group=locator, var_name=name
+        )
         prefix = str(config.params.get("display_titiler_path", "zarr"))
         if prefix == "geozarr":
             # GeoZarrReader addresses a variable as "{group}:{name}", where
             # `group` is the group that declares the zarr_conventions
-            # multiscales entry -- this writer's store root ("/") -- and
+            # multiscales entry -- this writer's store root ("/"), or one
+            # grid's own subtree ("/grid0") for a bundled store -- and
             # resolves the multiscale level from the requested zoom itself.
-            extra_query = {"variables": f"/:{DATA_VAR}"}
+            group_path = f"/{locator}" if locator else "/"
+            extra_query = {"variables": f"{group_path}:{var_name}"}
         else:
-            extra_query = {"variable": DATA_VAR}
-            level = finest_level_group(local_target)
+            extra_query = {"variable": var_name}
+            level = finest_level_group(local_target, group=locator, var_name=name)
+            group_path = locator
             if level is not None:
-                extra_query["group"] = level
+                group_path = f"{locator}/{level}" if locator else level
+            if group_path is not None:
+                extra_query["group"] = group_path
         metrics = measure_display(
             titiler_endpoint,
             object_uri,
@@ -754,7 +981,9 @@ def _measure_display_object(
             path_prefix=prefix,
             extra_query=extra_query,
         )
-        render = render_zarr_chunk_layout
+        render = functools.partial(
+            render_zarr_chunk_layout, group=locator, var_name=name
+        )
     else:
         tiles = select_chunk_tiles(local_target, targets=targets)
         metrics = measure_display(titiler_endpoint, object_uri, tiles)
@@ -780,15 +1009,22 @@ def _measure_display_object(
     return metrics, [artifact]
 
 
-def _safe_read_metrics(adapter: FormatAdapter, object_uri: str) -> list[MetricResult]:
+def _safe_read_metrics(
+    adapter: FormatAdapter,
+    object_uri: str,
+    *,
+    locator: str | None = None,
+    name: str | None = None,
+) -> list[MetricResult]:
     """Run the read metric, returning a skipped marker on any exception.
 
     Network-dependent: a range-request timeout or transient S3 error should not
     abort the enclosing product or dataset run, so failures are caught, logged,
     and surfaced as a ``read_skipped`` result with the error string in ``detail``.
+    ``locator``/``name`` address one component of a bundled object (#102).
     """
     try:
-        return _measure_object_read(adapter, object_uri)
+        return _measure_object_read(adapter, object_uri, locator=locator, name=name)
     except Exception as exc:  # noqa: BLE001 - best-effort, same stance as layout image
         logger.warning("read metric skipped: %s", exc)
         detail = {"error": str(exc)}
@@ -802,16 +1038,27 @@ def _safe_display_metrics(
     object_uri: str,
     artifact_dir: str,
     titiler_endpoint: str | None,
+    *,
+    locator: str | None = None,
+    name: str | None = None,
 ) -> tuple[list[MetricResult], list[Artifact]]:
     """Run the display metric, returning a skipped marker on any exception.
 
     Network-dependent (TiTiler tile fetches with a 30 s timeout): a transient
     timeout on one product must not abort a 20- or 100-product dataset run, so
     failures are caught, logged, and surfaced as a ``display_skipped`` result.
+    ``locator``/``name`` address one component of a bundled object (#102).
     """
     try:
         return _measure_display_object(
-            config, adapter, local_target, object_uri, artifact_dir, titiler_endpoint
+            config,
+            adapter,
+            local_target,
+            object_uri,
+            artifact_dir,
+            titiler_endpoint,
+            locator=locator,
+            name=name,
         )
     except Exception as exc:  # noqa: BLE001 - best-effort, same stance as layout image
         logger.warning("display metric skipped: %s", exc)
@@ -872,7 +1119,12 @@ def _parse_run_protocol(params: dict) -> tuple[int, list[RunCondition]]:
 
 
 def _read_phase_worker(
-    format_id: str, object_uri: str, role: str, seed: int
+    format_id: str,
+    object_uri: str,
+    role: str,
+    seed: int,
+    locator: str | None = None,
+    component_name: str | None = None,
 ) -> list[MetricResult]:
     """One worker's full read pass — the ``ProcessPoolExecutor`` task.
 
@@ -880,9 +1132,17 @@ def _read_phase_worker(
     a fresh interpreter: the adapter is re-resolved by name (never pickled),
     and the read runs exactly as :func:`_measure_object_read` does outside a
     run protocol.
+
+    ``locator``/``component_name`` address one component of a bundled object
+    (#102) and are passed explicitly rather than read from the freshly
+    resolved adapter's own bookkeeping — a spawned worker's adapter instance
+    never saw the ``convert_batch`` call that produced ``object_uri``, so it
+    has no bookkeeping to read.
     """
     adapter = FORMATS.get(format_id)()
-    return _measure_object_read(adapter, object_uri, role=role, seed=seed)
+    return _measure_object_read(
+        adapter, object_uri, role=role, seed=seed, locator=locator, name=component_name
+    )
 
 
 def _merge_worker_metrics(
@@ -932,6 +1192,8 @@ def _run_condition_replicates(
     replicates: int,
     *,
     base_seed: int = 0,
+    locator: str | None = None,
+    name: str | None = None,
 ) -> list[list[MetricResult]]:
     """Run ``replicates`` read passes under ``condition``, one metrics list each.
 
@@ -950,7 +1212,8 @@ def _run_condition_replicates(
     Workers within one replicate get distinct, reproducible seeds
     (``base_seed + replicate_index * concurrency + worker_index``) so
     concurrent workers sample different windows, as real concurrent clients
-    would.
+    would. ``locator``/``name`` address one component of a bundled object
+    (#102), passed through to every worker explicitly.
     """
     ctx = multiprocessing.get_context("spawn")
     k = condition.concurrency
@@ -963,7 +1226,9 @@ def _run_condition_replicates(
         executor: ProcessPoolExecutor, replicate_index: int
     ) -> list[MetricResult]:
         futures = [
-            executor.submit(_read_phase_worker, format_id, object_uri, role, s)
+            executor.submit(
+                _read_phase_worker, format_id, object_uri, role, s, locator, name
+            )
             for s in _seeds(replicate_index)
         ]
         return _merge_worker_metrics([f.result() for f in futures])
@@ -978,7 +1243,7 @@ def _run_condition_replicates(
     # warm: one persistent pool, an untimed warm-up round, then the replicates.
     with ProcessPoolExecutor(max_workers=k, mp_context=ctx) as ex:
         warmup = [
-            ex.submit(_read_phase_worker, format_id, object_uri, role, s)
+            ex.submit(_read_phase_worker, format_id, object_uri, role, s, locator, name)
             for s in _seeds(-1)
         ]
         for f in warmup:
@@ -1057,20 +1322,33 @@ def _skipped_condition(
 
 
 def _run_read_conditions(
-    config: BenchmarkConfig, format_id: str, object_uri: str, role: str = "sink"
+    config: BenchmarkConfig,
+    format_id: str,
+    object_uri: str,
+    role: str = "sink",
+    *,
+    locator: str | None = None,
+    name: str | None = None,
 ) -> list[ConditionResult]:
     """Run the read phase under every configured condition (issue #87).
 
     Best-effort per condition, mirroring :func:`_safe_read_metrics`: a
     transient S3 error under one condition must not drop the others or abort
-    the run.
+    the run. ``locator``/``name`` address one component of a bundled object
+    (#102).
     """
     replicates, conditions = _parse_run_protocol(config.params)
     results: list[ConditionResult] = []
     for condition in conditions:
         try:
             replicate_metrics = _run_condition_replicates(
-                format_id, object_uri, role, condition, replicates
+                format_id,
+                object_uri,
+                role,
+                condition,
+                replicates,
+                locator=locator,
+                name=name,
             )
             results.append(
                 _build_condition_result("read", condition, replicate_metrics)
@@ -1093,6 +1371,9 @@ def _run_display_conditions(
     object_uri: str,
     artifact_dir: str,
     titiler_endpoint: str | None,
+    *,
+    locator: str | None = None,
+    name: str | None = None,
 ) -> list[ConditionResult]:
     """Repeat the display phase ``run_protocol.replicates`` times.
 
@@ -1101,7 +1382,8 @@ def _run_display_conditions(
     condition is always reported as ``cache="warm"``, ``concurrency=1``
     regardless of what ``run_protocol.conditions`` asks for (see the module
     note above). Best-effort: a failure yields a skipped condition rather than
-    aborting the run.
+    aborting the run. ``locator``/``name`` address one component of a bundled
+    object (#102).
     """
     replicates, _conditions = _parse_run_protocol(config.params)
     condition = RunCondition(cache="warm", concurrency=1)
@@ -1115,6 +1397,8 @@ def _run_display_conditions(
                 object_uri,
                 artifact_dir,
                 titiler_endpoint,
+                locator=locator,
+                name=name,
             )
             replicate_metrics.append(metrics)
         return [_build_condition_result("display", condition, replicate_metrics)]
