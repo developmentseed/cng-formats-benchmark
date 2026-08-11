@@ -1005,6 +1005,42 @@ def test_convert_batch_bundles_components_sharing_a_grid(tmp_path):
     assert adapter.component_locator("/some/other/store", "wse") is None
 
 
+def test_convert_batch_flat_store_keeps_grid_attrs_after_every_component(tmp_path):
+    # Regression: for a flat (multiscale_levels=0) bundle, one grid's level
+    # group IS its pyramid-describing group -- every component's write lands
+    # on that same path. A component written with `write_shared=False` used
+    # to carry no `.attrs` at all, and `to_zarr(mode="a", ...)` replaces a
+    # group's attributes outright rather than merging them, so the 2nd/3rd
+    # component's write silently wiped the 1st's proj:code/spatial:transform
+    # -- verified live against a real titiler (#102): the display metric's
+    # local tile-selection step (`select_zarr_chunk_tiles`) failed with "not
+    # georeferenced" for every component but the first written.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    for name, value in [("wse", 10), ("sig0", 20), ("area", 30)]:
+        _write_source_at(str(tmp_path / f"{name}.tif"), value=value)
+    sources = [
+        SourceObject(name=n, uri=str(tmp_path / f"{n}.tif"))
+        for n in ("wse", "sig0", "area")
+    ]
+
+    target = str(tmp_path / "bundle.zarr")
+    GeoZarrAdapter().convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [64, 64], "shard_shape": [128, 128], "multiscale_levels": 0},
+    )
+
+    grid0 = zarr.open_group(target, mode="r")["grid0"]
+    assert "proj:code" in grid0.attrs
+    assert len(grid0.attrs.get("spatial:transform", [])) == 6
+
+
 def test_convert_batch_object_count_beats_per_component_conversion(tmp_path):
     # The whole point of #102: bundling must produce meaningfully fewer
     # physical shard objects than converting each component independently
