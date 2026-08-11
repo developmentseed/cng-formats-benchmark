@@ -6,6 +6,7 @@ from cng_benchmark import __version__
 from cng_benchmark.config import load_benchmark_config
 from cng_benchmark.metrics.objects import profile_object_sizes
 from cng_benchmark.runner import (
+    _measure_display_object,
     _safe_display_metrics,
     _safe_read_metrics,
     run_benchmark,
@@ -83,6 +84,74 @@ def test_run_conversion_benchmark_display_skips_without_endpoint(tmp_path):
     assert "display_skipped" in names
     skipped = next(m for m in run.metrics if m.name == "display_skipped")
     assert "TiTiler endpoint" in skipped.detail["error"]
+
+
+def test_measure_display_object_cog_locator_selects_band(tmp_path, monkeypatch):
+    # A bundled COG's component addresses a specific band (#102) via TiTiler's
+    # `bidx` query param -- regression test for the query-construction gap
+    # left when the locator plumbing landed (verified live against docker-
+    # compose titiler that a missing `bidx` silently always reads band 1).
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+    import cng_benchmark.runner as _runner
+    from cng_benchmark.fixtures import generate_cog_bytes
+    from cng_benchmark.formats.cog import CogAdapter
+
+    source = tmp_path / "bundle.tif"
+    source.write_bytes(generate_cog_bytes(size=64, blocksize=64))
+
+    captured = {}
+
+    def _fake_measure_display(endpoint, uri, tiles, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(_runner, "measure_display", _fake_measure_display)
+
+    cfg = load_benchmark_config(SYNTHETIC)
+    _measure_display_object(
+        cfg,
+        CogAdapter(),
+        str(source),
+        "s3://bucket/bundle.tif",
+        str(tmp_path),
+        "http://titiler.example",
+        locator="2",
+        name="compB",
+    )
+
+    assert captured["extra_query"] == {"bidx": "2"}
+
+
+def test_measure_display_object_cog_no_locator_omits_bidx(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+    import cng_benchmark.runner as _runner
+    from cng_benchmark.fixtures import generate_cog_bytes
+    from cng_benchmark.formats.cog import CogAdapter
+
+    source = tmp_path / "single.tif"
+    source.write_bytes(generate_cog_bytes(size=64, blocksize=64))
+
+    captured = {}
+
+    def _fake_measure_display(endpoint, uri, tiles, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(_runner, "measure_display", _fake_measure_display)
+
+    cfg = load_benchmark_config(SYNTHETIC)
+    _measure_display_object(
+        cfg,
+        CogAdapter(),
+        str(source),
+        "s3://bucket/single.tif",
+        str(tmp_path),
+        "http://titiler.example",
+    )
+
+    assert captured["extra_query"] is None
 
 
 def test_safe_read_metrics_returns_skipped_on_failure(monkeypatch):
