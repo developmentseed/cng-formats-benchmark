@@ -373,17 +373,24 @@ def _write_sharded(
         return da
 
     def _level_dataset(level: int, level_data) -> xr.Dataset:
-        """One pyramid level: the array, plus (when sharing) its grid + coords."""
+        """One pyramid level: the array, its grid attrs, and (when sharing) coords."""
         ds = xr.Dataset({var_name: _data_var(level, level_data)})
-        if not write_shared:
-            return ds
         level_gt = _level_gt(level)
-        if level_gt is not None:
+        if level_gt is None:
+            return ds
+        if write_shared:
             coords = ms.level_coords(level_gt, level_data.shape)
             if coords is not None:
                 y, x = coords
                 ds = ds.assign_coords(y=("y", y, y_attrs), x=("x", x, x_attrs))
-            ds.attrs.update(ms.grid_attrs(crs_wkt, level_gt, level_data.shape))
+        # Every component of a bundled write's group re-declares the same grid
+        # attrs (identical across components on one grid) on this same level
+        # group's `to_zarr(mode="a", ...)` call -- an `xr.Dataset` with no
+        # `.attrs` silently *wipes* a group's existing attributes rather than
+        # leaving them alone (verified empirically for #102), and for a flat
+        # (unpyramided) bundled store this level group *is* the pyramid group
+        # every component's write lands on, not just the first's.
+        ds.attrs.update(ms.grid_attrs(crs_wkt, level_gt, level_data.shape))
         return ds
 
     def _encoding(level_data) -> dict:

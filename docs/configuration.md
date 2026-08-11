@@ -407,10 +407,11 @@ gets one `CogLayout` for the whole file (not one per component), with
 `read`/`display` address each component correctly within a bundle (a GeoZarr
 array by its grid + name, a COG band by index) — verified in this repo's own
 test suite for the read metric (pure zarr-python/rasterio, no external
-service). The display metric's addressing is implemented the same way but
-**not verified against a live titiler-eopf/titiler-xarray instance**: a
-failure there surfaces as the harness's existing best-effort `display_skipped`
-marker, not a crash, but treat it as unconfirmed until someone runs it.
+service), and the display metric's addressing has been run live against the
+docker-compose bench titiler (all three routers: stock `/zarr`, GeoZarrReader
+`/geozarr`, and `/cog` with `bidx`), confirming each component resolves to
+its own exact pixel values, not a neighbour's. A failure there still surfaces
+as the harness's existing best-effort `display_skipped` marker, not a crash.
 `write`/`object_size` cover every bundle and every single exactly as they do
 today; the roll-up's `product_count` accounting and per-product tables are
 unaffected by whether a product happened to bundle.

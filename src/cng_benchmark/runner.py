@@ -931,11 +931,15 @@ def _measure_display_object(
     the array as ``{group}:{name}`` -- so the query is built per router.
 
     ``locator``/``name`` address one component of a batched adapter's bundled
-    object (#102) the same way :func:`_measure_object_read` does. This branch
-    is best-effort in a different sense than the others: it is not verified
-    against a live titiler-eopf/titiler-xarray instance in this codebase, since
-    that variable-addressing behaviour for a *nested* (non-root) group is an
-    external dependency's, not this harness's, to guarantee.
+    object (#102) the same way :func:`_measure_object_read` does: a COG's 1-based
+    band index goes out as ``bidx``, a GeoZarr grid group as ``{group}:{name}``
+    (GeoZarrReader) or an explicit ``group=``/``variable=`` pair (the stock
+    router). Run live against the docker-compose bench titiler for all three
+    routers and confirmed each component resolves to its own exact pixel
+    values, not a neighbour's — that pass also caught and fixed a real bug
+    where a bundled *flat* (``multiscale_levels: 0``) GeoZarr store's grid
+    attrs got wiped by the second component's write (see
+    :func:`~cng_benchmark.formats.geozarr._write_sharded`).
     """
     if not titiler_endpoint:
         raise ValueError("the display metric requires a TiTiler endpoint")
@@ -986,7 +990,10 @@ def _measure_display_object(
         )
     else:
         tiles = select_chunk_tiles(local_target, targets=targets)
-        metrics = measure_display(titiler_endpoint, object_uri, tiles)
+        extra_query = {"bidx": locator} if locator else None
+        metrics = measure_display(
+            titiler_endpoint, object_uri, tiles, extra_query=extra_query
+        )
         render = render_chunk_layout
 
     try:
