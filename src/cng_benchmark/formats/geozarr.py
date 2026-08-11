@@ -767,6 +767,21 @@ class GeoZarrAdapter(FormatAdapter):
         for itself. A product whose components span more than one grid gets one
         ``grid0``/``grid1``/… subtree per grid, all in this one store — bundling
         never silently drops or misplaces a component onto the wrong grid.
+
+        When those grids sit at more than one *real* native pixel size — S2/
+        MAJA's 10 m reflectance next to its 20 m masks, per #107 — grid
+        equality already separates them one group per native resolution for
+        free; what this method adds is anchoring the pyramid on that fact:
+        only the coarsest native group gets a synthetic overview pyramid
+        (:meth:`_resolution_chain`), every finer native group is written flat,
+        and one combined chain doc describing the whole 10 m -> 20 m -> …
+        anchored pyramid is written once at the store root
+        (:func:`~cng_benchmark.formats.geozarr_multiscales.chain_group_attrs`)
+        — a naive per-group pyramid would otherwise have every native group
+        independently fabricate its own unrelated overview levels, the
+        fragmentation #107 is about. A single-grid bundle (one native
+        resolution) is unaffected: every group keeps its configured
+        ``multiscale_levels`` exactly as before.
         """
         _require_rioxarray()
         import xarray as xr
@@ -802,8 +817,32 @@ class GeoZarrAdapter(FormatAdapter):
 
         groups = group_by_grid(keys)
         grid_ids = {name: f"grid{i}" for i, grp in enumerate(groups) for name in grp}
+        group_by_id = {f"grid{i}": grp for i, grp in enumerate(groups)}
+
+        # S2/MAJA-style anchoring (#107): when the bundle's grid-groups sit at
+        # more than one *real* native pixel size, a finer group's own overview
+        # levels would be redundant — the next coarser native group already
+        # is the next zoomed-out tier — so only the coarsest group keeps a
+        # synthetic pyramid past its own native resolution. A single-grid
+        # bundle (today's common case, e.g. one product's same-grid variables)
+        # is unaffected: every group keeps `opts.multiscale_levels` unchanged.
+        pixel_sizes: dict[str, float] | None = {}
+        for grid_id, names in group_by_id.items():
+            gt = ms.parse_geotransform(reads[names[0]]["geotransform"])
+            if gt is None:
+                pixel_sizes = None
+                break
+            pixel_sizes[grid_id] = ms.pixel_size(gt)
+        is_multi_resolution = pixel_sizes is not None and (
+            len({round(p, 6) for p in pixel_sizes.values()}) > 1
+        )
+        coarsest_pixel_size = max(pixel_sizes.values()) if pixel_sizes else None
 
         for group_names in groups:
+            grid_id = grid_ids[group_names[0]]
+            group_levels = opts.multiscale_levels
+            if is_multi_resolution and pixel_sizes[grid_id] < coarsest_pixel_size:  # type: ignore[operator]
+                group_levels = 0
             for i, name in enumerate(group_names):
                 read = reads[name]
                 data = read["data"]
@@ -821,24 +860,97 @@ class GeoZarrAdapter(FormatAdapter):
                     codec=opts.codec,
                     crs_wkt=read["crs_wkt"],
                     geotransform=read["geotransform"],
-                    multiscale_levels=opts.multiscale_levels,
+                    multiscale_levels=group_levels,
                     fill_value=read["fill_value"],
                     scale_factor=read["scale_factor"],
                     add_offset=read["add_offset"],
                     scale_offset=opts.scale_offset,
                     standard_name=read["standard_name"],
-                    group=grid_ids[name],
+                    group=grid_id,
                     var_name=name,
                     write_shared=(i == 0),
                 )
 
-        self._batch_grid_by_target[target] = grid_ids
         # Harness-internal bookkeeping only — not part of the published
         # zarr_conventions — so a reader (or describe_layout) doesn't have to
         # re-derive grid equality itself.
-        xr.Dataset(attrs={"cng_benchmark:components": grid_ids}).to_zarr(
+        root_attrs: dict[str, Any] = {"cng_benchmark:components": grid_ids}
+        if is_multi_resolution:
+            assert pixel_sizes is not None
+            chain = self._resolution_chain(target, group_by_id, reads, pixel_sizes)
+            finest_id = min(pixel_sizes, key=lambda gid: pixel_sizes[gid])  # type: ignore[index]
+            crs_wkt = reads[group_by_id[finest_id][0]]["crs_wkt"]
+            root_attrs.update(ms.chain_group_attrs(crs_wkt, chain))
+
+        self._batch_grid_by_target[target] = grid_ids
+        # A second `to_zarr(mode="a")` write to the *same* group with a
+        # different `.attrs` silently replaces the group's existing attrs
+        # rather than merging (the bug fixed in #103 for a bundled flat
+        # store's grid attrs) — so the bookkeeping and the resolution-chain
+        # doc are folded into one `.attrs` dict and written in one call here.
+        xr.Dataset(attrs=root_attrs).to_zarr(
             target, mode="a", zarr_format=3, consolidated=False
         )
+
+    def _resolution_chain(
+        self,
+        target: str,
+        group_by_id: dict[str, list[str]],
+        reads: dict[str, dict],
+        pixel_sizes: dict[str, float],
+    ) -> list[ms.ChainEntry]:
+        """Build the cross-group anchored-pyramid chain for a multi-resolution
+        bundle (#107): finest native tier first.
+
+        Every non-coarsest grid-group contributes one flat entry (its "next
+        level down" is the next native tier's group, not a synthetic
+        downsample of its own array). The coarsest grid-group contributes its
+        own base entry *and* one entry per overview level it actually wrote —
+        read back from the store this call just finished writing, rather than
+        recomputed, so the chain's metadata can never drift from what is
+        actually on disk.
+        """
+        import zarr
+
+        ordered = sorted(pixel_sizes, key=lambda gid: pixel_sizes[gid])
+        coarsest_id = ordered[-1]
+
+        entries: list[ms.ChainEntry] = []
+        for grid_id in ordered[:-1]:
+            rep = reads[group_by_id[grid_id][0]]
+            gt = ms.parse_geotransform(rep["geotransform"])
+            assert gt is not None  # guaranteed by the pixel-size pass below
+            entries.append(
+                ms.ChainEntry(asset=grid_id, gt=gt, shape=tuple(rep["data"].shape))
+            )
+
+        coarsest_rep = reads[group_by_id[coarsest_id][0]]
+        coarsest_gt = ms.parse_geotransform(coarsest_rep["geotransform"])
+        assert coarsest_gt is not None
+        var_name = group_by_id[coarsest_id][0]
+        root = zarr.open_group(target, mode="r", path=coarsest_id)
+        if var_name in root:
+            # Flat: this bundle's coarsest tier got no overview levels either
+            # (e.g. `multiscale_levels: 0`, or it is already tile-sized).
+            entries.append(
+                ms.ChainEntry(
+                    asset=coarsest_id,
+                    gt=coarsest_gt,
+                    shape=tuple(coarsest_rep["data"].shape),
+                )
+            )
+        else:
+            for lvl_key in sorted((k for k in root.group_keys()), key=int):
+                level = int(lvl_key)
+                shape = tuple(root[lvl_key][var_name].shape)
+                entries.append(
+                    ms.ChainEntry(
+                        asset=f"{coarsest_id}/{lvl_key}",
+                        gt=ms.decimate(coarsest_gt, 2**level),
+                        shape=shape,
+                    )
+                )
+        return entries
 
     def component_locator(self, target: str, name: str) -> str | None:
         """The grid group ``name``'s array lives under, for a batched ``target``."""

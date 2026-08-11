@@ -1,16 +1,22 @@
-# Example benchmark arm: Sentinel-2 L2A MAJA -> GeoZarr v3 (per-component, 2D).
+# Example benchmark arm: Sentinel-2 L2A MAJA -> GeoZarr v3 (bundled, 2D).
 #
-# The M2.5 second-format arm on the same mission as the COG arm. Each MAJA
-# reflectance band / mask (picked in the dataset `options`) is converted
-# independently to its own sharded 2D GeoZarr store, profiling the per-product
-# object-size distribution + a set-level roll-up — the head-to-head structural
-# comparison against the COG arm, from the same canonical source.
+# The M2.5 second-format arm on the same mission as the COG arm. MAJA's
+# reflectance bands / masks (picked in the dataset `options`) are bundled into
+# one sharded 2D GeoZarr store per product (`bundle_components: true`):
+# components are grouped by native pixel grid, which already separates MAJA's
+# 10 m reflectance/R1 masks from its 20 m R2 masks one group per native
+# resolution, and only the coarsest native group gets a synthetic overview
+# pyramid past its own resolution — a finer group's own pyramid would just be
+# redundant with the coarser native group that already exists in the same
+# product (#107). Profiles the per-product object-size distribution + a
+# set-level roll-up — the head-to-head structural comparison against the COG
+# arm, from the same canonical source.
 #
 # Run with `--dataset configs/datasets/example_sentinel2_maja.yaml` (chart:
 # runner.datasetFile). The component picks are NOT here — they live in the dataset
 # descriptor. `output` (and the TiTiler endpoint for display) are supplied by the
 # deployment. Time-stacking the scenes into a 3D cube is a deferred follow-up; this
-# arm is the 2D per-component base case.
+# arm is the 2D, resolution-bundled base case.
 id: example-sentinel2-l2a-maja-geozarr
 dataset: example-sentinel2-l2a-maja
 formats:
@@ -36,8 +42,17 @@ params:
   # overviews. Without it the tile server downsamples full-resolution chunks for
   # every zoomed-out tile, so the display comparison would measure the missing
   # pyramid rather than the format (#71). `auto` derives the depth from the
-  # scene: a 10980 px MAJA band gets 5 levels.
+  # scene; with bundling on, only the coarsest native resolution group
+  # (MAJA's 20 m R2 masks) actually builds this pyramid — the 10 m group is
+  # written flat, since the 20 m group already is its "next zoomed-out tier"
+  # (#107).
   multiscale_levels: auto
+  # Group this product's components by native pixel grid — MAJA's 10 m
+  # reflectance/R1 masks and 20 m R2 masks land in separate groups for free
+  # (grid equality), so the pyramid can anchor on those real resolutions
+  # instead of every component fabricating its own from-scratch overview
+  # chain (#107, mitigates the per-component object fragmentation from #105).
+  bundle_components: true
   # Encode MAJA's reflectance quantification (DN = reflectance x 10000) in the
   # array's own codec pipeline (`scale_offset` + `cast_value`) instead of leaving
   # it as side metadata. The array then reads back as physical reflectance for

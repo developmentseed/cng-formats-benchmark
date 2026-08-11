@@ -416,6 +416,63 @@ def test_layout_entries_carry_each_level_absolute_position(tmp_path):
     assert layout[1]["spatial:transform"] == [20.0, 0.0, x0, 0.0, -20.0, y0]
 
 
+# --- cross-group anchored pyramid metadata (#107) ---------------------------
+
+
+def _gt(pixel_size, origin=(300000.0, 4900020.0)):
+    x0, y0 = origin
+    return (x0, pixel_size, 0.0, y0, 0.0, -pixel_size)
+
+
+def test_pixel_size_reads_the_x_coefficient():
+    assert ms.pixel_size(_gt(10.0)) == 10.0
+    assert ms.pixel_size(_gt(60.0)) == 60.0
+
+
+def test_chain_multiscales_attrs_uses_real_ratios_not_assumed_halving():
+    # 10 -> 20 m is a halving (scale 2), but 20 -> 60 m is not (scale 3) --
+    # unlike the single-array `multiscales_attrs`, nothing here assumes 2x.
+    entries = [
+        ms.ChainEntry(asset="grid0", gt=_gt(10.0), shape=(1096, 1096)),
+        ms.ChainEntry(asset="grid1", gt=_gt(20.0), shape=(548, 548)),
+        ms.ChainEntry(asset="grid1/1", gt=_gt(60.0), shape=(183, 183)),
+    ]
+    attrs = ms.chain_multiscales_attrs(entries)
+    layout = attrs["layout"]
+
+    assert [e["asset"] for e in layout] == ["grid0", "grid1", "grid1/1"]
+    assert "derived_from" not in layout[0]
+    assert layout[0]["transform"]["scale"] == [1.0, 1.0]
+    assert layout[1]["derived_from"] == "grid0"
+    assert layout[1]["transform"]["scale"] == [2.0, 2.0]
+    assert layout[2]["derived_from"] == "grid1"
+    assert layout[2]["transform"]["scale"] == [3.0, 3.0]
+    assert [e["spatial:shape"] for e in layout] == [
+        [1096, 1096],
+        [548, 548],
+        [183, 183],
+    ]
+
+
+def test_chain_group_attrs_describes_the_finest_tier_as_its_own_grid():
+    import zarr_cm
+
+    entries = [
+        ms.ChainEntry(asset="grid0", gt=_gt(10.0), shape=(1096, 1096)),
+        ms.ChainEntry(asset="grid1", gt=_gt(20.0), shape=(548, 548)),
+    ]
+    attrs = ms.chain_group_attrs(UTM31N_WKT, entries)
+
+    _remaining, extracted = zarr_cm.extract_many(
+        attrs, ["multiscales", "spatial", "geo-proj"]
+    )
+    zarr_cm.multiscales.validate(extracted["multiscales"])
+    zarr_cm.spatial.validate(extracted["spatial"])
+    zarr_cm.proj.validate(extracted["geo-proj"])
+    assert attrs["spatial:shape"] == [1096, 1096]  # the finest tier's own shape
+    assert attrs["proj:code"] == "EPSG:32631"
+
+
 def test_root_declares_the_native_crs_and_grid(tmp_path):
     # Native CRS, not web mercator: nothing is reprojected to build the pyramid.
     attrs = _root_attrs(_store(tmp_path, name="crs.zarr"))
@@ -899,12 +956,19 @@ def test_convert_honours_the_scale_offset_param(tmp_path):
 
 
 def _write_source_at(
-    path, *, value=1234, width=256, height=256, origin=(300000, 4900020)
+    path,
+    *,
+    value=1234,
+    width=256,
+    height=256,
+    origin=(300000, 4900020),
+    pixel_size=10,
 ):
     """A georeferenced int16 GeoTIFF at ``origin`` — same shape/CRS convention
     as :func:`_write_source`, but with a controllable grid so two calls can be
-    made to share a grid (defaults) or deliberately not (different ``origin``
-    or ``width``/``height``)."""
+    made to share a grid (defaults) or deliberately not (different ``origin``,
+    ``width``/``height``, or ``pixel_size`` — the last for a genuinely
+    different *native resolution*, #107)."""
     import rasterio
     from rasterio.transform import from_origin
 
@@ -917,7 +981,7 @@ def _write_source_at(
         count=1,
         dtype="int16",
         crs="EPSG:32631",
-        transform=from_origin(origin[0], origin[1], 10, 10),
+        transform=from_origin(origin[0], origin[1], pixel_size, pixel_size),
     ) as dst:
         dst.write(np.full((height, width), value, dtype="int16"), 1)
 
@@ -1151,3 +1215,94 @@ def test_describe_layout_reports_one_layout_per_bundled_component(tmp_path):
     )
     (solo_layout,) = GeoZarrAdapter().describe_layout(solo_target, name="wse")
     assert solo_layout.grid_group is None
+
+
+def test_convert_batch_anchors_the_pyramid_on_native_resolution_groups(tmp_path):
+    # The #107 case: a 10 m component and a 20 m component in one bundle.
+    # Grid equality already splits them one group per native resolution; the
+    # finer group must be written flat (its "next zoomed-out tier" is the
+    # coarser native group, not a synthetic downsample of itself), only the
+    # coarsest group keeps its configured pyramid, and one combined chain doc
+    # at the store root ties the two groups together with the *real* scale
+    # ratio between them (2x for 10 -> 20 m here, never assumed).
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "b2.tif"), value=1, pixel_size=10)
+    _write_source_at(str(tmp_path / "clm_r2.tif"), value=2, pixel_size=20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+
+    target = str(tmp_path / "multires.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 2},
+    )
+
+    layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
+    # The finer (10 m) group is flat, regardless of the configured depth...
+    assert layouts["b2"].multiscale_levels == 0
+    # ...only the coarsest (20 m) group actually built the configured pyramid.
+    assert layouts["clm_r2"].multiscale_levels == 2
+
+    root = zarr.open_group(target, mode="r")
+    assert list(root["grid0"].group_keys()) == []  # b2: flat, no sublevels
+    assert sorted(root["grid1"].group_keys(), key=int) == ["0", "1", "2"]
+
+    layout = root.attrs["multiscales"]["layout"]
+    assert [e["asset"] for e in layout] == ["grid0", "grid1/0", "grid1/1", "grid1/2"]
+    assert "derived_from" not in layout[0]
+    # 10 -> 20 m really is a halving here, but it is *computed*, not assumed --
+    # see test_chain_multiscales_attrs_uses_real_ratios_not_assumed_halving.
+    assert layout[1]["derived_from"] == "grid0"
+    assert layout[1]["transform"]["scale"] == [2.0, 2.0]
+    assert layout[2]["derived_from"] == "grid1/0"
+    assert layout[2]["transform"]["scale"] == [2.0, 2.0]
+    assert layout[3]["derived_from"] == "grid1/1"
+    assert layout[3]["transform"]["scale"] == [2.0, 2.0]
+    # The root's own bookkeeping attrs survive alongside the chain doc (must
+    # not be wiped by the same-group-attrs-replace pitfall fixed in #103).
+    assert root.attrs["cng_benchmark:components"] == {"b2": "grid0", "clm_r2": "grid1"}
+
+
+def test_convert_batch_single_resolution_bundle_is_unaffected_by_anchoring(tmp_path):
+    # A bundle whose components all share one native grid (today's common
+    # case, e.g. one product's same-grid variables) must not trigger any of
+    # the #107 flattening/chain-doc behaviour -- every component keeps its
+    # configured pyramid depth exactly as before bundling existed.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    for name, value in [("wse", 10), ("sig0", 20)]:
+        _write_source_at(str(tmp_path / f"{name}.tif"), value=value)
+    sources = [
+        SourceObject(name=n, uri=str(tmp_path / f"{n}.tif")) for n in ("wse", "sig0")
+    ]
+
+    target = str(tmp_path / "single_res.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 2},
+    )
+
+    layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
+    assert layouts["wse"].multiscale_levels == 2
+    assert layouts["sig0"].multiscale_levels == 2
+
+    root = zarr.open_group(target, mode="r")
+    assert "multiscales" not in root.attrs
+    assert root.attrs["cng_benchmark:components"] == {"wse": "grid0", "sig0": "grid0"}
