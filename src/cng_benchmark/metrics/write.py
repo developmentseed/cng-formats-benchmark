@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import os
 import time
+from typing import TYPE_CHECKING
 
 from cng_benchmark.formats.base import FormatAdapter
 from cng_benchmark.models import MetricResult
+
+if TYPE_CHECKING:
+    from cng_benchmark.datasets.base import SourceObject
 
 
 def _output_size(path: str) -> int:
@@ -55,6 +59,42 @@ def measure_write(
 
     start = time.perf_counter()
     adapter.convert(source_path, target_path, params)
+    elapsed = time.perf_counter() - start
+
+    size_out = _output_size(target_path)
+    throughput = size_out / elapsed if elapsed > 0 else float("inf")
+    detail: dict = {"bytes_out": size_out}
+    if source_size is not None:
+        detail["bytes_in"] = source_size
+    return [
+        MetricResult(name="write_elapsed", value=elapsed, unit="s"),
+        MetricResult(
+            name="write_throughput", value=throughput, unit="bytes/s", detail=detail
+        ),
+    ]
+
+
+def measure_write_batch(
+    adapter: FormatAdapter,
+    sources: list[SourceObject],
+    target_path: str,
+    params: dict,
+    *,
+    source_size: int | None = None,
+) -> list[MetricResult]:
+    """Convert every one of ``sources`` into one bundled object and return
+    write metrics.
+
+    The batched counterpart to :func:`measure_write` (#102): times
+    ``adapter.convert_batch`` instead of ``adapter.convert``, and reports the
+    same metric shape (``write_elapsed``/``write_throughput``), so a bundled
+    write's timing is directly comparable to a per-component one.
+    ``source_size`` is the whole group's input byte size when known — the
+    caller sums it, the same way the per-component path already sums a zip/
+    netCDF container's size across the components it delivers.
+    """
+    start = time.perf_counter()
+    adapter.convert_batch(sources, target_path, params)
     elapsed = time.perf_counter() - start
 
     size_out = _output_size(target_path)

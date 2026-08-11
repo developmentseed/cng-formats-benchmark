@@ -15,9 +15,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import StrEnum
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from cng_benchmark.models import ObjectLayout
+
+if TYPE_CHECKING:
+    from cng_benchmark.datasets.base import SourceObject
 
 
 class ObjectKind(StrEnum):
@@ -58,6 +61,41 @@ class FormatAdapter(ABC):
 
         ``params`` carries the grouping-lever settings for this run.
         """
+
+    #: Whether this adapter can bundle several dataset components into one
+    #: produced object via :meth:`convert_batch` (#102). ``False`` by default —
+    #: the runner's per-component loop is the only path unless both this is
+    #: ``True`` *and* the benchmark config opts in (``params.bundle_components``);
+    #: bundling is never automatic just because a format could support it.
+    supports_batch: ClassVar[bool] = False
+
+    def convert_batch(
+        self, sources: list[SourceObject], target: str, params: dict[str, object]
+    ) -> None:
+        """Convert every one of ``sources`` into one bundled object at ``target``.
+
+        Only called when :attr:`supports_batch` is ``True`` and a benchmark
+        config's ``params.bundle_components`` names this group. ``sources``
+        carries each component's own ``nodata``/``scale_factor``/
+        ``standard_name`` (the same per-component metadata the non-batched path
+        merges into ``params`` in the runner) rather than a bare path, since a
+        batched write still has to honour it per component.
+
+        After this returns, :meth:`component_locator` must be able to say
+        where each source's data landed inside ``target``.
+        """
+        raise NotImplementedError(f"{self.name} does not support batched conversion")
+
+    def component_locator(self, target: str, name: str) -> str | None:
+        """Where ``name``'s data lives within a batched ``target``.
+
+        A format-specific address a read/display collector can act on — a
+        Zarr group path for GeoZarr, a 1-based band index for COG — or
+        ``None`` when ``target`` was not produced by :meth:`convert_batch`
+        (every non-batched adapter, and any target this instance did not just
+        write). The default adapter never batches, so it is always ``None``.
+        """
+        return None
 
     @abstractmethod
     def describe_grouping_lever(self) -> str:

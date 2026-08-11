@@ -11,6 +11,7 @@ from rasterio.transform import from_origin  # noqa: E402
 from cng_benchmark.vrt import (  # noqa: E402
     build_rgb_vrt_xml,
     build_single_band_vrt_xml,
+    build_stack_vrt_xml,
     crs_epsg,
     read_grid,
 )
@@ -202,3 +203,51 @@ def test_crs_epsg_extracts_from_wkt(tmp_path):
 def test_crs_epsg_returns_none_for_unknown():
     assert crs_epsg("") is None
     assert crs_epsg("LOCAL_CS") is None
+
+
+# --- build_stack_vrt_xml (#102: COG multi-band bundling) -------------------
+
+
+def test_stack_vrt_bands_each_source_at_the_same_full_extent(tmp_path):
+    wse = read_grid(_write_tif(tmp_path / "wse.tif", 300000, 4500000, value=10))
+    sig0 = read_grid(_write_tif(tmp_path / "sig0.tif", 300000, 4500000, value=20))
+    area = read_grid(_write_tif(tmp_path / "area.tif", 300000, 4500000, value=30))
+
+    xml = build_stack_vrt_xml([wse, sig0, area], ["wse", "sig0", "area"])
+    vrt_path = tmp_path / "stack.vrt"
+    vrt_path.write_text(xml)
+
+    with rasterio.open(vrt_path) as src:
+        assert src.count == 3
+        assert (src.width, src.height) == (_SIZE, _SIZE)
+        assert list(src.descriptions) == ["wse", "sig0", "area"]
+        assert int(src.read(1)[0, 0]) == 10
+        assert int(src.read(2)[0, 0]) == 20
+        assert int(src.read(3)[0, 0]) == 30
+
+
+def test_stack_vrt_carries_each_bands_own_nodata_declaration(tmp_path):
+    # The VRT itself declares a real per-band NODATA (even though #102 found
+    # cog_translate later collapses it to one dataset-level value — a GDAL/
+    # GeoTIFF limitation, not something this VRT builder gets wrong).
+    a = read_grid(_write_tif(tmp_path / "a.tif", 300000, 4500000, nodata=0))
+    b = read_grid(_write_tif(tmp_path / "b.tif", 300000, 4500000, nodata=9999))
+
+    xml = build_stack_vrt_xml([a, b], ["a", "b"])
+    assert "<NoDataValue>0</NoDataValue>" in xml
+    assert "<NoDataValue>9999</NoDataValue>" in xml
+    vrt_path = tmp_path / "stack.vrt"
+    vrt_path.write_text(xml)
+    with rasterio.open(vrt_path) as src:
+        assert src.nodatavals == (0, 9999)
+
+
+def test_stack_vrt_requires_matching_grids_and_names_counts():
+    with pytest.raises(ValueError, match="no sources"):
+        build_stack_vrt_xml([], [])
+
+
+def test_stack_vrt_raises_when_grids_and_names_disagree(tmp_path):
+    a = read_grid(_write_tif(tmp_path / "a.tif", 300000, 4500000))
+    with pytest.raises(ValueError, match=r"1 grids but 2 names"):
+        build_stack_vrt_xml([a], ["a", "b"])

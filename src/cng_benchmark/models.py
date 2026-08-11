@@ -110,6 +110,14 @@ class CogLayout(ObjectLayout):
     full-resolution block-grid cell count, and ``overview_decimations`` the
     overview levels. The chunk-aware display metric reads the same structure to
     bucket its tiles.
+
+    ``band_names`` is non-empty only for a multi-band file produced by bundling
+    several dataset components together (#102) — the component each band holds,
+    in band order (band 1 first). Bytes aren't separable per band in an
+    interleaved multi-band GeoTIFF (one shared block/tile/overview structure
+    across every band), so a bundle is described by one ``CogLayout`` for the
+    whole file, not one per component; this field is how a report still says
+    which band is which. Empty for an ordinary single-band COG.
     """
 
     kind: Literal["cog"] = "cog"
@@ -120,6 +128,7 @@ class CogLayout(ObjectLayout):
     internal_tiles: int
     codec: str = "none"
     compression_ratio: float = 0.0
+    band_names: list[str] = Field(default_factory=list)
 
 
 class GeoZarrLayout(ObjectLayout):
@@ -141,6 +150,13 @@ class GeoZarrLayout(ObjectLayout):
     to unscale, the encoding-semantics differentiator against COG's out-of-band
     scale metadata. ``stored_dtype`` is the dtype that actually reaches disk,
     which differs from the array's declared dtype exactly when that chain is on.
+
+    ``grid_group`` is which grid subtree (``"grid0"``, ``"grid1"``, …) this
+    array lives under when several components were bundled into one store
+    (#102) — ``None`` for an ordinary, non-batched store. ``size_bytes`` is
+    always this array's *own* shard bytes only, never the coordinate arrays a
+    bundle's components share, so a component's reported size is what it alone
+    costs.
     """
 
     kind: Literal["geozarr"] = "geozarr"
@@ -154,6 +170,7 @@ class GeoZarrLayout(ObjectLayout):
     scale_offset: bool = False
     stored_dtype: str = ""
     overview_bytes: int = 0
+    grid_group: str | None = None
 
 
 class GeoParquetLayout(ObjectLayout):

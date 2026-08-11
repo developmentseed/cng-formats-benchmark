@@ -25,14 +25,18 @@ needs ``rioxarray`` (the ``geozarr`` extra), imported lazily.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from cng_benchmark.formats import geozarr_multiscales as ms
 from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+from cng_benchmark.formats.grid import GridKey, group_by_grid
 from cng_benchmark.models import GeoZarrLayout
 from cng_benchmark.registry import FORMATS
+
+if TYPE_CHECKING:
+    from cng_benchmark.datasets.base import SourceObject
 
 #: The single data variable each per-component store holds (the display and read
 #: metrics address the array by this name).
@@ -43,22 +47,27 @@ DEFAULT_CHUNK = (1024, 1024)
 DEFAULT_SHARD = (2048, 2048)
 
 
-def finest_level_group(store: str) -> str | None:
-    """The zarr group holding the native-resolution :data:`DATA_VAR` array.
+def finest_level_group(
+    store: str, *, group: str | None = None, var_name: str | None = None
+) -> str | None:
+    """The zarr group holding the native-resolution data array.
 
-    ``None`` for a flat store (``DATA_VAR`` at the root); the lowest-numbered
-    multiscale level group (``"0"``, native resolution — see
+    ``None`` for a flat store (the array at the pyramid group's own root); the
+    lowest-numbered multiscale level group (``"0"``, native resolution — see
     :mod:`~cng_benchmark.formats.geozarr_multiscales`) otherwise. TiTiler's
     stock xarray router has no multiscale awareness and needs this explicitly
     as its ``group=`` query; a reader that resolves the pyramid itself (e.g.
     ``GeoZarrReader``) does not. Mirrors the array lookup
     :func:`cng_benchmark.metrics.read._open_zarr_array` does for the read
-    metric.
+    metric. ``group``/``var_name`` address one component of a bundled store
+    (#102) — ``None`` (the defaults) reproduce today's single-component
+    addressing (:data:`DATA_VAR` at the store root).
     """
     import zarr
 
-    root = zarr.open_group(store, mode="r")
-    if DATA_VAR in root:
+    name = var_name or DATA_VAR
+    root = zarr.open_group(store, mode="r", path=group or "")
+    if name in root:
         return None
     level_keys = sorted((k for k in root.group_keys()), key=int)
     return level_keys[0]
@@ -254,18 +263,23 @@ def _write_sharded(
     add_offset: float | None = None,
     scale_offset: bool = False,
     standard_name: str | None = None,
+    group: str | None = None,
+    var_name: str = DATA_VAR,
+    write_shared: bool = True,
 ) -> None:
     """Write a 2D array to ``store`` as a sharded, multiscale GeoZarr v3 store.
 
     Each pyramid level is its own integer-named group holding the array
-    (``<level>/{DATA_VAR}``, native resolution at ``0``), and the root group
-    describes the pyramid with the Zarr ``multiscales`` / ``spatial`` /
-    ``geo-proj`` conventions (see
+    (``<level>/{var_name}``, native resolution at ``0``), and the group that
+    describes the pyramid — ``store`` itself by default, or ``group`` when
+    given (a bundled write's grid subtree, #102) — carries the Zarr
+    ``multiscales`` / ``spatial`` / ``geo-proj`` conventions (see
     :mod:`~cng_benchmark.formats.geozarr_multiscales`). Every level carries its
     *own* affine transform, grid description and cell-centre coordinates, so a
     reader can georeference an overview without deriving it. ``multiscale_levels
-    == 0`` degrades to the flat store — the array alone under :data:`DATA_VAR` at
-    the root, no pyramid — which is the comparison case, not the default.
+    == 0`` degrades to the flat store — the array alone under ``var_name`` at
+    the pyramid group, no pyramid — which is the comparison case, not the
+    default.
 
     Georeferencing lives in the conventions and nowhere else: no CF
     ``spatial_ref`` grid-mapping variable, no ``grid_mapping`` attribute, and no
@@ -278,6 +292,16 @@ def _write_sharded(
     encoded — as CF attributes, or as the codec chain (see
     :class:`GeoZarrParams`) — and :func:`_data_var` / :func:`_encoding` carry it
     out. ``standard_name`` is the CF name of the quantity the pixels hold.
+
+    ``group``/``var_name``/``write_shared`` are the bundled-write seam (#102):
+    a batched adapter shares one grid's coordinate arrays and pyramid metadata
+    across several components by calling this once per component, with the
+    *first* component of a grid using the defaults (``write_shared=True``,
+    which writes the coords and grid attrs) and every later component of the
+    *same* grid passing ``write_shared=False`` (only its own array, added as a
+    sibling — no coords, no attrs rewritten) plus its own ``var_name``. A
+    non-batched call (the default ``group=None``, ``var_name=DATA_VAR``,
+    ``write_shared=True``) is byte-for-byte what this function has always done.
     """
     import numpy as np
     import xarray as xr
@@ -349,8 +373,10 @@ def _write_sharded(
         return da
 
     def _level_dataset(level: int, level_data) -> xr.Dataset:
-        """One pyramid level: the array, its grid description and its coordinates."""
-        ds = xr.Dataset({DATA_VAR: _data_var(level, level_data)})
+        """One pyramid level: the array, plus (when sharing) its grid + coords."""
+        ds = xr.Dataset({var_name: _data_var(level, level_data)})
+        if not write_shared:
+            return ds
         level_gt = _level_gt(level)
         if level_gt is not None:
             coords = ms.level_coords(level_gt, level_data.shape)
@@ -375,15 +401,34 @@ def _write_sharded(
             enc["fill_value"] = array_fill
         if fill_value is not None:
             enc["_FillValue"] = array_fill
-        return {DATA_VAR: enc}
+        return {var_name: enc}
+
+    def _level_group(level: int, flat: bool) -> str | None:
+        """The zarr group path for pyramid level ``level``, nested under ``group``."""
+        lvl = None if flat else str(level)
+        if group is None:
+            return lvl
+        return group if lvl is None else f"{group}/{lvl}"
+
+    # A write into an existing bundled store must never truncate a sibling
+    # grid's subtree, and a fresh, not-yet-existing store must still work —
+    # "a" (create-if-missing, add/override only the addressed group) is safe
+    # either way (verified empirically for #102); "w" stays reserved for the
+    # first write of a non-batched store, matching this function's original,
+    # still-tested behaviour exactly.
+    def _mode(is_first_level: bool) -> Literal["w", "a"]:
+        if group is None and write_shared and is_first_level:
+            return "w"
+        return "a"
 
     if len(levels) == 1:
-        # Flat store: no pyramid to describe, so the array sits at the root and
-        # the root carries only its grid and CRS description.
+        # Flat store: no pyramid to describe, so the array sits at the pyramid
+        # group and that group carries only its grid and CRS description.
         ds = _level_dataset(0, levels[0])
         ds.to_zarr(
             store,
-            mode="w",
+            mode=_mode(True),
+            group=_level_group(0, flat=True),
             zarr_format=3,
             consolidated=False,
             encoding=_encoding(levels[0]),
@@ -394,31 +439,40 @@ def _write_sharded(
     for i, level_data in enumerate(levels):
         _level_dataset(i, level_data).to_zarr(
             store,
-            mode="w" if i == 0 else "a",
-            group=str(i),
+            mode=_mode(i == 0),
+            group=_level_group(i, flat=False),
             zarr_format=3,
             consolidated=False,
             encoding=_encoding(level_data),
         )
-    # The root group is what declares the pyramid: which group holds each level,
-    # how it was derived, and where every level sits on the ground.
-    root_attrs = ms.group_attrs(crs_wkt, gt, [tuple(lv.shape) for lv in levels])
-    xr.Dataset(attrs=root_attrs).to_zarr(
-        store, mode="a", zarr_format=3, consolidated=False
-    )
+    if write_shared:
+        # The pyramid group is what declares the pyramid: which group holds
+        # each level, how it was derived, and where every level sits on the
+        # ground. Written once per grid, by its first component.
+        root_attrs = ms.group_attrs(crs_wkt, gt, [tuple(lv.shape) for lv in levels])
+        xr.Dataset(attrs=root_attrs).to_zarr(
+            store, mode="a", group=group, zarr_format=3, consolidated=False
+        )
 
 
-def _shard_data_files(store: str) -> list[str]:
-    """Return the data array's shard object paths (its chunk data under ``c/``).
+def _shard_data_files(
+    store: str, *, group: str | None = None, var_name: str | None = None
+) -> list[str]:
+    """Return shard object paths (chunk data under ``c/``) in ``store``.
 
-    Zarr v3 lays an array's chunk/shard data out under ``<array>/c/...``. Only the
-    main :data:`DATA_VAR` array's shards are the tier-judged objects, so this keeps
-    files under ``.../{DATA_VAR}/c/`` — matching both the root array
-    (``{DATA_VAR}/c/...``) and each multiscale level (``<level>/{DATA_VAR}/c/...``)
-    — and excludes ``zarr.json`` metadata and the ``x``/``y`` coordinate arrays,
-    which would otherwise skew the size profile and ``shard_count``.
+    Zarr v3 lays an array's chunk/shard data out under ``<array>/c/...``.
+    ``var_name`` scopes the match to one array's own shards (used for a
+    component's *own* structural layout, see :func:`describe_store_layout`);
+    ``None`` matches *every* array's shards, coordinate arrays (``x``/``y``)
+    included — they are real physical objects the store puts on S3, and the
+    undercount they were previously excluded from was exactly the harness/
+    reality mismatch #102 is about: CNES's own S3 inspection counted them
+    (the "min 82 B" object in the finding that opened #102 *is* a coordinate
+    chunk), so this harness's own object-size profile has to as well. ``group``
+    further scopes to one grid's subtree (a bundled store's ``grid0``,
+    ``grid1``, …). Excludes ``zarr.json`` metadata either way.
     """
-    marker = f"/{DATA_VAR}/c/"
+    prefix = f"/{group}/" if group else None
     files: list[str] = []
     for root, _dirs, names in os.walk(store):
         for n in names:
@@ -426,38 +480,61 @@ def _shard_data_files(store: str) -> list[str]:
                 continue
             path = os.path.join(root, n)
             rel = "/" + os.path.relpath(path, store).replace(os.sep, "/")
-            if marker in rel:
-                files.append(path)
+            if prefix is not None and not rel.startswith(prefix):
+                continue
+            segments = rel.split("/")
+            if "c" not in segments:
+                continue
+            array_name = segments[segments.index("c") - 1]
+            if var_name is not None and array_name != var_name:
+                continue
+            files.append(path)
     return files
 
 
 def enumerate_store_objects(store: str) -> list[int]:
-    """Return the byte sizes of every shard data object in ``store``."""
+    """Return the byte sizes of every shard object in ``store``, coordinate
+    arrays included — the store's real, whole physical object population (the
+    number a size/tier profile has to be honest about; #102).
+    """
     return [os.path.getsize(p) for p in _shard_data_files(store)]
 
 
-def _overview_bytes(store: str) -> int:
-    """Return the bytes the *overview* levels occupy (everything below level 0).
+def _overview_bytes(
+    store: str, *, group: str | None = None, var_name: str = DATA_VAR
+) -> int:
+    """Return the bytes one array's *overview* levels occupy (below level 0).
 
     The pyramid is what a zoomed-out tile is served from, and it is also what the
     store pays for it — the same trade a COG makes with its overviews. Splitting
-    it out keeps the size comparison between the two arms readable.
+    it out keeps the size comparison between the two arms readable. Scoped to
+    one component's own array via ``group``/``var_name`` (#102) — a bundled
+    store's shared coordinate-array bytes are never an "overview" of anyone's
+    data, so they are excluded by construction (``_shard_data_files`` already
+    scopes to ``var_name``).
     """
     total = 0
-    for path in _shard_data_files(store):
+    prefix = f"{group}/" if group else ""
+    for path in _shard_data_files(store, group=group, var_name=var_name):
         rel = os.path.relpath(path, store).replace(os.sep, "/")
-        head = rel.split("/", 1)[0]
+        rel_in_group = rel[len(prefix) :] if prefix and rel.startswith(prefix) else rel
+        head = rel_in_group.split("/", 1)[0]
         if head.isdigit() and int(head) > 0:
             total += os.path.getsize(path)
     return total
 
 
-def _read_array_meta(store: str) -> dict:
-    """Read the base array's chunk/shard shape, codec and shard count from ``store``.
+def _read_array_meta(
+    store: str, *, group: str | None = None, var_name: str = DATA_VAR
+) -> dict:
+    """Read one array's chunk/shard shape, codec and shard count from ``store``.
 
-    Opens the store's finest array (the root array, or group ``0`` for a multiscale
-    store) and reports its chunk grid, shard grid (chunks-per-shard), the configured
-    compressor name, and the number of shard objects across the whole store.
+    Opens ``store``'s finest array named ``var_name`` (the array itself, or
+    group ``0`` for a multiscale store) — at the store root by default, or
+    under ``group`` for one component of a bundled store (#102, via zarr's own
+    ``path=`` group navigation) — and reports its chunk grid, shard grid
+    (chunks-per-shard), the configured compressor name, and how many shard
+    objects that one array's own chain of levels produced.
 
     Also reports whether the ``scale_offset`` codec chain is active and which
     dtype actually reaches disk. That distinction matters for the compression
@@ -467,12 +544,12 @@ def _read_array_meta(store: str) -> dict:
     """
     import zarr
 
-    root = zarr.open_group(store, mode="r")
-    if DATA_VAR in root:
-        arrays = [root[DATA_VAR]]
+    root = zarr.open_group(store, mode="r", path=group or "")
+    if var_name in root:
+        arrays = [root[var_name]]
     else:  # multiscale: levels live in integer-named groups
         level_keys = sorted((k for k in root.group_keys()), key=lambda k: int(k))
-        arrays = [root[k][DATA_VAR] for k in level_keys]
+        arrays = [root[k][var_name] for k in level_keys]
     levels = len(arrays) - 1
     arr = arrays[0]
 
@@ -518,30 +595,122 @@ def _read_array_meta(store: str) -> dict:
         "chunks_per_shard": int(chunks_per_shard),
         "codec": codec,
         "multiscale_levels": int(levels),
-        "shard_count": len(_shard_data_files(store)),
+        "shard_count": len(_shard_data_files(store, group=group, var_name=var_name)),
         "uncompressed_bytes": uncompressed_bytes,
     }
 
 
-def describe_store_layout(store: str, name: str) -> GeoZarrLayout:
-    """Return the :class:`GeoZarrLayout` of the GeoZarr store at ``store``."""
-    meta = _read_array_meta(store)
-    total = sum(enumerate_store_objects(store))
+def describe_store_layout(
+    store: str, name: str, *, group: str | None = None, var_name: str = DATA_VAR
+) -> GeoZarrLayout:
+    """Return the :class:`GeoZarrLayout` of one array in the GeoZarr store at ``store``.
+
+    ``group``/``var_name`` address one component of a bundled store (#102);
+    the defaults describe the whole (non-batched) store, unchanged from before.
+    ``size_bytes`` is that array's *own* shard bytes only — never the shared
+    ``x``/``y`` coordinate bytes a bundled store's components hold in common —
+    so a component's reported size is what it alone costs, not an arbitrary
+    slice of shared overhead.
+    """
+    meta = _read_array_meta(store, group=group, var_name=var_name)
+    total = sum(
+        os.path.getsize(p)
+        for p in _shard_data_files(store, group=group, var_name=var_name)
+    )
     uncompressed = meta.pop("uncompressed_bytes", 0)
     compression_ratio = uncompressed / total if total else 0.0
     return GeoZarrLayout(
         name=name,
         size_bytes=total,
         compression_ratio=compression_ratio,
-        overview_bytes=_overview_bytes(store),
+        overview_bytes=_overview_bytes(store, group=group, var_name=var_name),
+        grid_group=group,
         **meta,
     )
+
+
+def _require_rioxarray():
+    try:
+        import rioxarray  # noqa: F401
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
+        raise RuntimeError(
+            "GeoZarr conversion requires the 'geozarr' extra; install with "
+            "`uv sync --extra geozarr` (or `pip install cng-benchmark[geozarr]`)"
+        ) from exc
+
+
+def _read_component_array(source: str, params: dict, opts: GeoZarrParams) -> dict:
+    """Read ``source``'s first band as CRS+geotransform-tagged pixel data.
+
+    Shared by :meth:`GeoZarrAdapter.convert` and :meth:`GeoZarrAdapter.convert_batch`
+    (#102) — the same per-source rioxarray read and nodata/scale/offset/
+    standard_name precedence (an explicit param wins; otherwise the source's
+    own embedded value), whether there is one source or several. ``opts`` is
+    the *already-merged* :class:`GeoZarrParams` for this source, so the batched
+    caller can pass one parsed per component (its own nodata/scale_factor/
+    standard_name folded in) while the shared levers (chunk/shard/codec/…)
+    stay whatever the run configured.
+    """
+    import numpy as np
+    import rioxarray
+
+    da = rioxarray.open_rasterio(source, masked=False)
+    # Reduce to a single 2D (y, x) band; rioxarray yields (band, y, x).
+    if "band" in da.dims:
+        da = da.isel(band=0, drop=True)
+    data = np.ascontiguousarray(da.values)
+    crs_wkt = da.rio.crs.to_wkt() if da.rio.crs else ""
+    t = da.rio.transform()
+    geotransform = " ".join(str(v) for v in (t.c, t.a, t.b, t.f, t.d, t.e))
+
+    # An explicit param wins; otherwise fall back to what the source
+    # embedded (rioxarray surfaces a GDAL band's nodata/scale/offset as
+    # `_FillValue`, `scale_factor` and `add_offset` attributes). MAJA
+    # reflectance declares none of them in the file, so the dataset reader
+    # supplies them — see `SourceObject.nodata` / `.scale_factor`.
+    def _param(key: str, source_value) -> float | None:
+        value = params.get(key, source_value)
+        return None if value is None else float(value)
+
+    fill_value = _param("nodata", da.rio.nodata)
+    scale_factor = _param("scale_factor", da.attrs.get("scale_factor"))
+    add_offset = _param("add_offset", da.attrs.get("add_offset"))
+    # rioxarray reports the identity packing (1.0 / 0.0) for a band that
+    # carries none; writing it out would only add noise.
+    if scale_factor == 1.0:
+        scale_factor = None
+    if add_offset == 0.0:
+        add_offset = None
+
+    # Same precedence for the CF quantity name, which a source read from a
+    # CF file (SWOT's netCDF variables) already carries and a delivered
+    # GeoTIFF (MAJA, S1 RTC) does not — there the reader names it.
+    standard_name = opts.standard_name or da.attrs.get("standard_name")
+
+    return {
+        "data": data,
+        "crs_wkt": crs_wkt,
+        "geotransform": geotransform,
+        "fill_value": fill_value,
+        "scale_factor": scale_factor,
+        "add_offset": add_offset,
+        "standard_name": standard_name,
+    }
 
 
 @FORMATS.register("geozarr")
 class GeoZarrAdapter(FormatAdapter):
     name = "geozarr"
     object_kind = ObjectKind.ZARR_STORE
+    supports_batch = True
+
+    def __init__(self) -> None:
+        # Batch-time bookkeeping: which grid group each component's array
+        # landed in, keyed by target store path — describe_layout and
+        # component_locator read it back for a target this instance just
+        # wrote via convert_batch (#102, mirrors the FlatGeobuf
+        # null_geometry bookkeeping pattern from #98).
+        self._batch_grid_by_target: dict[str, dict[str, str]] = {}
 
     def target_basename(self) -> str:
         return "geozarr.zarr"
@@ -553,70 +722,120 @@ class GeoZarrAdapter(FormatAdapter):
         geotransform) and writes it as a Zarr v3 store whose chunk/shard shape,
         codec and multiscale depth come from :class:`GeoZarrParams`.
         """
-        try:
-            import rioxarray  # noqa: F401
-        except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
-            raise RuntimeError(
-                "GeoZarr conversion requires the 'geozarr' extra; install with "
-                "`uv sync --extra geozarr` (or `pip install cng-benchmark[geozarr]`)"
-            ) from exc
-        import numpy as np
-        import rioxarray
-
+        _require_rioxarray()
         opts = GeoZarrParams.model_validate(params)
-        da = rioxarray.open_rasterio(source, masked=False)
-        # Reduce to a single 2D (y, x) band; rioxarray yields (band, y, x).
-        if "band" in da.dims:
-            da = da.isel(band=0, drop=True)
-        data = np.ascontiguousarray(da.values)
+        read = _read_component_array(source, params, opts)
+        data = read["data"]
 
         chunk = _fit_chunk(_spatial_pair(opts.chunk_shape, DEFAULT_CHUNK), data.shape)
         shard = _fit_shard(
             _spatial_pair(opts.shard_shape, DEFAULT_SHARD), chunk, data.shape
         )
-        crs_wkt = da.rio.crs.to_wkt() if da.rio.crs else ""
-        t = da.rio.transform()
-        geotransform = " ".join(str(v) for v in (t.c, t.a, t.b, t.f, t.d, t.e))
-
-        # An explicit param wins; otherwise fall back to what the source
-        # embedded (rioxarray surfaces a GDAL band's nodata/scale/offset as
-        # `_FillValue`, `scale_factor` and `add_offset` attributes). MAJA
-        # reflectance declares none of them in the file, so the dataset reader
-        # supplies them — see `SourceObject.nodata` / `.scale_factor`.
-        def _param(key: str, source_value) -> float | None:
-            value = params.get(key, source_value)
-            return None if value is None else float(value)
-
-        fill_value = _param("nodata", da.rio.nodata)
-        scale_factor = _param("scale_factor", da.attrs.get("scale_factor"))
-        add_offset = _param("add_offset", da.attrs.get("add_offset"))
-        # rioxarray reports the identity packing (1.0 / 0.0) for a band that
-        # carries none; writing it out would only add noise.
-        if scale_factor == 1.0:
-            scale_factor = None
-        if add_offset == 0.0:
-            add_offset = None
-
-        # Same precedence for the CF quantity name, which a source read from a
-        # CF file (SWOT's netCDF variables) already carries and a delivered
-        # GeoTIFF (MAJA, S1 RTC) does not — there the reader names it.
-        standard_name = opts.standard_name or da.attrs.get("standard_name")
-
         _write_sharded(
             target,
             data,
             chunk=chunk,
             shard=shard,
             codec=opts.codec,
-            crs_wkt=crs_wkt,
-            geotransform=geotransform,
+            crs_wkt=read["crs_wkt"],
+            geotransform=read["geotransform"],
             multiscale_levels=opts.multiscale_levels,
-            fill_value=fill_value,
-            scale_factor=scale_factor,
-            add_offset=add_offset,
+            fill_value=read["fill_value"],
+            scale_factor=read["scale_factor"],
+            add_offset=read["add_offset"],
             scale_offset=opts.scale_offset,
-            standard_name=standard_name,
+            standard_name=read["standard_name"],
         )
+
+    def convert_batch(
+        self, sources: list[SourceObject], target: str, params: dict[str, Any]
+    ) -> None:
+        """Convert every one of ``sources`` into one bundled store at ``target`` (#102).
+
+        Reads each source the same way :meth:`convert` reads its one, groups
+        them by grid equality (:func:`~cng_benchmark.formats.grid.group_by_grid`
+        — shape, geotransform, CRS), and writes one grid's group of components
+        sharing the grid's coordinate arrays and pyramid metadata (written once,
+        by the first component) with each component as a sibling array named
+        for itself. A product whose components span more than one grid gets one
+        ``grid0``/``grid1``/… subtree per grid, all in this one store — bundling
+        never silently drops or misplaces a component onto the wrong grid.
+        """
+        _require_rioxarray()
+        import xarray as xr
+
+        reads: dict[str, dict] = {}
+        keys: list[GridKey] = []
+        for src in sources:
+            component_params = dict(params)
+            for key, value in (
+                ("nodata", src.nodata),
+                ("scale_factor", src.scale_factor),
+                ("standard_name", src.standard_name),
+            ):
+                if value is not None:
+                    component_params.setdefault(key, value)
+            component_opts = GeoZarrParams.model_validate(component_params)
+            read = _read_component_array(src.uri, component_params, component_opts)
+            reads[src.name] = read
+            gt_tuple = ms.parse_geotransform(read["geotransform"]) or ()
+            keys.append(
+                GridKey(
+                    name=src.name,
+                    shape=tuple(read["data"].shape),
+                    geotransform=gt_tuple,
+                    crs=read["crs_wkt"],
+                )
+            )
+
+        # The shared, run-level levers (chunk/shard/codec/multiscale/scale_offset)
+        # are identical for every component — only nodata/scale_factor/
+        # standard_name vary per source, already folded into each `read` above.
+        opts = GeoZarrParams.model_validate(params)
+
+        groups = group_by_grid(keys)
+        grid_ids = {name: f"grid{i}" for i, grp in enumerate(groups) for name in grp}
+
+        for group_names in groups:
+            for i, name in enumerate(group_names):
+                read = reads[name]
+                data = read["data"]
+                chunk = _fit_chunk(
+                    _spatial_pair(opts.chunk_shape, DEFAULT_CHUNK), data.shape
+                )
+                shard = _fit_shard(
+                    _spatial_pair(opts.shard_shape, DEFAULT_SHARD), chunk, data.shape
+                )
+                _write_sharded(
+                    target,
+                    data,
+                    chunk=chunk,
+                    shard=shard,
+                    codec=opts.codec,
+                    crs_wkt=read["crs_wkt"],
+                    geotransform=read["geotransform"],
+                    multiscale_levels=opts.multiscale_levels,
+                    fill_value=read["fill_value"],
+                    scale_factor=read["scale_factor"],
+                    add_offset=read["add_offset"],
+                    scale_offset=opts.scale_offset,
+                    standard_name=read["standard_name"],
+                    group=grid_ids[name],
+                    var_name=name,
+                    write_shared=(i == 0),
+                )
+
+        self._batch_grid_by_target[target] = grid_ids
+        # Harness-internal bookkeeping only — not part of the published
+        # zarr_conventions — so a reader (or describe_layout) doesn't have to
+        # re-derive grid equality itself.
+        xr.Dataset(attrs={"cng_benchmark:components": grid_ids}).to_zarr(
+            target, mode="a", zarr_format=3, consolidated=False
+        )
+
+    def component_locator(self, target: str, name: str) -> str | None:
+        """The grid group ``name``'s array lives under, for a batched ``target``."""
+        return self._batch_grid_by_target.get(target, {}).get(name)
 
     def describe_grouping_lever(self) -> str:
         return "Zarr v3 chunk and shard shape"
@@ -628,5 +847,15 @@ class GeoZarrAdapter(FormatAdapter):
     def describe_layout(
         self, target: str, *, name: str | None = None
     ) -> list[GeoZarrLayout]:
-        """Return the produced store's chunk/shard layout (one array)."""
-        return [describe_store_layout(target, name or self.name)]
+        """Return the produced store's chunk/shard layout.
+
+        One array for a non-batched target; one per component, each scoped to
+        its own grid group, for a target :meth:`convert_batch` just wrote.
+        """
+        grid_ids = self._batch_grid_by_target.get(target)
+        if grid_ids is None:
+            return [describe_store_layout(target, name or self.name)]
+        return [
+            describe_store_layout(target, comp_name, group=grid_id, var_name=comp_name)
+            for comp_name, grid_id in grid_ids.items()
+        ]

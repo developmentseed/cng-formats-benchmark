@@ -86,8 +86,67 @@ def test_summary_renders_geozarr_chunk_shard_layout():
     assert "## Chunk/shard layout" in md
     assert "Shard objects:" in md
     assert "| 512×512 | 1024×1024 | 4 | zstd | 1 | 4 |" in md
+    # An ordinary (non-batched) run gets no "Bundled" coverage line and an
+    # empty Grid column.
+    assert "Bundled" not in md
+    assert md.count("| — |") >= 1
     # No COG-only table for a GeoZarr run.
     assert "## Tiling layout" not in md
+
+
+def test_summary_flags_bundled_geozarr_components_sharing_a_grid():
+    # #102: components sharing a grid group share its coordinate arrays and
+    # pyramid metadata — the report has to say so, not just list arrays.
+    run = _sample_run()
+    run.format_id = "geozarr"
+    run.object_layouts = [
+        GeoZarrLayout(
+            name="wse",
+            size_bytes=200,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=0,
+            shard_count=4,
+            grid_group="grid0",
+        ),
+        GeoZarrLayout(
+            name="sig0",
+            size_bytes=180,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=0,
+            shard_count=4,
+            grid_group="grid0",
+        ),
+    ]
+    md = render_markdown_summary(run)
+    assert "Bundled:** 2 array(s) share 1 grid group(s)" in md
+    assert "| wse | 512×512 | 1024×1024 | 4 | zstd | 0 | 4 | — | — | grid0 |" in md
+    assert "| sig0 | 512×512 | 1024×1024 | 4 | zstd | 0 | 4 | — | — | grid0 |" in md
+
+
+def test_summary_flags_bundled_cog_band_names():
+    # #102: a multi-band COG bundling several components must still say which
+    # band is which component.
+    run = _sample_run()
+    run.object_layouts = [
+        CogLayout(
+            name="cog",
+            size_bytes=100,
+            is_tiled=True,
+            block_height=512,
+            block_width=512,
+            internal_tiles=4,
+            band_names=["wse", "sig0", "area"],
+        )
+    ]
+    md = render_markdown_summary(run)
+    assert "Bundled:** 1 file(s) hold more than one component" in md
+    assert "wse, sig0, area" in md
 
 
 def test_summary_renders_geoparquet_row_group_layout():

@@ -111,6 +111,67 @@ def crs_epsg(crs_wkt: str) -> str | None:
     return last[0] or last[1] or None
 
 
+def build_stack_vrt_xml(grids: list[GridMeta], names: list[str]) -> str:
+    """Build an N-band VRT XML stacking ``grids`` as sibling bands, one each.
+
+    The bundled-COG write (#102): unlike :func:`build_rgb_vrt_xml`/
+    :func:`build_single_band_vrt_xml`, this is not a mosaic — every source is
+    placed at the *same* full extent (band N is source N's own single band,
+    not several sources composited into one band), so it requires, without
+    itself verifying, that every grid in ``grids`` is identical (shape,
+    transform, CRS). The caller groups components by grid equality first
+    (:func:`cng_benchmark.formats.grid.group_by_grid`) and only calls this on
+    one such group. Each band's ``<Description>`` is set to the matching entry
+    in ``names``, so the produced multi-band file is self-documenting about
+    which band is which component (readable via rasterio's ``.descriptions``)
+    without extra harness-side bookkeeping.
+    """
+    if len(grids) != len(names):
+        raise ValueError(
+            f"build_stack_vrt_xml got {len(grids)} grids but {len(names)} names"
+        )
+    if not grids:
+        raise ValueError("no sources to stack")
+
+    ref = grids[0]
+    dtype = _VRT_DTYPES.get(ref.dtype, "Float32")
+
+    lines = [f'<VRTDataset rasterXSize="{ref.width}" rasterYSize="{ref.height}">']
+    if ref.crs_wkt:
+        lines.append(f"  <SRS>{ref.crs_wkt}</SRS>")
+    geo = (ref.left, ref.px, 0.0, ref.top, 0.0, -ref.py)
+    lines.append(
+        "  <GeoTransform>" + ", ".join(f"{v:.10g}" for v in geo) + "</GeoTransform>"
+    )
+    if ref.overviews:
+        ov = " ".join(str(f) for f in ref.overviews)
+        lines.append(f"  <OverviewList>{ov}</OverviewList>")
+
+    for idx, (g, name) in enumerate(zip(grids, names, strict=True), start=1):
+        lines.append(f'  <VRTRasterBand dataType="{dtype}" band="{idx}">')
+        lines.append(f"    <Description>{name}</Description>")
+        if g.nodata is not None:
+            lines.append(f"    <NoDataValue>{g.nodata:.10g}</NoDataValue>")
+        lines.append("    <ComplexSource>")
+        lines.append(
+            f'      <SourceFilename relativeToVRT="0">{g.path}</SourceFilename>'
+        )
+        lines.append("      <SourceBand>1</SourceBand>")
+        lines.append(
+            f'      <SrcRect xOff="0" yOff="0" xSize="{g.width}" ySize="{g.height}"/>'
+        )
+        lines.append(
+            f'      <DstRect xOff="0" yOff="0" xSize="{g.width}" ySize="{g.height}"/>'
+        )
+        if g.nodata is not None:
+            lines.append(f"      <NODATA>{g.nodata:.10g}</NODATA>")
+        lines.append("    </ComplexSource>")
+        lines.append("  </VRTRasterBand>")
+
+    lines.append("</VRTDataset>")
+    return "\n".join(lines) + "\n"
+
+
 def build_single_band_vrt_xml(grids: list[GridMeta]) -> str:
     """Build a 1-band Gray mosaic VRT XML from source grids.
 

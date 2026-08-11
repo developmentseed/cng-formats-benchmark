@@ -168,25 +168,39 @@ def _render_tiling_layout(layouts: list) -> list[str]:
     Leads with how many objects are internally tiled (range-read friendly) vs
     striped, then one row per object (block size, overview levels, internal
     tiles) — the structural side of the partial-access story, beside the sizes.
+
+    A bundled multi-band file (several components stacked into one COG, #102)
+    carries ``band_names`` — flagged with a coverage line and a "Bands" column,
+    so a table row for one object can still say which components it holds.
     """
     tiled = sum(1 for ly in layouts if ly.is_tiled)
+    bundled = [ly for ly in layouts if ly.band_names]
     lines = [
         "",
         "## Tiling layout",
         "",
         f"- **Internally tiled:** {tiled}/{len(layouts)} objects "
         f"({len(layouts) - tiled} striped)",
+    ]
+    if bundled:
+        lines.append(
+            f"- **Bundled:** {len(bundled)} file(s) hold more than one "
+            "component, one band each"
+        )
+    lines += [
         "",
-        "| Object | Tiled | Block | Overviews | Internal tiles | Codec | Compression |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Object | Tiled | Block | Overviews | Internal tiles | Codec"
+        " | Compression | Bands |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         ovr = len(ly.overview_decimations)
         ratio = f"{ly.compression_ratio:.2f}×" if ly.compression_ratio else "—"
+        bands = ", ".join(ly.band_names) if ly.band_names else "—"
         lines.append(
             f"| {ly.name} | {'yes' if ly.is_tiled else 'no'} | "
             f"{ly.block_width}×{ly.block_height} | {ovr} | {ly.internal_tiles} | "
-            f"{ly.codec} | {ratio} |"
+            f"{ly.codec} | {ratio} | {bands} |"
         )
     return lines
 
@@ -198,17 +212,30 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
     one row per array (chunk = addressable unit, shard = stored object,
     chunks/shard, codec, multiscale levels) — the GeoZarr answer to the same
     partial-access question COG answers with internal tiling.
+
+    Arrays sharing a ``grid_group`` (several components bundled into one
+    store, #102) share that group's coordinate arrays and pyramid metadata —
+    flagged with a coverage line and a "Grid" column naming each array's group.
     """
     shards = sum(ly.shard_count for ly in layouts)
+    grid_groups = {ly.grid_group for ly in layouts if ly.grid_group}
     lines = [
         "",
         "## Chunk/shard layout",
         "",
         f"- **Shard objects:** {shards} across {len(layouts)} array(s)",
+    ]
+    if grid_groups:
+        lines.append(
+            f"- **Bundled:** {len(layouts)} array(s) share {len(grid_groups)} "
+            "grid group(s) — one set of coordinate arrays and pyramid "
+            "metadata per group, not per array"
+        )
+    lines += [
         "",
         "| Array | Chunk | Shard | Chunks/shard | Codec | Levels | Shards"
-        " | Compression | Value encoding |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        " | Compression | Value encoding | Grid |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         chunk = "×".join(str(v) for v in ly.chunk_shape)
@@ -225,7 +252,7 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
         lines.append(
             f"| {ly.name} | {chunk} | {shard} | {ly.chunks_per_shard} | "
             f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} | {ratio} "
-            f"| {encoding} |"
+            f"| {encoding} | {ly.grid_group or '—'} |"
         )
     overview = sum(ly.overview_bytes for ly in layouts)
     total = sum(ly.size_bytes for ly in layouts)

@@ -161,10 +161,11 @@ def test_fetch_titiler_versions_is_best_effort_on_failure(monkeypatch):
 pytest.importorskip("rasterio")
 pytest.importorskip("rio_cogeo")
 
+from cng_benchmark.datasets.base import SourceObject  # noqa: E402
 from cng_benchmark.fixtures import generate_cog_bytes  # noqa: E402
 from cng_benchmark.formats.cog import CogAdapter  # noqa: E402
 from cng_benchmark.metrics.read import measure_read  # noqa: E402
-from cng_benchmark.metrics.write import measure_write  # noqa: E402
+from cng_benchmark.metrics.write import measure_write, measure_write_batch  # noqa: E402
 
 
 def test_write_metric_converts_and_times(tmp_path):
@@ -179,6 +180,26 @@ def test_write_metric_converts_and_times(tmp_path):
     assert by_name["write_elapsed"].value >= 0
     assert by_name["write_throughput"].value > 0
     assert by_name["write_throughput"].detail["bytes_out"] == target.stat().st_size
+
+
+def test_write_batch_metric_converts_and_times(tmp_path):
+    for name in ("a", "b"):
+        (tmp_path / f"{name}.tif").write_bytes(
+            generate_cog_bytes(size=64, blocksize=64)
+        )
+    sources = [SourceObject(name=n, uri=str(tmp_path / f"{n}.tif")) for n in ("a", "b")]
+    target = tmp_path / "bundle.tif"
+
+    metrics = measure_write_batch(
+        CogAdapter(), sources, str(target), {}, source_size=1234
+    )
+
+    assert target.exists()
+    by_name = {m.name: m for m in metrics}
+    assert by_name["write_elapsed"].value >= 0
+    assert by_name["write_throughput"].value > 0
+    assert by_name["write_throughput"].detail["bytes_out"] == target.stat().st_size
+    assert by_name["write_throughput"].detail["bytes_in"] == 1234
 
 
 def test_read_metric_reads_windows_locally(tmp_path):

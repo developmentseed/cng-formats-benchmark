@@ -87,12 +87,15 @@ def measure_read(
     windows: int = 8,
     window_size: int = 256,
     seed: int = 0,
+    band: int = 1,
 ) -> list[MetricResult]:
     """Read ``windows`` random sub-zones from the object at ``uri``.
 
     Alternates tile-aligned and tile-unaligned origins (the COG's internal
     block grid) so both access patterns are exercised. ``seed`` makes the
-    sample reproducible across runs.
+    sample reproducible across runs. ``band`` (1-based) selects which band to
+    read — a multi-band file a batched write bundled several components into
+    (#102) addresses each component by its own band.
     """
     if windows < 1 or window_size < 1:
         raise ValueError("windows and window_size must be >= 1")
@@ -104,11 +107,11 @@ def measure_read(
     bytes_read = 0
     with rasterio.open(path) as src:
         win = min(window_size, src.width, src.height)
-        block = src.block_shapes[0] if src.block_shapes else None
+        block = src.block_shapes[band - 1] if src.block_shapes else None
         origins = _random_origins(src.width, src.height, win, windows, rng, block)
         for col, row in origins:
             start = time.perf_counter()
-            data = src.read(1, window=Window(col, row, win, win))
+            data = src.read(band, window=Window(col, row, win, win))
             latencies.append(time.perf_counter() - start)
             bytes_read += int(data.nbytes)
 
@@ -152,6 +155,8 @@ def measure_zarr_read(
     windows: int = 8,
     window_size: int = 256,
     seed: int = 0,
+    group: str | None = None,
+    var_name: str | None = None,
 ) -> list[MetricResult]:
     """Read ``windows`` random chunk-range slices from the GeoZarr store at ``uri``.
 
@@ -161,12 +166,14 @@ def measure_zarr_read(
     HTTP range requests against the shard objects when ``uri`` is S3 — so this is
     the realistic partial-access pattern for a sharded cube. ``seed`` makes the
     sample reproducible across runs. Emits the same ``read_*`` metrics as the COG
-    path.
+    path. ``group``/``var_name`` address one component of a bundled store (#102)
+    — a grid subtree (``"grid0"``, …) and that component's own array name;
+    ``None`` (the defaults) reproduce today's single-component addressing.
     """
     if windows < 1 or window_size < 1:
         raise ValueError("windows and window_size must be >= 1")
     rng = random.Random(seed)
-    arr = _open_zarr_array(uri, role)
+    arr = _open_zarr_array(uri, role, group=group, var_name=var_name)
     height, width = arr.shape[-2], arr.shape[-1]
     win = min(window_size, width, height)
 
@@ -180,19 +187,31 @@ def measure_zarr_read(
     return _read_metrics(latencies, bytes_read, win)
 
 
-def _open_zarr_array(uri: str, role: str):
-    """Open the finest 2D array of a GeoZarr store (root array or multiscale 0)."""
+def _open_zarr_array(
+    uri: str, role: str, *, group: str | None = None, var_name: str | None = None
+):
+    """Open one 2D array of a GeoZarr store (its own root array, or multiscale 0).
+
+    ``group`` scopes to a bundled store's grid subtree (#102, ``None`` = the
+    store root, today's single-component addressing); ``var_name`` names the
+    array within it (``None`` defaults to
+    :data:`~cng_benchmark.formats.geozarr.DATA_VAR`, the fixed name a
+    non-batched store always uses).
+    """
     import zarr
 
     from cng_benchmark.formats.geozarr import DATA_VAR
     from cng_benchmark.storage import fsspec_storage_options, is_s3
 
+    name = var_name or DATA_VAR
     storage_options = fsspec_storage_options(role) if is_s3(uri) else None
-    group = zarr.open_group(uri, mode="r", storage_options=storage_options)
-    if DATA_VAR in group:
-        return group[DATA_VAR]
-    level_keys = sorted((k for k in group.group_keys()), key=lambda k: int(k))
-    return group[level_keys[0]][DATA_VAR]
+    root = zarr.open_group(
+        uri, mode="r", storage_options=storage_options, path=group or ""
+    )
+    if name in root:
+        return root[name]
+    level_keys = sorted((k for k in root.group_keys()), key=lambda k: int(k))
+    return root[level_keys[0]][name]
 
 
 def _require_vector():

@@ -80,11 +80,15 @@ def test_fit_shard_aligns_to_chunk_multiple_and_clamps():
     assert _fit_shard((4096, 4096), (512, 512), (2048, 2048)) == (2048, 2048)
 
 
-def test_enumerate_returns_shard_data_excluding_metadata(tmp_path):
+def test_enumerate_returns_shard_data_including_coordinate_chunks(tmp_path):
     store = _flat_store(tmp_path)
     sizes = enumerate_store_objects(store)
-    # 2048/1024 = 2 shards per side -> 4 shard objects, no zarr.json among them.
-    assert len(sizes) == 4
+    # 2048/1024 = 2 shards per side -> 4 data shard objects, plus the shared
+    # x and y coordinate arrays' own chunk (one each, well under a default
+    # chunk) -- real physical objects the store puts on S3, not excluded
+    # (#102: undercounting them was the harness/reality mismatch the issue
+    # is about; CNES's own S3 inspection counts them too).
+    assert len(sizes) == 6
     assert all(s > 0 for s in sizes)
     import os
 
@@ -92,11 +96,15 @@ def test_enumerate_returns_shard_data_excluding_metadata(tmp_path):
     assert "zarr.json" in names  # present in the store, excluded from enumeration
 
 
-def test_enumerate_excludes_the_coordinate_arrays(tmp_path):
-    # The x/y coordinate variables are metadata, not the tier-judged payload;
-    # counting their chunks would inflate `shard_count` and skew the size profile.
+def test_shard_data_files_scoped_to_one_array_excludes_coordinates(tmp_path):
+    # Scoped to the data array (what describe_layout's per-array size uses),
+    # the coordinate arrays' chunks are excluded -- they are shared overhead,
+    # never any one array's own cost.
     store = _flat_store(tmp_path, name="coords.zarr")
-    assert all(f"/{DATA_VAR}/c/" in p for p in _shard_data_files(store))
+    scoped = _shard_data_files(store, var_name=DATA_VAR)
+    assert scoped
+    assert all(f"/{DATA_VAR}/c/" in p for p in scoped)
+    assert len(scoped) < len(_shard_data_files(store))  # unscoped also finds x/y
 
 
 def test_describe_layout_reports_chunk_shard_codec(tmp_path):
@@ -109,9 +117,13 @@ def test_describe_layout_reports_chunk_shard_codec(tmp_path):
     assert ly.chunks_per_shard == 4  # (1024/512) ** 2
     assert ly.codec == "zstd"
     assert ly.multiscale_levels == 0
-    assert ly.shard_count == 4
+    assert ly.shard_count == 4  # this array's own shards only
     assert ly.overview_bytes == 0
-    assert ly.size_bytes == sum(enumerate_store_objects(store))
+    assert ly.grid_group is None
+    # size_bytes is the array's own bytes; enumerate_store_objects additionally
+    # counts the (shared, non-attributable) x/y coordinate chunks, so the two
+    # are no longer equal now that coordinate chunks are real objects (#102).
+    assert ly.size_bytes < sum(enumerate_store_objects(store))
 
 
 def test_codec_none_is_uncompressed(tmp_path):
@@ -881,3 +893,225 @@ def test_convert_honours_the_scale_offset_param(tmp_path):
     arr = zarr.open_group(target, mode="r")[DATA_VAR]
     assert [f.to_dict()["name"] for f in arr.filters] == ["scale_offset", "cast_value"]
     assert arr[0, 0] == pytest.approx(0.1234, abs=1e-6)
+
+
+# --- Bundled multi-component writes (#102) --------------------------------
+
+
+def _write_source_at(
+    path, *, value=1234, width=256, height=256, origin=(300000, 4900020)
+):
+    """A georeferenced int16 GeoTIFF at ``origin`` — same shape/CRS convention
+    as :func:`_write_source`, but with a controllable grid so two calls can be
+    made to share a grid (defaults) or deliberately not (different ``origin``
+    or ``width``/``height``)."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=width,
+        height=height,
+        count=1,
+        dtype="int16",
+        crs="EPSG:32631",
+        transform=from_origin(origin[0], origin[1], 10, 10),
+    ) as dst:
+        dst.write(np.full((height, width), value, dtype="int16"), 1)
+
+
+def test_shard_data_files_var_name_scopes_to_one_array(tmp_path):
+    # Write two arrays as siblings in one group (the shape a bundled store's
+    # grid-group takes) and confirm var_name isolates each one's own shards,
+    # while the unscoped call finds both -- and the coordinate arrays too.
+    import xarray as xr
+
+    store = str(tmp_path / "sibling.zarr")
+    # Non-zero, non-default-fill values throughout: an all-fill chunk is
+    # never written at all (zarr skips it), which would silently defeat this
+    # test's file-count assertions.
+    y = np.arange(1, 5, dtype="float64")
+    x = np.arange(1, 5, dtype="float64")
+    da_a = xr.DataArray(np.full((4, 4), 5, dtype="int16"), dims=("y", "x"))
+    ds = xr.Dataset({"a": da_a}).assign_coords(y=("y", y), x=("x", x))
+    ds.to_zarr(
+        store,
+        mode="w",
+        group="grid0",
+        zarr_format=3,
+        consolidated=False,
+        encoding={"a": {"chunks": (2, 2), "shards": (4, 4)}},
+    )
+    da_b = xr.DataArray(np.full((4, 4), 9, dtype="int16"), dims=("y", "x"))
+    xr.Dataset({"b": da_b}).to_zarr(
+        store,
+        mode="a",
+        group="grid0",
+        zarr_format=3,
+        consolidated=False,
+        encoding={"b": {"chunks": (2, 2), "shards": (4, 4)}},
+    )
+
+    a_files = _shard_data_files(store, group="grid0", var_name="a")
+    b_files = _shard_data_files(store, group="grid0", var_name="b")
+    assert len(a_files) == 1 and len(b_files) == 1
+    assert a_files != b_files
+
+    unscoped = _shard_data_files(store)
+    assert len(unscoped) == 4  # "a", "b", and the shared "x"/"y" coordinates
+
+
+def test_convert_batch_bundles_components_sharing_a_grid(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    for name, value in [("wse", 10), ("sig0", 20), ("area", 30)]:
+        _write_source_at(str(tmp_path / f"{name}.tif"), value=value)
+    sources = [
+        SourceObject(name=n, uri=str(tmp_path / f"{n}.tif"))
+        for n in ("wse", "sig0", "area")
+    ]
+
+    target = str(tmp_path / "bundle.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [64, 64], "shard_shape": [128, 128], "multiscale_levels": 0},
+    )
+
+    root = zarr.open_group(target, mode="r")
+    assert list(root.group_keys()) == ["grid0"]
+    grid0 = root["grid0"]
+    assert set(grid0.array_keys()) == {"wse", "sig0", "area", "x", "y"}
+    assert (grid0["wse"][:] == 10).all()
+    assert (grid0["sig0"][:] == 20).all()
+    assert (grid0["area"][:] == 30).all()
+    assert root.attrs["cng_benchmark:components"] == {
+        "wse": "grid0",
+        "sig0": "grid0",
+        "area": "grid0",
+    }
+
+    for name in ("wse", "sig0", "area"):
+        assert adapter.component_locator(target, name) == "grid0"
+    assert adapter.component_locator(target, "nonexistent") is None
+    assert adapter.component_locator("/some/other/store", "wse") is None
+
+
+def test_convert_batch_object_count_beats_per_component_conversion(tmp_path):
+    # The whole point of #102: bundling must produce meaningfully fewer
+    # physical shard objects than converting each component independently
+    # would (each independent store would duplicate the x/y coordinate chunks).
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    names = [f"var{i}" for i in range(6)]
+    for n in names:
+        _write_source_at(str(tmp_path / f"{n}.tif"), value=1)
+    sources = [SourceObject(name=n, uri=str(tmp_path / f"{n}.tif")) for n in names]
+
+    bundled_target = str(tmp_path / "bundled.zarr")
+    adapter = GeoZarrAdapter()
+    params = {
+        "chunk_shape": [64, 64],
+        "shard_shape": [128, 128],
+        "multiscale_levels": 0,
+    }
+    adapter.convert_batch(sources, bundled_target, params)
+    bundled_count = len(adapter.enumerate_objects(bundled_target))
+
+    per_component_count = 0
+    for i, src in enumerate(sources):
+        t = str(tmp_path / f"solo{i}.zarr")
+        solo_adapter = GeoZarrAdapter()
+        solo_adapter.convert(src.uri, t, params)
+        per_component_count += len(solo_adapter.enumerate_objects(t))
+
+    # 6 components independently: 6 * (4 data shards + 2 coordinate chunks) = 36.
+    # Bundled: 6*4 = 24 data shards + one grid's own 2 coordinate chunks = 26.
+    assert bundled_count < per_component_count
+
+
+def test_convert_batch_splits_components_by_grid(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "wse.tif"), value=1)
+    _write_source_at(str(tmp_path / "sig0.tif"), value=2)
+    # A different shape -> a different grid, must not be merged into grid0.
+    _write_source_at(str(tmp_path / "other.tif"), value=3, width=128, height=128)
+
+    sources = [
+        SourceObject(name="wse", uri=str(tmp_path / "wse.tif")),
+        SourceObject(name="sig0", uri=str(tmp_path / "sig0.tif")),
+        SourceObject(name="other", uri=str(tmp_path / "other.tif")),
+    ]
+    target = str(tmp_path / "multigrid.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 0},
+    )
+
+    root = zarr.open_group(target, mode="r")
+    assert sorted(root.group_keys()) == ["grid0", "grid1"]
+    assert adapter.component_locator(target, "wse") == "grid0"
+    assert adapter.component_locator(target, "sig0") == "grid0"
+    assert adapter.component_locator(target, "other") == "grid1"
+    assert set(root["grid0"].array_keys()) == {"wse", "sig0", "x", "y"}
+    assert set(root["grid1"].array_keys()) == {"other", "x", "y"}
+
+
+def test_describe_layout_reports_one_layout_per_bundled_component(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    for name in ("wse", "sig0"):
+        _write_source_at(str(tmp_path / f"{name}.tif"))
+    sources = [
+        SourceObject(name=n, uri=str(tmp_path / f"{n}.tif")) for n in ("wse", "sig0")
+    ]
+
+    target = str(tmp_path / "bundle.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [64, 64], "shard_shape": [128, 128], "multiscale_levels": 0},
+    )
+
+    layouts = adapter.describe_layout(target, name="ignored-for-batched")
+    assert {ly.name for ly in layouts} == {"wse", "sig0"}
+    for ly in layouts:
+        assert ly.grid_group == "grid0"
+        assert ly.kind == "geozarr"
+        assert ly.size_bytes > 0
+        assert ly.chunk_shape == [64, 64]
+
+    # A non-batched target keeps today's single-layout, grid_group=None shape.
+    solo_target = str(tmp_path / "solo.zarr")
+    GeoZarrAdapter().convert(
+        str(tmp_path / "wse.tif"),
+        solo_target,
+        {"chunk_shape": [64, 64], "shard_shape": [128, 128], "multiscale_levels": 0},
+    )
+    (solo_layout,) = GeoZarrAdapter().describe_layout(solo_target, name="wse")
+    assert solo_layout.grid_group is None
