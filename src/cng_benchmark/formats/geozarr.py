@@ -521,9 +521,7 @@ def _write_sharded(
             ]
             root_attrs = ms.chain_group_attrs(crs_wkt, entries)
         else:
-            root_attrs = ms.group_attrs(
-                crs_wkt, gt, [tuple(lv.shape) for lv in levels]
-            )
+            root_attrs = ms.group_attrs(crs_wkt, gt, [tuple(lv.shape) for lv in levels])
         xr.Dataset(attrs=root_attrs).to_zarr(
             store, mode="a", group=group, zarr_format=3, consolidated=False
         )
