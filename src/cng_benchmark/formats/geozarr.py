@@ -1201,8 +1201,7 @@ class GeoZarrAdapter(FormatAdapter):
                 data = read["data"]
                 fill_value = read["fill_value"]
                 factors = [
-                    full[i] // full[i - 1]
-                    for i in range(native_level + 1, len(full))
+                    full[i] // full[i - 1] for i in range(native_level + 1, len(full))
                 ]
                 chain_arrays = _levels(data, factors, fill_value)
                 levels_here: list[str] = []
