@@ -4,7 +4,11 @@
 # alongside example_sentinel1_rtc_geozarr.yaml (also zstd) so the S1 side of the
 # GeoZarr-vs-COG size gap is attributable to the format/overviews, not a codec
 # mismatch — the same pairing as the S2 MAJA arms. Keep the deflate config as
-# the baseline.
+# the baseline. Also the display comparison partner for that arm (#116): both
+# set the *same* display_target_resolutions, so a display_res_60m_latency_mean
+# (etc.) figure means the same ground resolution regardless of format — COG's
+# own overview ladder (naive halving) wouldn't otherwise land on the same
+# resolutions as GeoZarr's #108 target ladder.
 id: example-sentinel1-rtc-cog-zstd
 dataset: example-sentinel1-rtc
 formats:
@@ -13,6 +17,7 @@ metrics:
   - write
   - object_size
   - read
+  - display
 tiers:
   - name: warm
     min_object_bytes: 33554432    # 32 MiB
@@ -27,3 +32,10 @@ params:
     limit: 3
   samples:
     read: 1                       # sample one component per product for read
+    display: 1
+  # Same values as example_sentinel1_rtc_geozarr.yaml's GeoZarr ladder (#108) —
+  # the display comparison's whole point (#116).
+  display_target_resolutions: [20, 60, 120, 360, 720]
+  # Many repeats per tile: a trustworthy per-resolution latency number needs
+  # enough samples to average out network noise (#116; was hardcoded to 8).
+  display_tile_samples: 30

@@ -7,10 +7,13 @@ pytest.importorskip("morecantile")
 
 from cng_benchmark.fixtures import generate_cog_bytes  # noqa: E402
 from cng_benchmark.metrics.display_tiles import (  # noqa: E402
+    _read_zarr_grid,
     render_chunk_layout,
     render_zarr_chunk_layout,
     select_chunk_tiles,
+    select_resolution_tiles,
     select_zarr_chunk_tiles,
+    select_zarr_resolution_tiles,
 )
 
 
@@ -117,3 +120,139 @@ def test_ungeoreferenced_store_raises_clear_error(tmp_path):
     _write_sharded(store, data, chunk=(256, 256), shard=(512, 512), codec="none")
     with pytest.raises(RuntimeError, match="not georeferenced for display"):
         select_zarr_chunk_tiles(store)
+
+
+# --- real pyramid discovery + resolution-targeted selection (#116) ----------
+
+
+def test_read_zarr_grid_reads_real_decimations_for_a_uniform_pyramid(zarr_store):
+    # The non-#114 case: `_write_sharded`'s own multiscales doc, still the
+    # source of truth (not re-derived by walking group_keys()).
+    grid = _read_zarr_grid(zarr_store)
+    assert grid.native_resolution == pytest.approx(10.0)
+    assert grid.decimations == [1, 2, 4]
+    assert grid.level_paths == ["0", "1", "2"]
+
+
+@pytest.fixture
+def unified_bundle(tmp_path):
+    """A #114-shaped multi-resolution bundle: real 10 m + 20 m tiers, plus a
+    synthetic 60 m level -- every level a sibling top-level group at the
+    store root, not nested under either component's own group."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    def _write_source(path, value, pixel_size, size=256):
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=size,
+            height=size,
+            count=1,
+            dtype="int16",
+            crs="EPSG:32631",
+            transform=from_origin(300000, 4900020, pixel_size, pixel_size),
+        ) as dst:
+            dst.write(np.full((size, size), value, dtype="int16"), 1)
+
+    _write_source(str(tmp_path / "b2.tif"), 1, 10)
+    _write_source(str(tmp_path / "clm_r2.tif"), 2, 20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+    store = str(tmp_path / "unified.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        store,
+        {
+            "chunk_shape": [32, 32],
+            "shard_shape": [64, 64],
+            "multiscale_levels": [20, 60],
+        },
+    )
+    return store, adapter
+
+
+def test_read_zarr_grid_scopes_decimations_to_one_component_of_a_unified_bundle(
+    unified_bundle,
+):
+    store, adapter = unified_bundle
+
+    # b2 (10 m native): the whole ladder, 10 -> 20 -> 60 m.
+    b2_grid = _read_zarr_grid(
+        store, group=adapter.component_locator(store, "b2"), var_name="b2"
+    )
+    assert b2_grid.native_resolution == pytest.approx(10.0)
+    assert b2_grid.decimations == [1, 2, 6]
+    assert b2_grid.level_paths == ["0", "1", "2"]
+
+    # clm_r2 (20 m native): its own chain starts at 20 m -- never the 10 m
+    # level, where it has no data (the bug #116 found and fixed: walking
+    # group_keys() under "1" would have found nothing at all, not even this).
+    clm_grid = _read_zarr_grid(
+        store, group=adapter.component_locator(store, "clm_r2"), var_name="clm_r2"
+    )
+    assert clm_grid.native_resolution == pytest.approx(20.0)
+    assert clm_grid.decimations == [1, 3]  # relative to its OWN 20 m native
+    assert clm_grid.level_paths == ["1", "2"]
+
+
+def test_select_zarr_resolution_tiles_one_per_target_resolution(unified_bundle):
+    store, adapter = unified_bundle
+
+    tiles = select_zarr_resolution_tiles(
+        store,
+        target_resolutions=[10, 20, 60],
+        group=adapter.component_locator(store, "b2"),
+        var_name="b2",
+    )
+    assert [t.label for t in tiles] == ["res_10m", "res_20m", "res_60m"]
+    assert [t.group for t in tiles] == ["0", "1", "2"]
+    # Zoom strictly decreases as the target resolution coarsens.
+    assert tiles[0].z > tiles[1].z > tiles[2].z
+
+
+def test_select_zarr_resolution_tiles_clamps_to_a_components_own_native(
+    unified_bundle,
+):
+    # clm_r2 has no 10 m data at all -- requesting it must clamp to its own
+    # finest available level (20 m), never construct a request for a
+    # resolution/level it doesn't have (the shape of request that trips a
+    # real GeoZarrReader gap, verified separately against titiler.eopf).
+    store, adapter = unified_bundle
+
+    tiles = select_zarr_resolution_tiles(
+        store,
+        target_resolutions=[10, 20, 60],
+        group=adapter.component_locator(store, "clm_r2"),
+        var_name="clm_r2",
+    )
+    assert [t.label for t in tiles] == ["res_10m", "res_20m", "res_60m"]
+    assert [t.group for t in tiles] == ["1", "1", "2"]  # 10m clamps to 20m's own group
+
+
+def test_select_resolution_tiles_cog_has_no_group(cog_path):
+    # COG has no server-side group concept -- rio-tiler resolves its own
+    # overview by zoom -- so every tile's `.group` stays None regardless of
+    # target_resolutions.
+    tiles = select_resolution_tiles(cog_path, target_resolutions=[10, 20, 40])
+    assert tiles
+    assert all(t.group is None for t in tiles)
+    assert [t.label for t in tiles] == ["res_10m", "res_20m", "res_40m"]
+
+
+def test_select_resolution_tiles_defaults_to_the_objects_own_decimations(zarr_store):
+    # `target_resolutions=None` (unset) derives resolutions from the grid's
+    # own decimations -- today's implicit per-format behaviour, for an arm
+    # where cross-format resolution alignment isn't the point.
+    tiles = select_zarr_resolution_tiles(zarr_store)
+    assert [t.label for t in tiles] == ["res_10m", "res_20m", "res_40m"]

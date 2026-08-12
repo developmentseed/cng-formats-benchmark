@@ -128,6 +128,61 @@ def test_display_records_a_non_default_path_prefix(monkeypatch):
     assert detail["path_prefix"] == "geozarr"
 
 
+def test_display_group_query_key_overrides_group_per_tile(monkeypatch):
+    # #116: the stock router's `group=` has to differ per tile so it can
+    # ever read anything but the native level. A tile without its own
+    # `.group` (a chunk-bucket tile) keeps the shared/base query.
+    tiles = [
+        TileSpec("1chunk", 0, 0, 0, 1),  # no .group -- keeps the base query
+        TileSpec("res_20m", 1, 0, 0, 4, group="grid0/1"),
+        TileSpec("res_60m", 2, 0, 0, 9, group="grid0/2"),
+    ]
+    calls: list[str] = []
+
+    def fake_urlopen(url, timeout=None):
+        calls.append(url)
+        return _Resp(b"tile")
+
+    monkeypatch.setattr(display.urllib.request, "urlopen", fake_urlopen)
+    display.measure_display(
+        "http://titiler:8000",
+        "s3://b/k.zarr",
+        tiles,
+        samples=1,
+        path_prefix="zarr",
+        extra_query={"variable": "data", "group": "grid0/0"},
+        group_query_key="group",
+    )
+    tile_calls = [c for c in calls if "/tiles/" in c]
+    assert len(tile_calls) == 3
+    assert "group=grid0/0" in tile_calls[0]  # no .group: base query wins
+    assert "group=grid0/1" in tile_calls[1]
+    assert "group=grid0/2" in tile_calls[2]
+    # The other base query keys survive the per-tile override, every time.
+    assert all("variable=data" in c for c in tile_calls)
+
+
+def test_display_group_query_key_none_is_a_no_op(monkeypatch):
+    # Default behaviour (group_query_key unset) is byte-for-byte what it was
+    # before #116, regardless of whether a tile happens to carry `.group`.
+    tiles = [TileSpec("res_20m", 1, 0, 0, 4, group="grid0/1")]
+    calls: list[str] = []
+    monkeypatch.setattr(
+        display.urllib.request,
+        "urlopen",
+        lambda url, timeout=None: (calls.append(url), _Resp(b"tile"))[1],
+    )
+    display.measure_display(
+        "http://titiler:8000",
+        "s3://b/k.zarr",
+        tiles,
+        samples=1,
+        extra_query={"group": "grid0/0"},
+    )
+    tile_call = next(c for c in calls if "/tiles/" in c)
+    assert "group=grid0/0" in tile_call
+
+
 def test_fetch_titiler_versions_parses_healthz(monkeypatch):
     body = (
         b'{"versions": {"titiler_core": "2.2.1", "titiler_eopf": "0.10.0", '

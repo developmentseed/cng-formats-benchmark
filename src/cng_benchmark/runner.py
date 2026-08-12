@@ -918,17 +918,35 @@ def _measure_display_object(
 ) -> tuple[list[MetricResult], list[Artifact]]:
     """Run the display metric for one produced object and publish its chunk layout.
 
-    Selects chunk-crossing tiles against the *local* produced object (cheap, no
-    network), times them via TiTiler against the uploaded object, and (best-effort)
-    renders the block/chunk-grid + tile-footprint ``display_chunk_layout.png`` next
-    to it. Branches on the object kind: a raster file uses TiTiler's ``/cog``
-    endpoints + the rasterio grid; a zarr store is served by the router named by
+    Selects chunk-crossing *and* resolution-coverage tiles against the *local*
+    produced object (cheap, no network), times them via TiTiler against the
+    uploaded object, and (best-effort) renders the block/chunk-grid +
+    tile-footprint ``display_chunk_layout.png`` next to it. Branches on the
+    object kind: a raster file uses TiTiler's ``/cog`` endpoints + the
+    rasterio grid; a zarr store is served by the router named by
     ``display_titiler_path`` (default ``"zarr"``, the bench tiler's stock-xarray
     router; ``"geozarr"`` selects its ``GeoZarrReader``-backed one instead) + the
     zarr chunk grid. The two routers address the array differently -- the stock
-    router has no multiscale awareness and needs the finest level's ``group=``
-    explicit, while ``GeoZarrReader`` resolves the pyramid itself and addresses
-    the array as ``{group}:{name}`` -- so the query is built per router.
+    router has no multiscale awareness of its own (it reads whatever group its
+    query names and TiTiler resamples that on the fly) and needs the
+    resolution-appropriate level's ``group=`` explicit, *per tile* -- not once
+    for the whole scenario set, which would make it structurally incapable of
+    ever reading anything but the native level (#116) -- while ``GeoZarrReader``
+    resolves the pyramid itself from the requested zoom and addresses the
+    array as ``{group}:{name}``.
+
+    ``display_chunk_targets``/``display_target_resolutions``/
+    ``display_tile_samples`` (``config.params``, #116) control the scenario
+    set: chunk-crossing buckets (unchanged, #102's original question — the
+    cost of straddling chunks within one level) plus one tile per target
+    ground resolution (new — the cost of reading a precomputed overview vs.
+    downsampling from native, at a zoom a panning/zooming client would
+    actually generate). ``display_target_resolutions`` should be set to the
+    *same* list on a COG arm and its matched GeoZarr arm so the resulting
+    ``res_*`` labels are directly comparable across formats — see
+    :func:`~cng_benchmark.metrics.display_tiles.select_resolution_tiles`.
+    Unset, resolutions are derived from the object's own decimations
+    (today's implicit per-format behaviour, unaffected).
 
     ``locator``/``name`` address one component of a batched adapter's bundled
     object (#102) the same way :func:`_measure_object_read` does: a COG's 1-based
@@ -950,27 +968,44 @@ def _measure_display_object(
         render_chunk_layout,
         render_zarr_chunk_layout,
         select_chunk_tiles,
+        select_resolution_tiles,
         select_zarr_chunk_tiles,
+        select_zarr_resolution_tiles,
     )
 
     targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
+    target_resolutions = config.params.get("display_target_resolutions")
+    samples = int(config.params.get("display_tile_samples", 8))
     if adapter.object_kind is ObjectKind.ZARR_STORE:
         from cng_benchmark.formats.geozarr import DATA_VAR, finest_level_group
 
         var_name = name or DATA_VAR
         tiles = select_zarr_chunk_tiles(
             local_target, targets=targets, group=locator, var_name=name
+        ) + select_zarr_resolution_tiles(
+            local_target,
+            target_resolutions=target_resolutions,
+            group=locator,
+            var_name=name,
         )
         prefix = str(config.params.get("display_titiler_path", "zarr"))
+        group_query_key: str | None = None
         if prefix == "geozarr":
             # GeoZarrReader addresses a variable as "{group}:{name}", where
             # `group` is the group that declares the zarr_conventions
             # multiscales entry -- this writer's store root ("/"), or one
             # grid's own subtree ("/grid0") for a bundled store -- and
-            # resolves the multiscale level from the requested zoom itself.
+            # resolves the multiscale level from the requested zoom itself,
+            # so no per-tile override is needed here.
             group_path = f"/{locator}" if locator else "/"
             extra_query = {"variables": f"{group_path}:{var_name}"}
         else:
+            # Base query: the finest level, same as every tile got before
+            # #116 -- still correct for the chunk-bucket tiles above, which
+            # carry no `.group` of their own. Resolution-coverage tiles
+            # override `group` per fetch via `group_query_key` below, which
+            # is the whole fix: without it, every tile -- however many zooms
+            # get sampled -- would read this same finest-level query.
             extra_query = {"variable": var_name}
             level = finest_level_group(local_target, group=locator, var_name=name)
             group_path = locator
@@ -978,21 +1013,30 @@ def _measure_display_object(
                 group_path = f"{locator}/{level}" if locator else level
             if group_path is not None:
                 extra_query["group"] = group_path
+            group_query_key = "group"
         metrics = measure_display(
             titiler_endpoint,
             object_uri,
             tiles,
+            samples=samples,
             path_prefix=prefix,
             extra_query=extra_query,
+            group_query_key=group_query_key,
         )
         render = functools.partial(
             render_zarr_chunk_layout, group=locator, var_name=name
         )
     else:
-        tiles = select_chunk_tiles(local_target, targets=targets)
+        tiles = select_chunk_tiles(
+            local_target, targets=targets
+        ) + select_resolution_tiles(local_target, target_resolutions=target_resolutions)
         extra_query = {"bidx": locator} if locator else None
         metrics = measure_display(
-            titiler_endpoint, object_uri, tiles, extra_query=extra_query
+            titiler_endpoint,
+            object_uri,
+            tiles,
+            samples=samples,
+            extra_query=extra_query,
         )
         render = render_chunk_layout
 
