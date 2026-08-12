@@ -26,7 +26,7 @@ tiers:
     min_object_bytes: 104857600   # 100 MiB
 params:
   chunk_shape: [1024, 1024]
-  shard_shape: [2048, 2048]
+  shard_shape: auto  # one shard per resolution group, not a hand-picked number (#111)
   codec: zstd
   multiscale_levels: auto
   bundle_components: true
