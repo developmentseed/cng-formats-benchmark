@@ -210,6 +210,90 @@ def _resolve_pyramid_levels(
     return [2**i for i in range(depth + 1)]
 
 
+def _bundle_ladder(
+    real_gts: list[tuple[float, ...]],
+    coarsest_shape: tuple[int, int],
+    multiscale_levels: Any,
+) -> tuple[list[int], list[int]]:
+    """Return a multi-resolution bundle's unified-pyramid ladder (#112):
+    cumulative decimations for every level, and which of them is each real
+    native tier's own level.
+
+    ``real_gts`` is one geotransform per real native tier, finest first
+    (#107's grid-equality grouping already discovers them) — every finer
+    component gets a full derived chain down to the coarsest target
+    resolution instead of #109's flat-below-coarsest, so every tier needs a
+    place on ONE combined ladder, not its own separate one. The tiers
+    themselves always occupy a contiguous, strictly increasing prefix of
+    that ladder: nothing needs synthesizing *between* two tiers that are
+    both already real.
+
+    What follows the real tiers depends on ``multiscale_levels``:
+
+    * ``"auto"``/an int: a COG-style doubling extension past the *coarsest*
+      tier (:func:`_multiscale_depth`, anchored on ``coarsest_shape``) — no
+      cross-check needed, every checkpoint is either a real tier or a
+      synthesized doubling, never ambiguous.
+    * an explicit list of target resolutions: the *whole* ladder past the
+      finest tier (`#108`'s convention — coarsest last, finest excluded),
+      resolved via :func:`_resolve_pyramid_levels` anchored on the finest
+      tier's own pixel size. Every real tier beyond the finest must land on
+      one of the list's checkpoints exactly, or this raises `ValueError` —
+      a bundle's real resolutions and its configured ladder disagreeing is
+      a config bug, not something to silently misplace or drop data over.
+
+    Either way, every consecutive pair of levels in the resulting ladder is
+    verified to be a whole-number decimation of each other — not just each
+    individually a whole multiple of the finest tier — since a block-mean
+    coarsen (:func:`_levels`) can only ever step by a whole factor.
+    """
+    finest_gt = real_gts[0]
+    finest_ps = ms.pixel_size(finest_gt)
+    real_cumulative = [1]
+    for gt in real_gts[1:]:
+        factor = ms.pixel_size(gt) / finest_ps
+        rounded = round(factor)
+        if rounded <= real_cumulative[-1] or abs(factor - rounded) > 1e-6:
+            raise ValueError(
+                "bundle's native resolution groups are not on a consistent "
+                f"decimation ladder relative to the finest ({finest_ps}): "
+                f"{ms.pixel_size(gt)} is not a whole, increasing multiple of it"
+            )
+        real_cumulative.append(rounded)
+
+    if isinstance(multiscale_levels, list) and multiscale_levels:
+        full = _resolve_pyramid_levels(multiscale_levels, coarsest_shape, finest_gt)
+        missing = [c for c in real_cumulative if c not in full]
+        if missing:
+            bad = ", ".join(f"{finest_ps * c:g}" for c in missing)
+            raise ValueError(
+                f"bundle has native resolution group(s) at {bad} (in the "
+                "finest tier's units) with no matching entry in "
+                f"multiscale_levels={multiscale_levels!r} (relative to the "
+                f"finest tier's own {finest_ps:g}) -- every native tier's "
+                "resolution must appear in the ladder so its real data is "
+                "used instead of being synthesized"
+            )
+        real_levels = [full.index(c) for c in real_cumulative]
+    else:
+        depth = _multiscale_depth(multiscale_levels, coarsest_shape)
+        full = list(real_cumulative)
+        for _ in range(depth):
+            full.append(full[-1] * 2)
+        real_levels = list(range(len(real_cumulative)))
+
+    for i in range(1, len(full)):
+        if full[i] % full[i - 1] != 0:
+            raise ValueError(
+                f"multiscale ladder step from decimation {full[i - 1]} to "
+                f"{full[i]} (relative to the finest tier) is not a whole "
+                "multiple -- each level must be a whole-number coarsening "
+                "of the one before it"
+            )
+
+    return full, real_levels
+
+
 def _fit_chunk(chunk: tuple[int, int], shape: tuple[int, int]) -> tuple[int, int]:
     """Clamp a chunk to the array shape (a chunk may not exceed the array)."""
     return tuple(max(1, min(c, n)) for c, n in zip(chunk, shape, strict=True))
@@ -646,7 +730,11 @@ def _overview_bytes(
 
 
 def _read_array_meta(
-    store: str, *, group: str | None = None, var_name: str = DATA_VAR
+    store: str,
+    *,
+    group: str | None = None,
+    var_name: str = DATA_VAR,
+    levels: list[str] | None = None,
 ) -> dict:
     """Read one array's chunk/shard shape, codec and shard count from ``store``.
 
@@ -657,6 +745,13 @@ def _read_array_meta(
     (chunks-per-shard), the configured compressor name, and how many shard
     objects that one array's own chain of levels produced.
 
+    ``levels`` is the alternative addressing a multi-resolution bundle's
+    unified pyramid needs (#112): a component's chain there spans *sibling*
+    top-level groups (``"1"``, ``"2"``, …) starting at its own native tier,
+    not one ``group`` with nested integer subgroups — so instead of deriving
+    the level list from ``group``'s own children, it is given explicitly,
+    finest first, and this reads ``var_name`` from each in turn.
+
     Also reports whether the ``scale_offset`` codec chain is active and which
     dtype actually reaches disk. That distinction matters for the compression
     ratio: a scale_offset array *declares* float32 but stores the packed integer,
@@ -665,13 +760,17 @@ def _read_array_meta(
     """
     import zarr
 
-    root = zarr.open_group(store, mode="r", path=group or "")
-    if var_name in root:
-        arrays = [root[var_name]]
-    else:  # multiscale: levels live in integer-named groups
-        level_keys = sorted((k for k in root.group_keys()), key=lambda k: int(k))
-        arrays = [root[k][var_name] for k in level_keys]
-    levels = len(arrays) - 1
+    if levels is not None:
+        root = zarr.open_group(store, mode="r")
+        arrays = [root[lvl][var_name] for lvl in levels]
+    else:
+        root = zarr.open_group(store, mode="r", path=group or "")
+        if var_name in root:
+            arrays = [root[var_name]]
+        else:  # multiscale: levels live in integer-named groups
+            level_keys = sorted((k for k in root.group_keys()), key=lambda k: int(k))
+            arrays = [root[k][var_name] for k in level_keys]
+    levels_count = len(arrays) - 1
     arr = arrays[0]
 
     chunk = list(arr.chunks)
@@ -708,6 +807,13 @@ def _read_array_meta(
     # the whole pyramid, so a base-only baseline would report the pyramid's cost
     # as if it were poor compression.
     uncompressed_bytes = int(sum(int(np.prod(a.shape)) for a in arrays) * itemsize)
+    if levels is not None:
+        shard_count = sum(
+            len(_shard_data_files(store, group=lvl, var_name=var_name))
+            for lvl in levels
+        )
+    else:
+        shard_count = len(_shard_data_files(store, group=group, var_name=var_name))
     return {
         "scale_offset": scale_offset,
         "stored_dtype": stored_dtype,
@@ -715,14 +821,19 @@ def _read_array_meta(
         "shard_shape": shards,
         "chunks_per_shard": int(chunks_per_shard),
         "codec": codec,
-        "multiscale_levels": int(levels),
-        "shard_count": len(_shard_data_files(store, group=group, var_name=var_name)),
+        "multiscale_levels": int(levels_count),
+        "shard_count": shard_count,
         "uncompressed_bytes": uncompressed_bytes,
     }
 
 
 def describe_store_layout(
-    store: str, name: str, *, group: str | None = None, var_name: str = DATA_VAR
+    store: str,
+    name: str,
+    *,
+    group: str | None = None,
+    var_name: str = DATA_VAR,
+    levels: list[str] | None = None,
 ) -> GeoZarrLayout:
     """Return the :class:`GeoZarrLayout` of one array in the GeoZarr store at ``store``.
 
@@ -732,20 +843,47 @@ def describe_store_layout(
     ``x``/``y`` coordinate bytes a bundled store's components hold in common —
     so a component's reported size is what it alone costs, not an arbitrary
     slice of shared overhead.
+
+    ``levels`` addresses one component of a multi-resolution bundle's unified
+    pyramid instead (#112): the *sibling* top-level groups its own chain
+    spans, finest first — see :func:`_read_array_meta`. ``native_level`` on
+    the returned layout is ``int(levels[0])`` in that case, ``None``
+    otherwise (a single-resolution component's level 0 is native by
+    construction, nothing to disambiguate).
     """
-    meta = _read_array_meta(store, group=group, var_name=var_name)
-    total = sum(
-        os.path.getsize(p)
-        for p in _shard_data_files(store, group=group, var_name=var_name)
-    )
+    meta = _read_array_meta(store, group=group, var_name=var_name, levels=levels)
+    if levels is not None:
+        files = [
+            p
+            for lvl in levels
+            for p in _shard_data_files(store, group=lvl, var_name=var_name)
+        ]
+        # Every level but the component's own native (first) one is derived
+        # -- unlike a single array's own pyramid, "below level 0" doesn't
+        # apply here, since level 0 of the *store* may not even be this
+        # component's own native level.
+        overview_bytes = sum(
+            os.path.getsize(p)
+            for lvl in levels[1:]
+            for p in _shard_data_files(store, group=lvl, var_name=var_name)
+        )
+        grid_group = levels[0]
+        native_level = int(levels[0])
+    else:
+        files = _shard_data_files(store, group=group, var_name=var_name)
+        overview_bytes = _overview_bytes(store, group=group, var_name=var_name)
+        grid_group = group
+        native_level = None
+    total = sum(os.path.getsize(p) for p in files)
     uncompressed = meta.pop("uncompressed_bytes", 0)
     compression_ratio = uncompressed / total if total else 0.0
     return GeoZarrLayout(
         name=name,
         size_bytes=total,
         compression_ratio=compression_ratio,
-        overview_bytes=_overview_bytes(store, group=group, var_name=var_name),
-        grid_group=group,
+        overview_bytes=overview_bytes,
+        grid_group=grid_group,
+        native_level=native_level,
         **meta,
     )
 
@@ -830,8 +968,14 @@ class GeoZarrAdapter(FormatAdapter):
         # landed in, keyed by target store path — describe_layout and
         # component_locator read it back for a target this instance just
         # wrote via convert_batch (#102, mirrors the FlatGeobuf
-        # null_geometry bookkeeping pattern from #98).
+        # null_geometry bookkeeping pattern from #98). For a single-
+        # resolution bundle this is a component's whole story: one grid
+        # group holds its whole chain. For a multi-resolution bundle's
+        # unified pyramid (#112) a component's chain spans several sibling
+        # level groups instead, starting at this one (its own native
+        # level) — `_batch_unified_levels` carries the rest.
         self._batch_grid_by_target: dict[str, dict[str, str]] = {}
+        self._batch_unified_levels: dict[str, dict[str, list[str]]] = {}
 
     def target_basename(self) -> str:
         return "geozarr.zarr"
@@ -878,27 +1022,26 @@ class GeoZarrAdapter(FormatAdapter):
 
         Reads each source the same way :meth:`convert` reads its one, groups
         them by grid equality (:func:`~cng_benchmark.formats.grid.group_by_grid`
-        — shape, geotransform, CRS), and writes one grid's group of components
-        sharing the grid's coordinate arrays and pyramid metadata (written once,
-        by the first component) with each component as a sibling array named
-        for itself. A product whose components span more than one grid gets one
-        ``grid0``/``grid1``/… subtree per grid, all in this one store — bundling
-        never silently drops or misplaces a component onto the wrong grid.
+        — shape, geotransform, CRS). A single-grid bundle (one native
+        resolution — today's common case, e.g. one product's same-grid
+        variables) writes one grid's group of components sharing the grid's
+        coordinate arrays and pyramid metadata (written once, by the first
+        component) with each component as a sibling array named for itself,
+        exactly as before.
 
         When those grids sit at more than one *real* native pixel size — S2/
         MAJA's 10 m reflectance next to its 20 m masks, per #107 — grid
         equality already separates them one group per native resolution for
-        free; what this method adds is anchoring the pyramid on that fact:
-        only the coarsest native group gets a synthetic overview pyramid
-        (:meth:`_resolution_chain`), every finer native group is written flat,
-        and one combined chain doc describing the whole 10 m -> 20 m -> …
-        anchored pyramid is written once at the store root
-        (:func:`~cng_benchmark.formats.geozarr_multiscales.chain_group_attrs`)
-        — a naive per-group pyramid would otherwise have every native group
-        independently fabricate its own unrelated overview levels, the
-        fragmentation #107 is about. A single-grid bundle (one native
-        resolution) is unaffected: every group keeps its configured
-        ``multiscale_levels`` exactly as before.
+        free, and every component gets its own full chain of levels from its
+        own native tier down to the bundle's coarsest target resolution
+        (:meth:`_write_unified_pyramid`, #112): a finer tier's own overview
+        levels are never redundant with a coarser tier's, because they hold a
+        *different physical quantity* — a client reading one can't stand in
+        for a coarse view of the other. Every applicable component lands as a
+        sibling array in each shared, bare-numbered level group (``"0"``,
+        ``"1"``, …) at the store root, and one combined chain doc describing
+        the whole unified pyramid is written once
+        (:func:`~cng_benchmark.formats.geozarr_multiscales.chain_group_attrs`).
         """
         _require_rioxarray()
         import xarray as xr
@@ -936,13 +1079,6 @@ class GeoZarrAdapter(FormatAdapter):
         grid_ids = {name: f"grid{i}" for i, grp in enumerate(groups) for name in grp}
         group_by_id = {f"grid{i}": grp for i, grp in enumerate(groups)}
 
-        # S2/MAJA-style anchoring (#107): when the bundle's grid-groups sit at
-        # more than one *real* native pixel size, a finer group's own overview
-        # levels would be redundant — the next coarser native group already
-        # is the next zoomed-out tier — so only the coarsest group keeps a
-        # synthetic pyramid past its own native resolution. A single-grid
-        # bundle (today's common case, e.g. one product's same-grid variables)
-        # is unaffected: every group keeps `opts.multiscale_levels` unchanged.
         pixel_sizes: dict[str, float] | None = {}
         for grid_id, names in group_by_id.items():
             gt = ms.parse_geotransform(reads[names[0]]["geotransform"])
@@ -953,51 +1089,53 @@ class GeoZarrAdapter(FormatAdapter):
         is_multi_resolution = pixel_sizes is not None and (
             len({round(p, 6) for p in pixel_sizes.values()}) > 1
         )
-        coarsest_pixel_size = max(pixel_sizes.values()) if pixel_sizes else None
 
-        for group_names in groups:
-            grid_id = grid_ids[group_names[0]]
-            group_levels = opts.multiscale_levels
-            if is_multi_resolution and pixel_sizes[grid_id] < coarsest_pixel_size:  # type: ignore[operator]
-                group_levels = 0
+        root_attrs: dict[str, Any]
+        if is_multi_resolution:
+            assert pixel_sizes is not None
+            component_locators, component_levels, chain = self._write_unified_pyramid(
+                target, group_by_id, reads, pixel_sizes, opts
+            )
+            finest_id = min(pixel_sizes, key=lambda gid: pixel_sizes[gid])
+            crs_wkt = reads[group_by_id[finest_id][0]]["crs_wkt"]
+            root_attrs = {"cng_benchmark:components": component_locators}
+            root_attrs.update(ms.chain_group_attrs(crs_wkt, chain))
+            self._batch_unified_levels[target] = component_levels
+        else:
             # Fit against the array happens per pyramid level, inside
             # `_write_sharded` (#111) -- "auto" included; see `convert`.
             chunk = _spatial_pair(opts.chunk_shape, DEFAULT_CHUNK)
             shard = _spatial_pair(opts.shard_shape, DEFAULT_SHARD)
-            for i, name in enumerate(group_names):
-                read = reads[name]
-                data = read["data"]
-                _write_sharded(
-                    target,
-                    data,
-                    chunk=chunk,
-                    shard=shard,
-                    codec=opts.codec,
-                    crs_wkt=read["crs_wkt"],
-                    geotransform=read["geotransform"],
-                    multiscale_levels=group_levels,
-                    fill_value=read["fill_value"],
-                    scale_factor=read["scale_factor"],
-                    add_offset=read["add_offset"],
-                    scale_offset=opts.scale_offset,
-                    standard_name=read["standard_name"],
-                    group=grid_id,
-                    var_name=name,
-                    write_shared=(i == 0),
-                )
+            for group_names in groups:
+                grid_id = grid_ids[group_names[0]]
+                for i, name in enumerate(group_names):
+                    read = reads[name]
+                    data = read["data"]
+                    _write_sharded(
+                        target,
+                        data,
+                        chunk=chunk,
+                        shard=shard,
+                        codec=opts.codec,
+                        crs_wkt=read["crs_wkt"],
+                        geotransform=read["geotransform"],
+                        multiscale_levels=opts.multiscale_levels,
+                        fill_value=read["fill_value"],
+                        scale_factor=read["scale_factor"],
+                        add_offset=read["add_offset"],
+                        scale_offset=opts.scale_offset,
+                        standard_name=read["standard_name"],
+                        group=grid_id,
+                        var_name=name,
+                        write_shared=(i == 0),
+                    )
+            root_attrs = {"cng_benchmark:components": grid_ids}
+            component_locators = grid_ids
 
-        # Harness-internal bookkeeping only — not part of the published
-        # zarr_conventions — so a reader (or describe_layout) doesn't have to
-        # re-derive grid equality itself.
-        root_attrs: dict[str, Any] = {"cng_benchmark:components": grid_ids}
-        if is_multi_resolution:
-            assert pixel_sizes is not None
-            chain = self._resolution_chain(target, group_by_id, reads, pixel_sizes)
-            finest_id = min(pixel_sizes, key=lambda gid: pixel_sizes[gid])  # type: ignore[index]
-            crs_wkt = reads[group_by_id[finest_id][0]]["crs_wkt"]
-            root_attrs.update(ms.chain_group_attrs(crs_wkt, chain))
-
-        self._batch_grid_by_target[target] = grid_ids
+        self._batch_grid_by_target[target] = component_locators
+        # Harness-internal bookkeeping (`cng_benchmark:components`) is not
+        # part of the published zarr_conventions — a reader (or
+        # describe_layout) doesn't have to re-derive grid equality itself.
         # A second `to_zarr(mode="a")` write to the *same* group with a
         # different `.attrs` silently replaces the group's existing attrs
         # rather than merging (the bug fixed in #103 for a bundled flat
@@ -1007,68 +1145,112 @@ class GeoZarrAdapter(FormatAdapter):
             target, mode="a", zarr_format=3, consolidated=False
         )
 
-    def _resolution_chain(
+    def _write_unified_pyramid(
         self,
         target: str,
         group_by_id: dict[str, list[str]],
         reads: dict[str, dict],
         pixel_sizes: dict[str, float],
-    ) -> list[ms.ChainEntry]:
-        """Build the cross-group anchored-pyramid chain for a multi-resolution
-        bundle (#107): finest native tier first.
+        opts: GeoZarrParams,
+    ) -> tuple[dict[str, str], dict[str, list[str]], list[ms.ChainEntry]]:
+        """Write a multi-resolution bundle's unified pyramid (#112): every
+        component gets its own full chain of levels from its own native tier
+        through the bundle's coarsest target resolution, landing as a
+        sibling array in each shared, bare-numbered level group (``"0"``,
+        ``"1"``, …, not #109's per-tier ``grid0``/``grid1`` subtrees) at the
+        store root alongside every other applicable component.
 
-        Every non-coarsest grid-group contributes one flat entry (its "next
-        level down" is the next native tier's group, not a synthetic
-        downsample of its own array). The coarsest grid-group contributes its
-        own base entry *and* one entry per overview level it actually wrote —
-        read back from the store this call just finished writing, rather than
-        recomputed, so the chain's metadata can never drift from what is
-        actually on disk.
+        Returns the per-component locator (its own native level, as a
+        string — :meth:`component_locator`'s contract), the per-component
+        full list of level groups it actually has data at (for
+        :func:`describe_store_layout` to gather its shards from), and the
+        bundle-wide chain of
+        :class:`~cng_benchmark.formats.geozarr_multiscales.ChainEntry` —
+        one per *level*, not per component — for the root metadata doc.
         """
-        import zarr
+        ordered_grid_ids = sorted(pixel_sizes, key=lambda gid: pixel_sizes[gid])
+        real_gts: list[tuple[float, ...]] = []
+        for grid_id in ordered_grid_ids:
+            gt = ms.parse_geotransform(reads[group_by_id[grid_id][0]]["geotransform"])
+            assert gt is not None  # guaranteed by the pixel-size pass in convert_batch
+            real_gts.append(gt)
+        coarsest_shape = tuple(
+            reads[group_by_id[ordered_grid_ids[-1]][0]]["data"].shape
+        )
 
-        ordered = sorted(pixel_sizes, key=lambda gid: pixel_sizes[gid])
-        coarsest_id = ordered[-1]
+        full, real_levels = _bundle_ladder(
+            real_gts, coarsest_shape, opts.multiscale_levels
+        )
 
-        entries: list[ms.ChainEntry] = []
-        for grid_id in ordered[:-1]:
-            rep = reads[group_by_id[grid_id][0]]
-            gt = ms.parse_geotransform(rep["geotransform"])
-            assert gt is not None  # guaranteed by the pixel-size pass below
-            entries.append(
-                ms.ChainEntry(asset=grid_id, gt=gt, shape=tuple(rep["data"].shape))
-            )
+        chunk = _spatial_pair(opts.chunk_shape, DEFAULT_CHUNK)
+        shard = _spatial_pair(opts.shard_shape, DEFAULT_SHARD)
 
-        coarsest_rep = reads[group_by_id[coarsest_id][0]]
-        coarsest_gt = ms.parse_geotransform(coarsest_rep["geotransform"])
-        assert coarsest_gt is not None
-        var_name = group_by_id[coarsest_id][0]
-        root = zarr.open_group(target, mode="r", path=coarsest_id)
-        if var_name in root:
-            # Flat: this bundle's coarsest tier got no overview levels either
-            # (e.g. `multiscale_levels: 0`, or it is already tile-sized).
-            entries.append(
-                ms.ChainEntry(
-                    asset=coarsest_id,
-                    gt=coarsest_gt,
-                    shape=tuple(coarsest_rep["data"].shape),
-                )
-            )
-        else:
-            for lvl_key in sorted((k for k in root.group_keys()), key=int):
-                level = int(lvl_key)
-                shape = tuple(root[lvl_key][var_name].shape)
-                entries.append(
-                    ms.ChainEntry(
-                        asset=f"{coarsest_id}/{lvl_key}",
-                        gt=ms.decimate(coarsest_gt, 2**level),
-                        shape=shape,
+        component_locator: dict[str, str] = {}
+        component_levels: dict[str, list[str]] = {}
+        written_levels: set[int] = set()
+        # Every level's representative gt/shape, filled in as components
+        # reach it, for the bundle-wide chain doc -- any one component's
+        # array at a level describes that level's shared grid.
+        level_gt: dict[int, tuple[float, ...]] = {}
+        level_shape: dict[int, tuple[int, int]] = {}
+
+        for tier_index, grid_id in enumerate(ordered_grid_ids):
+            native_level = real_levels[tier_index]
+            for name in group_by_id[grid_id]:
+                read = reads[name]
+                data = read["data"]
+                fill_value = read["fill_value"]
+                factors = [
+                    full[i] // full[i - 1]
+                    for i in range(native_level + 1, len(full))
+                ]
+                chain_arrays = _levels(data, factors, fill_value)
+                levels_here: list[str] = []
+                for j, level_data in enumerate(chain_arrays):
+                    level_index = native_level + j
+                    level_decimation = full[level_index] // full[native_level]
+                    level_gt_tuple = ms.decimate(real_gts[tier_index], level_decimation)
+                    geotransform = " ".join(str(v) for v in level_gt_tuple)
+                    group_path = str(level_index)
+                    _write_sharded(
+                        target,
+                        level_data,
+                        chunk=chunk,
+                        shard=shard,
+                        codec=opts.codec,
+                        crs_wkt=read["crs_wkt"],
+                        geotransform=geotransform,
+                        multiscale_levels=0,
+                        fill_value=fill_value,
+                        scale_factor=read["scale_factor"],
+                        add_offset=read["add_offset"],
+                        scale_offset=opts.scale_offset,
+                        standard_name=read["standard_name"],
+                        group=group_path,
+                        var_name=name,
+                        write_shared=(level_index not in written_levels),
                     )
-                )
-        return entries
+                    written_levels.add(level_index)
+                    level_gt.setdefault(level_index, level_gt_tuple)
+                    level_shape.setdefault(level_index, tuple(level_data.shape))
+                    levels_here.append(group_path)
+                component_levels[name] = levels_here
+                component_locator[name] = levels_here[0]
+
+        chain = [
+            ms.ChainEntry(asset=str(i), gt=level_gt[i], shape=level_shape[i])
+            for i in range(len(full))
+        ]
+        return component_locator, component_levels, chain
 
     def component_locator(self, target: str, name: str) -> str | None:
-        """The grid group ``name``'s array lives under, for a batched ``target``."""
+        """The grid group ``name``'s array lives under, for a batched ``target``.
+
+        Its own *native* level for a multi-resolution bundle's unified
+        pyramid (#112) — the full chain from there through the coarsest
+        target resolution is in ``describe_layout``'s territory, not this
+        one-string-per-component contract.
+        """
         return self._batch_grid_by_target.get(target, {}).get(name)
 
     def describe_grouping_lever(self) -> str:
@@ -1084,11 +1266,22 @@ class GeoZarrAdapter(FormatAdapter):
         """Return the produced store's chunk/shard layout.
 
         One array for a non-batched target; one per component, each scoped to
-        its own grid group, for a target :meth:`convert_batch` just wrote.
+        its own grid group, for a target :meth:`convert_batch` just wrote —
+        or, for a multi-resolution bundle's unified pyramid (#112), scoped to
+        the full list of sibling level groups that component's own chain
+        spans (:attr:`_batch_unified_levels`), not just its native one.
         """
         grid_ids = self._batch_grid_by_target.get(target)
         if grid_ids is None:
             return [describe_store_layout(target, name or self.name)]
+        unified_levels = self._batch_unified_levels.get(target)
+        if unified_levels is not None:
+            return [
+                describe_store_layout(
+                    target, comp_name, var_name=comp_name, levels=levels
+                )
+                for comp_name, levels in unified_levels.items()
+            ]
         return [
             describe_store_layout(target, comp_name, group=grid_id, var_name=comp_name)
             for comp_name, grid_id in grid_ids.items()

@@ -5,12 +5,15 @@
 # one sharded 2D GeoZarr store per product (`bundle_components: true`):
 # components are grouped by native pixel grid, which already separates MAJA's
 # 10 m reflectance/R1 masks from its 20 m R2 masks one group per native
-# resolution, and only the coarsest native group gets a synthetic overview
-# pyramid past its own resolution — a finer group's own pyramid would just be
-# redundant with the coarser native group that already exists in the same
-# product (#107). Profiles the per-product object-size distribution + a
-# set-level roll-up — the head-to-head structural comparison against the COG
-# arm, from the same canonical source.
+# resolution (#107), and every component — 10 m and 20 m alike — gets its own
+# full chain of overview levels down to the coarsest target resolution,
+# landing as a sibling array in each shared level group alongside every other
+# applicable component (#112): a 10 m band's own overviews are never
+# redundant with the 20 m tier's, since they hold a *different physical
+# quantity* — a client can't read one in place of a coarse view of the other.
+# Profiles the per-product object-size distribution + a set-level roll-up —
+# the head-to-head structural comparison against the COG arm, from the same
+# canonical source.
 #
 # Run with `--dataset configs/datasets/example_sentinel2_maja.yaml` (chart:
 # runner.datasetFile). The component picks are NOT here — they live in the dataset
@@ -44,20 +47,20 @@ params:
   chunk_shape: [1024, 1024]
   shard_shape: auto
   codec: zstd
-  # Overview pyramid, /2 down to roughly a tile — the analogue of the COG arm's
-  # overviews. Without it the tile server downsamples full-resolution chunks for
-  # every zoomed-out tile, so the display comparison would measure the missing
-  # pyramid rather than the format (#71). `auto` derives the depth from the
-  # scene; with bundling on, only the coarsest native resolution group
-  # (MAJA's 20 m R2 masks) actually builds this pyramid — the 10 m group is
-  # written flat, since the 20 m group already is its "next zoomed-out tier"
-  # (#107).
-  multiscale_levels: auto
+  # Overview pyramid, anchored on the EOPF S1-tiling/S2 cross-mission target
+  # ladder (10 m native -> 20 -> 60 -> 120 -> 360 -> 720 m; #107, #108),
+  # matching the S1 RTC arm so a viewer built against one product's pyramid
+  # shape works against the other unmodified. "20" matches MAJA's own real
+  # 20 m R2-mask tier (used as real data, not synthesized, #112) — every
+  # bundled component, 10 m and 20 m alike, gets its own full chain through
+  # every one of these levels, so a coarse-zoom read never comes up empty
+  # for whichever band happens not to be the coarsest tier (#112).
+  multiscale_levels: [20, 60, 120, 360, 720]
   # Group this product's components by native pixel grid — MAJA's 10 m
   # reflectance/R1 masks and 20 m R2 masks land in separate groups for free
-  # (grid equality), so the pyramid can anchor on those real resolutions
-  # instead of every component fabricating its own from-scratch overview
-  # chain (#107, mitigates the per-component object fragmentation from #105).
+  # (grid equality), which the unified pyramid above anchors on rather than
+  # every component fabricating its own from-scratch overview chain (#107,
+  # mitigates the per-component object fragmentation from #105).
   bundle_components: true
   # Encode MAJA's reflectance quantification (DN = reflectance x 10000) in the
   # array's own codec pipeline (`scale_offset` + `cast_value`) instead of leaving

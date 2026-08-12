@@ -129,6 +129,44 @@ def test_summary_flags_bundled_geozarr_components_sharing_a_grid():
     assert "| sig0 | 512×512 | 1024×1024 | 4 | zstd | 0 | 4 | — | — | grid0 |" in md
 
 
+def test_summary_states_native_vs_derived_levels_for_a_unified_pyramid():
+    # #112: a multi-resolution bundle's unified pyramid can start a
+    # component at any level -- the report has to say which of its levels
+    # are its own measured data and which are derived, not leave a reader
+    # to assume level 0 is always native.
+    run = _sample_run()
+    run.format_id = "geozarr"
+    run.object_layouts = [
+        GeoZarrLayout(
+            name="b2",
+            size_bytes=200,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=3,
+            shard_count=4,
+            grid_group="0",
+            native_level=0,
+        ),
+        GeoZarrLayout(
+            name="clm_r2",
+            size_bytes=180,
+            chunk_shape=[512, 512],
+            shard_shape=[1024, 1024],
+            chunks_per_shard=4,
+            codec="zstd",
+            multiscale_levels=2,
+            shard_count=3,
+            grid_group="1",
+            native_level=1,
+        ),
+    ]
+    md = render_markdown_summary(run)
+    assert "| 0 native, 1-3 derived |" in md
+    assert "| 1 native, 2-3 derived |" in md
+
+
 def test_summary_flags_bundled_cog_band_names():
     # #102: a multi-band COG bundling several components must still say which
     # band is which component.

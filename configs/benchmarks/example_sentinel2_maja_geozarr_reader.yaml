@@ -28,7 +28,7 @@ params:
   chunk_shape: [1024, 1024]
   shard_shape: auto  # one shard per resolution group, not a hand-picked number (#111)
   codec: zstd
-  multiscale_levels: auto
+  multiscale_levels: [20, 60, 120, 360, 720]  # matches the stock-router arm (#112)
   bundle_components: true
   scale_offset: true
   scope: product-set     # product (one scene) | product-set (many)

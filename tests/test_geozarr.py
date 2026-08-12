@@ -1407,13 +1407,13 @@ def test_describe_layout_reports_one_layout_per_bundled_component(tmp_path):
 
 
 def test_convert_batch_anchors_the_pyramid_on_native_resolution_groups(tmp_path):
-    # The #107 case: a 10 m component and a 20 m component in one bundle.
-    # Grid equality already splits them one group per native resolution; the
-    # finer group must be written flat (its "next zoomed-out tier" is the
-    # coarser native group, not a synthetic downsample of itself), only the
-    # coarsest group keeps its configured pyramid, and one combined chain doc
-    # at the store root ties the two groups together with the *real* scale
-    # ratio between them (2x for 10 -> 20 m here, never assumed).
+    # The #107/#112 case: a 10 m component and a 20 m component in one
+    # bundle. Grid equality already splits them one native tier apart; #109
+    # used to write the finer tier flat (wrong -- the coarser tier holds a
+    # *different physical quantity*, not a usable coarse view of the finer
+    # one), #112 corrects it: b2 (10 m) gets its own full derived chain all
+    # the way to the bundle's coarsest target resolution, landing as a
+    # sibling alongside clm_r2's own real data at every level from 20 m on.
     pytest.importorskip("rasterio")
     pytest.importorskip("rioxarray")
     import zarr
@@ -1436,30 +1436,213 @@ def test_convert_batch_anchors_the_pyramid_on_native_resolution_groups(tmp_path)
         {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 2},
     )
 
+    # Ladder: 10 m (real) -> 20 m (real) -> 40 m -> 80 m (2 synthetic levels
+    # past the coarsest real tier, per multiscale_levels: 2). b2 starts at
+    # level 0 and has all 4; clm_r2 starts at level 1 and has the last 3.
     layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
-    # The finer (10 m) group is flat, regardless of the configured depth...
-    assert layouts["b2"].multiscale_levels == 0
-    # ...only the coarsest (20 m) group actually built the configured pyramid.
-    assert layouts["clm_r2"].multiscale_levels == 2
+    assert layouts["b2"].native_level == 0
+    assert layouts["b2"].multiscale_levels == 3  # 20, 40, 80 m, all derived
+    assert layouts["clm_r2"].native_level == 1
+    assert layouts["clm_r2"].multiscale_levels == 2  # 40, 80 m, derived from its own 20 m
 
     root = zarr.open_group(target, mode="r")
-    assert list(root["grid0"].group_keys()) == []  # b2: flat, no sublevels
-    assert sorted(root["grid1"].group_keys(), key=int) == ["0", "1", "2"]
+    assert sorted(root.group_keys(), key=int) == ["0", "1", "2", "3"]
+    # Level 0 (10 m) is b2-only -- nothing coarser-native belongs at the
+    # finest level, by definition.
+    assert set(root["0"].array_keys()) == {"b2", "x", "y"}
+    # Every level from 20 m on holds *both* components as siblings: b2's own
+    # derived continuation next to clm_r2's real data (20 m) or its own
+    # continuation (40/80 m) -- #112's whole point, not #109's flat b2.
+    for level in ("1", "2", "3"):
+        assert set(root[level].array_keys()) == {"b2", "clm_r2", "x", "y"}
 
     layout = root.attrs["multiscales"]["layout"]
-    assert [e["asset"] for e in layout] == ["grid0", "grid1/0", "grid1/1", "grid1/2"]
+    assert [e["asset"] for e in layout] == ["0", "1", "2", "3"]
     assert "derived_from" not in layout[0]
     # 10 -> 20 m really is a halving here, but it is *computed*, not assumed --
     # see test_chain_multiscales_attrs_uses_real_ratios_not_assumed_halving.
-    assert layout[1]["derived_from"] == "grid0"
+    assert layout[1]["derived_from"] == "0"
     assert layout[1]["transform"]["scale"] == [2.0, 2.0]
-    assert layout[2]["derived_from"] == "grid1/0"
+    assert layout[2]["derived_from"] == "1"
     assert layout[2]["transform"]["scale"] == [2.0, 2.0]
-    assert layout[3]["derived_from"] == "grid1/1"
+    assert layout[3]["derived_from"] == "2"
     assert layout[3]["transform"]["scale"] == [2.0, 2.0]
     # The root's own bookkeeping attrs survive alongside the chain doc (must
     # not be wiped by the same-group-attrs-replace pitfall fixed in #103).
-    assert root.attrs["cng_benchmark:components"] == {"b2": "grid0", "clm_r2": "grid1"}
+    assert root.attrs["cng_benchmark:components"] == {"b2": "0", "clm_r2": "1"}
+
+
+def test_convert_batch_unified_pyramid_multi_hop_derivation(tmp_path):
+    # #112's acceptance test: a 10 m + 20 m real bundle with an explicit
+    # ladder that adds a *synthetic* 60 m step (a 3x hop, not a halving) --
+    # proves the 10 m component's own chain correctly walks two hops with
+    # two different factors (10->20 is 2x, 20->60 is 3x), landing its own
+    # derived 60 m data next to the 20 m component's own single-hop 60 m
+    # derivation, not just the simple one-hop case the main test covers.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "b2.tif"), value=1, pixel_size=10)
+    _write_source_at(str(tmp_path / "clm_r2.tif"), value=2, pixel_size=20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+
+    target = str(tmp_path / "multihop.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        # "20" matches the real 20 m tier (used as real data); "60" is the
+        # synthetic 3x hop past it.
+        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": [20, 60]},
+    )
+
+    root = zarr.open_group(target, mode="r")
+    assert sorted(root.group_keys(), key=int) == ["0", "1", "2"]
+    assert set(root["0"].array_keys()) == {"b2", "x", "y"}
+    # Both components present, real or derived, at 20 m *and* 60 m.
+    for level in ("1", "2"):
+        assert set(root[level].array_keys()) == {"b2", "clm_r2", "x", "y"}
+
+    layout = root.attrs["multiscales"]["layout"]
+    assert [e["asset"] for e in layout] == ["0", "1", "2"]
+    assert layout[1]["transform"]["scale"] == [2.0, 2.0]  # 10 -> 20 m
+    assert layout[2]["transform"]["scale"] == [3.0, 3.0]  # 20 -> 60 m, not 4x
+
+    layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
+    assert layouts["b2"].native_level == 0
+    assert layouts["b2"].multiscale_levels == 2  # 20 m and 60 m, both derived
+    assert layouts["clm_r2"].native_level == 1
+    assert layouts["clm_r2"].multiscale_levels == 1  # 60 m only, derived
+
+
+def test_convert_batch_unified_pyramid_rejects_a_ladder_mismatch(tmp_path):
+    # #112: an explicit multiscale_levels list that has no entry matching a
+    # real native tier must fail loudly, not silently misplace or drop that
+    # tier's data.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "b2.tif"), value=1, pixel_size=10)
+    _write_source_at(str(tmp_path / "clm_r2.tif"), value=2, pixel_size=20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+
+    with pytest.raises(ValueError, match="no matching entry"):
+        GeoZarrAdapter().convert_batch(
+            sources,
+            str(tmp_path / "bad.zarr"),
+            # 30 matches neither the real 20 m tier nor a valid doubling of it.
+            {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": [30, 60]},
+        )
+
+
+def test_convert_batch_unified_pyramid_accepts_the_maja_shaped_ladder(tmp_path):
+    # The real MAJA case this fix targets: a bundle with real 10 m and 20 m
+    # tiers and the EOPF cross-mission ladder as its explicit
+    # multiscale_levels -- "20" matches the real 20 m tier exactly (used as
+    # real data, not synthesized), so this must write cleanly, not raise.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "b2.tif"), value=1, pixel_size=10)
+    _write_source_at(str(tmp_path / "clm_r2.tif"), value=2, pixel_size=20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+
+    target = str(tmp_path / "maja-shaped.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {
+            "chunk_shape": [32, 32],
+            "shard_shape": [64, 64],
+            "multiscale_levels": [20, 60, 120, 360, 720],
+        },
+    )
+
+    root = zarr.open_group(target, mode="r")
+    assert sorted(root.group_keys(), key=int) == ["0", "1", "2", "3", "4", "5"]
+    layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
+    assert layouts["b2"].multiscale_levels == 5  # 20/60/120/360/720, all derived
+    assert layouts["clm_r2"].multiscale_levels == 4  # 60/120/360/720, derived from real 20 m
+
+
+def test_convert_batch_unified_pyramid_produces_more_objects_than_the_flattened_bug(
+    tmp_path,
+):
+    # #112's own stated tradeoff: the unified pyramid must produce *more*
+    # shard objects than #109's flattened version did for the same input --
+    # the old lower count came from silently dropping data, not efficiency.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "b2.tif"), value=1, pixel_size=10)
+    _write_source_at(str(tmp_path / "clm_r2.tif"), value=2, pixel_size=20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+    params = {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 2}
+
+    target = str(tmp_path / "unified.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(sources, target, params)
+    unified_count = len(adapter.enumerate_objects(target))
+
+    # #109's flattened shape for the same input: b2 flat (1 level), clm_r2
+    # with its own configured pyramid (3 levels) -- reconstructed directly
+    # via _write_sharded rather than resurrecting the old convert_batch
+    # branch, since that branch no longer exists (superseded, not toggled).
+    flat_target = str(tmp_path / "flat.zarr")
+    _write_sharded(
+        flat_target,
+        (np.arange(256 * 256, dtype="int16") % 999).reshape(256, 256),
+        chunk=(32, 32),
+        shard=(64, 64),
+        codec="zstd",
+        crs_wkt=UTM31N_WKT,
+        geotransform="300000.0 10.0 0.0 4900020.0 0.0 -10.0",
+        multiscale_levels=0,
+        group="grid0",
+        var_name="b2",
+    )
+    _write_sharded(
+        flat_target,
+        (np.arange(256 * 256, dtype="int16") % 999).reshape(256, 256),
+        chunk=(32, 32),
+        shard=(64, 64),
+        codec="zstd",
+        crs_wkt=UTM31N_WKT,
+        geotransform="300000.0 20.0 0.0 4900020.0 0.0 -20.0",
+        multiscale_levels=2,
+        group="grid1",
+        var_name="clm_r2",
+    )
+    flat_count = len(enumerate_store_objects(flat_target))
+
+    assert unified_count > flat_count
 
 
 def test_convert_batch_shard_shape_auto_fits_each_resolution_group(tmp_path):
@@ -1495,10 +1678,14 @@ def test_convert_batch_shard_shape_auto_fits_each_resolution_group(tmp_path):
 
     layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
     # 277 -> next 64-multiple is 320 (5 * 64); 139's is 192 (3 * 64) -- two
-    # different groups, two different auto-fitted shard shapes, each still
-    # exactly one shard.
+    # different native tiers, two different auto-fitted shard shapes at
+    # their own native level, each still exactly one shard there.
     assert layouts["b2"].shard_shape == [320, 320]
-    assert layouts["b2"].shard_count == 1
+    # b2 (10 m) also carries a derived 20 m level alongside clm_r2's own
+    # real data there (#112's unified pyramid, not #109's flatten) -- one
+    # shard per level, two levels, not the single-level flat store this
+    # test predates.
+    assert layouts["b2"].shard_count == 2
     assert layouts["clm_r2"].shard_shape == [192, 192]
     assert layouts["clm_r2"].shard_count == 1
 
