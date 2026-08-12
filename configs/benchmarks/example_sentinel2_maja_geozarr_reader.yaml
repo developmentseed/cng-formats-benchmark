@@ -29,6 +29,7 @@ params:
   shard_shape: [2048, 2048]
   codec: zstd
   multiscale_levels: auto
+  bundle_components: true
   scale_offset: true
   scope: product-set     # product (one scene) | product-set (many)
   products:

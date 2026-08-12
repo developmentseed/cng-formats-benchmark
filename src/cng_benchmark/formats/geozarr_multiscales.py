@@ -41,7 +41,7 @@ metadata is unit-testable in CI without the geo stack.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 #: A level is only worth writing while its shorter side stays at or above this,
 #: i.e. coarsen down to roughly one tile — the rule GDAL follows for COG
@@ -81,6 +81,16 @@ def parse_geotransform(geotransform: str) -> tuple[float, ...] | None:
     except ValueError:
         return None
     return tuple(vals) if len(vals) == 6 else None
+
+
+def pixel_size(gt: tuple[float, ...]) -> float:
+    """Return the ground sampling distance (x pixel size) a geotransform implies.
+
+    Used to rank a bundle's grid-groups finest-to-coarsest and to compute the
+    *real* scale ratio between two native resolution tiers (#107) — 2.0 for a
+    10 m -> 20 m step, 3.0 for 20 m -> 60 m, never assumed to be a halving.
+    """
+    return abs(gt[1])
 
 
 def decimate(gt: tuple[float, ...], decimation: int) -> tuple[float, ...]:
@@ -328,6 +338,105 @@ def group_attrs(
     }
     if gt is not None:
         conventions["spatial"] = spatial_attrs(gt, shapes[0], dimensions=dimensions)
+    proj = proj_attrs(crs_wkt)
+    if proj:
+        conventions["geo-proj"] = proj
+    return zarr_cm.create_many(conventions)
+
+
+class ChainEntry(NamedTuple):
+    """One physical resolution tier in a cross-group anchored pyramid (#107).
+
+    ``asset`` is the zarr group path relative to the store root — a native
+    tier's own grid-group subtree (e.g. ``"grid0"``) for a flat group, or a
+    level within the coarsest tier's own internal pyramid (e.g.
+    ``"grid2/1"``). Unlike :func:`multiscales_attrs`'s levels, which are
+    always one array's own integer-named children, entries here can point
+    across sibling grid-group subtrees, because a finer native tier's "next
+    level down" is a different, already-native group, not a synthetic
+    downsample of its own array.
+    """
+
+    asset: str
+    gt: tuple[float, ...]
+    shape: tuple[int, int]
+
+
+def _chain_layout_entry(
+    entry: ChainEntry, previous: ChainEntry | None
+) -> dict[str, Any]:
+    """Return one ``multiscales.layout`` entry for a cross-group chain.
+
+    Unlike :func:`_layout_entry`, the scale is the *real* ratio between two
+    tiers' pixel sizes — 2.0 for a 10 m -> 20 m step, 3.0 for 20 m -> 60 m,
+    never assumed to be a halving — and ``asset``/``derived_from`` are the
+    entries' own group paths rather than bare level numbers.
+    """
+    if previous is None:
+        return {
+            "asset": entry.asset,
+            "transform": {"scale": [1.0, 1.0], "translation": [0.0, 0.0]},
+        }
+    scale = pixel_size(entry.gt) / pixel_size(previous.gt)
+    return {
+        "asset": entry.asset,
+        "derived_from": previous.asset,
+        "transform": {"scale": [scale, scale], "translation": [0.0, 0.0]},
+        "resampling_method": RESAMPLING_METHOD,
+    }
+
+
+def chain_multiscales_attrs(entries: list[ChainEntry]) -> dict[str, Any]:
+    """Return the ``multiscales`` data for a cross-group anchored pyramid.
+
+    Generalises :func:`multiscales_attrs` from "one array's own integer-named
+    levels, always a 2x halving" to an ordered chain of *any* grid-group's
+    tiers at their real pixel sizes — the S2/MAJA case (#107), where the
+    "next level down" from a 10 m native group is a 20 m *native* group, not
+    a synthetic halving of the 10 m array. Each entry already carries its own
+    tier's real geotransform, so no ``decimate`` is needed here the way
+    :func:`multiscales_attrs` needs it for a single array's derived levels.
+    """
+    import zarr_cm
+
+    layout = []
+    previous: ChainEntry | None = None
+    for entry in entries:
+        item = _chain_layout_entry(entry, previous)
+        item["spatial:transform"] = spatial_transform(entry.gt)
+        item["spatial:shape"] = [int(entry.shape[0]), int(entry.shape[1])]
+        layout.append(item)
+        previous = entry
+    return dict(
+        zarr_cm.multiscales.create(
+            layout=tuple(layout), resampling_method=RESAMPLING_METHOD
+        )
+    )
+
+
+def chain_group_attrs(
+    crs_wkt: str,
+    entries: list[ChainEntry],
+    *,
+    dimensions: tuple[str, str] = ("y", "x"),
+) -> dict[str, Any]:
+    """Build the store-root attributes for a cross-group anchored pyramid.
+
+    Written once per bundle, at the store root, when a bundle spans more than
+    one native resolution (#107): each grid-group still carries its own
+    :func:`group_attrs` doc describing its own tier in isolation (harmless,
+    if locally incomplete on its own), and this is the whole chain — finest
+    tier first — that a resolution-aware reader needs to walk from one
+    native group to the next, and on into the coarsest tier's own synthetic
+    overview levels.
+    """
+    import zarr_cm
+
+    finest = entries[0]
+    conventions: dict[str, Any] = {
+        "multiscales": chain_multiscales_attrs(entries),
+        "spatial": spatial_attrs(finest.gt, finest.shape, dimensions=dimensions),
+    }
     proj = proj_attrs(crs_wkt)
     if proj:
         conventions["geo-proj"] = proj
