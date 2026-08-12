@@ -234,8 +234,8 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
     lines += [
         "",
         "| Array | Chunk | Shard | Chunks/shard | Codec | Levels | Shards"
-        " | Compression | Value encoding | Grid |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        " | Compression | Value encoding | Grid | Native vs. derived |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for ly in layouts:
         chunk = "×".join(str(v) for v in ly.chunk_shape)
@@ -249,10 +249,21 @@ def _render_chunk_shard_layout(layouts: list) -> list[str]:
                 encoding += f" → {ly.stored_dtype}"
         else:
             encoding = ly.stored_dtype or "—"
+        # A multi-resolution bundle's unified pyramid (#112) can start a
+        # component at any level, not just 0 — say plainly which of its
+        # levels are its own measured data and which are derived, rather
+        # than leaving a reader to assume level 0 is always native.
+        if ly.native_level is None:
+            native = "—"
+        elif ly.multiscale_levels:
+            last = ly.native_level + ly.multiscale_levels
+            native = f"{ly.native_level} native, {ly.native_level + 1}-{last} derived"
+        else:
+            native = f"{ly.native_level} native"
         lines.append(
             f"| {ly.name} | {chunk} | {shard} | {ly.chunks_per_shard} | "
             f"{ly.codec} | {ly.multiscale_levels} | {ly.shard_count} | {ratio} "
-            f"| {encoding} | {ly.grid_group or '—'} |"
+            f"| {encoding} | {ly.grid_group or '—'} | {native} |"
         )
     overview = sum(ly.overview_bytes for ly in layouts)
     total = sum(ly.size_bytes for ly in layouts)

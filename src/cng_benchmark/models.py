@@ -157,6 +157,15 @@ class GeoZarrLayout(ObjectLayout):
     always this array's *own* shard bytes only, never the coordinate arrays a
     bundle's components share, so a component's reported size is what it alone
     costs.
+
+    ``native_level`` is which pyramid level (``0`` = finest) holds this
+    component's *own*, undownsampled data in a multi-resolution bundle's
+    unified pyramid (#112) — ``None`` for a single-resolution store, where
+    every level is that array's own data by construction. Everything from
+    ``native_level`` through ``native_level + multiscale_levels`` is real for
+    *this* component; a reader mustn't assume level 0 is native just because
+    it usually is — a report needs this to say honestly which levels of a
+    given band are measured and which are derived.
     """
 
     kind: Literal["geozarr"] = "geozarr"
@@ -171,6 +180,7 @@ class GeoZarrLayout(ObjectLayout):
     stored_dtype: str = ""
     overview_bytes: int = 0
     grid_group: str | None = None
+    native_level: int | None = None
 
 
 class GeoParquetLayout(ObjectLayout):
