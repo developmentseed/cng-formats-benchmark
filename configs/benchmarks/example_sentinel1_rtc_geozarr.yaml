@@ -30,9 +30,14 @@ tiers:
     min_object_bytes: 104857600   # 100 MiB
 params:
   # Zarr v3 sharding is the object-grouping lever (chunk = addressable unit,
-  # shard = stored object); mirrors the MAJA GeoZarr arm's granularity.
+  # shard = stored object); chunk_shape mirrors the MAJA GeoZarr arm's
+  # read-path granularity. shard_shape is "auto" — rounded up to one chunk
+  # multiple that covers the whole array, so one level is always one shard
+  # rather than depending on the array happening to be an exact chunk
+  # multiple, which a hand-picked number silently stops being for a
+  # different tile/product generation/mission (#111).
   chunk_shape: [1024, 1024]
-  shard_shape: [2048, 2048]
+  shard_shape: auto
   codec: zstd                     # matched against the COG arm's codec (#72)
   # Overview pyramid anchored on the EOPF S1-tiling/S2 cross-mission target
   # ladder (10 m native -> 20 -> 60 -> 120 -> 360 -> 720 m; #107, #108) rather

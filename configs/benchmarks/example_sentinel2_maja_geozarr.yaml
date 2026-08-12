@@ -33,10 +33,16 @@ tiers:
     min_object_bytes: 104857600   # 100 MiB
 params:
   # Zarr v3 sharding is the object-grouping lever (chunk = addressable unit,
-  # shard = stored object); settled on real MAJA granularity by the
-  # parameter-discovery notebook before being codified.
+  # shard = stored object). chunk_shape is the read-path granularity settled
+  # on by the parameter-discovery notebook; shard_shape is "auto" — rounded
+  # up to one chunk multiple that covers each level's own array, so one
+  # level is always one shard, whether or not that level's extent happens to
+  # be an exact multiple of the chunk. #107/#109 mean one bundled store can
+  # hold several resolution groups (10 m, 20 m, …), each its own extent —
+  # a single hand-picked shard number can't be correct for all of them at
+  # once the way it could when there was only one grid to tune for (#111).
   chunk_shape: [1024, 1024]
-  shard_shape: [2048, 2048]
+  shard_shape: auto
   codec: zstd
   # Overview pyramid, /2 down to roughly a tile — the analogue of the COG arm's
   # overviews. Without it the tile server downsamples full-resolution chunks for

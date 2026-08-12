@@ -13,8 +13,10 @@ np = pytest.importorskip("numpy")
 
 from cng_benchmark.formats import geozarr_multiscales as ms  # noqa: E402
 from cng_benchmark.formats.geozarr import (  # noqa: E402
+    AUTO,
     DATA_VAR,
     GeoZarrParams,
+    _auto_shard,
     _fit_shard,
     _shard_data_files,
     _spatial_pair,
@@ -78,6 +80,102 @@ def test_fit_shard_aligns_to_chunk_multiple_and_clamps():
     # A shard must be a whole multiple of the chunk and may not exceed the array.
     assert _fit_shard((1500, 1500), (512, 512), (2048, 2048)) == (1024, 1024)
     assert _fit_shard((4096, 4096), (512, 512), (2048, 2048)) == (2048, 2048)
+
+
+# --- shard_shape/chunk_shape: auto (#111) ------------------------------------
+
+
+def test_spatial_pair_passes_auto_through():
+    assert _spatial_pair("auto", (9, 9)) == AUTO
+    assert _spatial_pair("AUTO", (9, 9)) == AUTO  # case-insensitive
+    assert _spatial_pair(" Auto ", (9, 9)) == AUTO
+
+
+def test_auto_shard_rounds_up_to_a_chunk_multiple():
+    # Unlike `_fit_shard`'s floor-and-clamp, `_auto_shard` rounds *up* so one
+    # shard always covers the whole array, exact chunk multiple or not (#111).
+    assert _auto_shard((2048, 2048), (512, 512)) == (2048, 2048)  # already exact
+    assert _auto_shard((10970, 10970), (1024, 1024)) == (11264, 11264)  # 11 * 1024
+    assert _auto_shard((5487, 5487), (1024, 1024)) == (6144, 6144)  # 6 * 1024
+    assert _auto_shard((100, 100), (30, 30)) == (120, 120)
+
+
+def test_shard_shape_auto_produces_one_shard_on_a_non_round_array(tmp_path):
+    # The core #111 regression: a hand-picked shard_shape silently fragments
+    # an array that isn't an exact chunk multiple; "auto" produces exactly
+    # one shard, by construction, no lucky divisibility required.
+    store = str(tmp_path / "nonround.zarr")
+    data = (np.arange(5487 * 5487, dtype="uint16") % 1000).reshape(5487, 5487)
+    _write_sharded(
+        store,
+        data,
+        chunk=(1024, 1024),
+        shard=AUTO,
+        codec="zstd",
+        crs_wkt=UTM31N_WKT,
+        geotransform=GEOTRANSFORM,
+        multiscale_levels=0,
+    )
+    ly = describe_store_layout(store, "x")
+    assert ly.shard_count == 1
+    assert ly.shard_shape == [6144, 6144]  # next chunk multiple >= 5487
+
+
+def test_chunk_shape_auto_sizes_the_chunk_to_the_array_too(tmp_path):
+    # `chunk_shape: auto` -- one chunk covering the whole array -- combined
+    # with `shard_shape: auto` trivially agree: one chunk, one shard.
+    store = str(tmp_path / "onechunk.zarr")
+    data = (np.arange(777 * 777, dtype="uint16") % 1000).reshape(777, 777)
+    _write_sharded(
+        store,
+        data,
+        chunk=AUTO,
+        shard=AUTO,
+        codec="zstd",
+        crs_wkt=UTM31N_WKT,
+        geotransform=GEOTRANSFORM,
+        multiscale_levels=0,
+    )
+    ly = describe_store_layout(store, "x")
+    assert ly.chunk_shape == [777, 777]
+    assert ly.shard_shape == [777, 777]
+    assert ly.shard_count == 1
+
+
+def test_shard_shape_auto_covers_every_pyramid_level_independently(tmp_path):
+    # "auto" is resolved per level (#111), not once against the base array --
+    # a coarser level has a different (smaller, still possibly non-round)
+    # shape, and each must land in exactly one shard, not just level 0.
+    import zarr
+
+    store = str(tmp_path / "pyramid-nonround.zarr")
+    data = (np.arange(2189 * 2189, dtype="uint16") % 1000).reshape(2189, 2189)
+    _write_sharded(
+        store,
+        data,
+        chunk=(512, 512),
+        shard=AUTO,
+        codec="zstd",
+        crs_wkt=UTM31N_WKT,
+        geotransform=GEOTRANSFORM,
+        multiscale_levels=2,
+    )
+
+    root = zarr.open_group(store, mode="r")
+    # 2189 -> 1094 -> 547, halved each level -- none a multiple of 512.
+    for level, side in (("0", 2189), ("1", 1094), ("2", 547)):
+        arr = root[level][DATA_VAR]
+        assert arr.shape == (side, side)
+        assert all(s >= a for s, a in zip(arr.shards, arr.shape, strict=True))
+
+    shard_files = _shard_data_files(store, var_name=DATA_VAR)
+    assert len(shard_files) == 3  # exactly one shard per level, none fragmented
+
+
+def test_geozarr_params_accepts_auto_for_chunk_and_shard():
+    opts = GeoZarrParams.model_validate({"chunk_shape": "auto", "shard_shape": "auto"})
+    assert opts.chunk_shape == "auto"
+    assert opts.shard_shape == "auto"
 
 
 def test_enumerate_returns_shard_data_including_coordinate_chunks(tmp_path):
@@ -246,6 +344,44 @@ def test_convert_reads_a_raster_and_writes_a_store(tmp_path):
     assert metrics["read_window_count"] >= 1
     assert metrics["read_latency_spread"] >= 0
     assert metrics["read_decoded_throughput"] > 0
+
+
+def test_convert_shard_shape_auto_on_a_non_round_raster(tmp_path):
+    # End-to-end through the adapter (not just `_write_sharded` directly):
+    # a raster whose extent isn't a multiple of the chunk still lands in
+    # exactly one shard when `shard_shape: auto` is configured (#111).
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    source = str(tmp_path / "nonround.tif")
+    with rasterio.open(
+        source,
+        "w",
+        driver="GTiff",
+        width=1099,
+        height=1099,
+        count=1,
+        dtype="uint16",
+        crs="EPSG:32631",
+        transform=from_origin(300000, 4900020, 10, 10),
+    ) as dst:
+        band = (np.arange(1099 * 1099, dtype="uint16") % 1000).reshape(1099, 1099)
+        dst.write(band, 1)
+
+    target = str(tmp_path / "out.zarr")
+    GeoZarrAdapter().convert(
+        source,
+        target,
+        {"chunk_shape": [256, 256], "shard_shape": "auto", "multiscale_levels": 0},
+    )
+    ly = describe_store_layout(target, "B4")
+    assert ly.chunk_shape == [256, 256]
+    assert ly.shard_shape == [1280, 1280]  # 5 * 256, the next multiple >= 1099
+    assert ly.shard_count == 1  # not fragmented into several shards
 
 
 def test_finest_array_is_readable_by_name(tmp_path):
@@ -1324,6 +1460,47 @@ def test_convert_batch_anchors_the_pyramid_on_native_resolution_groups(tmp_path)
     # The root's own bookkeeping attrs survive alongside the chain doc (must
     # not be wiped by the same-group-attrs-replace pitfall fixed in #103).
     assert root.attrs["cng_benchmark:components"] == {"b2": "grid0", "clm_r2": "grid1"}
+
+
+def test_convert_batch_shard_shape_auto_fits_each_resolution_group(tmp_path):
+    # #111's stated bundled-store scenario: one hand-picked shard number
+    # can't be correct for every resolution group in a #107-style bundle,
+    # since #109 means each group has its own extent -- "auto" fits each
+    # group independently rather than fragmenting whichever one doesn't
+    # happen to divide evenly.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(
+        str(tmp_path / "b2.tif"), value=1, pixel_size=10, width=277, height=277
+    )
+    _write_source_at(
+        str(tmp_path / "clm_r2.tif"), value=2, pixel_size=20, width=139, height=139
+    )
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+
+    target = str(tmp_path / "multires-auto.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [64, 64], "shard_shape": "auto", "multiscale_levels": 0},
+    )
+
+    layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
+    # 277 -> next 64-multiple is 320 (5 * 64); 139's is 192 (3 * 64) -- two
+    # different groups, two different auto-fitted shard shapes, each still
+    # exactly one shard.
+    assert layouts["b2"].shard_shape == [320, 320]
+    assert layouts["b2"].shard_count == 1
+    assert layouts["clm_r2"].shard_shape == [192, 192]
+    assert layouts["clm_r2"].shard_count == 1
 
 
 def test_convert_batch_single_resolution_bundle_is_unaffected_by_anchoring(tmp_path):

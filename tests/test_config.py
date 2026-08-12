@@ -81,7 +81,9 @@ def test_example_maja_cog_zstd_benchmark_config_validates():
 def test_example_maja_geozarr_benchmark_config_validates():
     cfg = load_benchmark_config(MAJA_GEOZARR_BENCHMARK_EXAMPLE)
     assert cfg.formats == ["geozarr"]
-    assert cfg.params["shard_shape"] == [2048, 2048]
+    # "auto" -- one shard per resolution group, not a hand-picked number
+    # that only happens to divide this testbed's specific tile size (#111).
+    assert cfg.params["shard_shape"] == "auto"
     assert cfg.params["codec"] == "zstd"
     assert cfg.params["display_titiler_path"] == "zarr"
     # The MAJA dataset offers both candidate formats.

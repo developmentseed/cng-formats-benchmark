@@ -80,8 +80,16 @@ class GeoZarrParams(BaseModel):
     ``[t, y, x]`` shape (the trailing two, spatial, dims are used — a leading time
     dim is ignored in the 2D regime) and tolerate a swept *list of shapes*, taking
     the first so a swept lever degrades to a single run, mirroring COG's
-    ``block_size``. ``codec`` is the per-chunk compressor (``zstd`` default;
-    ``none`` for raw).
+    ``block_size``. ``"auto"`` fits each per pyramid level (and, in a bundled
+    store, per resolution group, #107) rather than one hand-picked number for
+    every level: ``shard_shape: auto`` rounds the shard *up* to the smallest
+    chunk multiple that still covers that level's own array in one shard, by
+    construction, whether or not the array happens to be an exact chunk
+    multiple — a hand-picked pair only avoids fragmenting into several shards
+    when it happens to divide the array exactly, which does not generalise
+    across levels or resolution groups (#111). ``chunk_shape: auto`` sizes
+    the chunk to that level's own array too (one chunk, no internal tiling).
+    ``codec`` is the per-chunk compressor (``zstd`` default; ``none`` for raw).
 
     ``multiscale_levels`` is the overview-pyramid depth. ``"auto"`` (the default)
     coarsens by ``/2`` down to roughly one tile, the same rule GDAL follows for
@@ -119,13 +127,25 @@ class GeoZarrParams(BaseModel):
     standard_name: str | None = None
 
 
-def _spatial_pair(shape: Any, default: tuple[int, int]) -> tuple[int, int]:
+#: Sentinel a chunk/shard lever resolves to when configured ``"auto"`` (#111)
+#: — deferred, because it can only be fit against a specific pyramid level's
+#: own shape, which isn't known until :func:`_write_sharded` writes that level.
+AUTO = "auto"
+
+
+def _spatial_pair(shape: Any, default: tuple[int, int]) -> tuple[int, int] | str:
     """Normalise a config shape to a spatial ``(y, x)`` pair.
 
     Tolerates a scalar ``1024`` (square, like COG's ``block_size``), a swept *list
     of shapes* (takes the first), a 3D ``[t, y, x]`` shape (takes the trailing
-    two), and a 2D ``[y, x]`` shape; falls back to ``default``.
+    two), and a 2D ``[y, x]`` shape; falls back to ``default``. ``"auto"``
+    passes through as :data:`AUTO` unresolved (#111) — the caller fits it
+    against each pyramid level's own shape at write time, since one
+    hand-picked tuple can't be correct for every level, let alone every
+    resolution group a bundled store can now hold (#107).
     """
+    if isinstance(shape, str) and shape.strip().lower() == AUTO:
+        return AUTO
     if shape is None or shape == []:
         return default
     if isinstance(shape, int | float):
@@ -208,6 +228,25 @@ def _fit_shard(
     for s, c, n in zip(shard, chunk, shape, strict=True):
         s = min(s, n)
         out.append(max(c, (s // c) * c))
+    return (out[0], out[1])
+
+
+def _auto_shard(shape: tuple[int, int], chunk: tuple[int, int]) -> tuple[int, int]:
+    """Round ``shape`` up to the nearest whole multiple of ``chunk`` (#111).
+
+    ``shard_shape: auto``'s whole point: one shard covers the array by
+    construction, whether or not the array happens to be an exact chunk
+    multiple — unlike :func:`_fit_shard`'s floor-and-clamp, which silently
+    fragments a level into several shards the moment it isn't. A shard's
+    declared extent exceeding the array is fine: Zarr v3 tolerates a ragged
+    last chunk *and* a ragged last shard the same way (verified empirically —
+    a shard shape larger than the array still round-trips and still produces
+    exactly one shard object).
+    """
+    out: list[int] = []
+    for n, c in zip(shape, chunk, strict=True):
+        c = max(1, c)
+        out.append(-(-n // c) * c)  # ceil division, times c
     return (out[0], out[1])
 
 
@@ -303,8 +342,8 @@ def _write_sharded(
     store: str,
     data,
     *,
-    chunk: tuple[int, int],
-    shard: tuple[int, int],
+    chunk: tuple[int, int] | str,
+    shard: tuple[int, int] | str,
     codec: str,
     crs_wkt: str = "",
     geotransform: str = "",
@@ -448,8 +487,18 @@ def _write_sharded(
         return ds
 
     def _encoding(level_data) -> dict:
-        c = _fit_chunk(chunk, level_data.shape)
-        s = _fit_shard(shard, c, level_data.shape)
+        level_shape = tuple(level_data.shape)
+        # "auto" is resolved here, per level, not once against the base array
+        # (#111) -- a bundled store can hold several resolution groups (#107),
+        # each its own shape, and even within one array the pyramid's coarser
+        # levels are smaller than the base, so a lever fit once at the top
+        # would be wrong everywhere but level 0.
+        c = level_shape if chunk == AUTO else _fit_chunk(chunk, level_shape)
+        s = (
+            _auto_shard(level_shape, c)
+            if shard == AUTO
+            else _fit_shard(shard, c, level_shape)
+        )
         enc: dict = {"chunks": c, "shards": s, "compressors": compressors}
         if filters is not None:
             enc["filters"] = filters
@@ -799,10 +848,13 @@ class GeoZarrAdapter(FormatAdapter):
         read = _read_component_array(source, params, opts)
         data = read["data"]
 
-        chunk = _fit_chunk(_spatial_pair(opts.chunk_shape, DEFAULT_CHUNK), data.shape)
-        shard = _fit_shard(
-            _spatial_pair(opts.shard_shape, DEFAULT_SHARD), chunk, data.shape
-        )
+        # Fit against the array happens per pyramid level, inside
+        # `_write_sharded` (#111) -- passed through as-is here, "auto" (#111)
+        # included, rather than pre-fit against just the base array's shape,
+        # which a coarser level (or, for a bundled store, a different
+        # resolution group entirely, #107) would make wrong.
+        chunk = _spatial_pair(opts.chunk_shape, DEFAULT_CHUNK)
+        shard = _spatial_pair(opts.shard_shape, DEFAULT_SHARD)
         _write_sharded(
             target,
             data,
@@ -908,15 +960,13 @@ class GeoZarrAdapter(FormatAdapter):
             group_levels = opts.multiscale_levels
             if is_multi_resolution and pixel_sizes[grid_id] < coarsest_pixel_size:  # type: ignore[operator]
                 group_levels = 0
+            # Fit against the array happens per pyramid level, inside
+            # `_write_sharded` (#111) -- "auto" included; see `convert`.
+            chunk = _spatial_pair(opts.chunk_shape, DEFAULT_CHUNK)
+            shard = _spatial_pair(opts.shard_shape, DEFAULT_SHARD)
             for i, name in enumerate(group_names):
                 read = reads[name]
                 data = read["data"]
-                chunk = _fit_chunk(
-                    _spatial_pair(opts.chunk_shape, DEFAULT_CHUNK), data.shape
-                )
-                shard = _fit_shard(
-                    _spatial_pair(opts.shard_shape, DEFAULT_SHARD), chunk, data.shape
-                )
                 _write_sharded(
                     target,
                     data,
