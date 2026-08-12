@@ -28,13 +28,21 @@ from cng_benchmark.models import MetricResult
 
 
 class TileSpec(NamedTuple):
-    """A tile chosen to exercise a particular chunk-crossing scenario.
+    """A tile chosen to exercise a particular chunk-crossing or resolution
+    scenario.
 
-    ``label`` names the scenario (e.g. ``"1chunk"``); ``z/x/y`` is the
-    WebMercator tile; ``chunks`` is the number of internal blocks the tile is
-    estimated to touch; ``approx`` flags a substitute when the exact bucket was
-    unreachable. Defined here (no geo deps) so :func:`measure_display` stays
-    import-light; built by :mod:`cng_benchmark.metrics.display_tiles`.
+    ``label`` names the scenario (e.g. ``"1chunk"``, ``"res_60m"``); ``z/x/y``
+    is the WebMercator tile; ``chunks`` is the number of internal blocks the
+    tile is estimated to touch; ``approx`` flags a substitute when the exact
+    bucket was unreachable. ``group`` is the GeoZarr group that actually
+    serves this tile's resolution (``None`` for a chunk-crossing-bucket tile,
+    which doesn't target a specific level, and always for COG, which has no
+    server-side group concept — rio-tiler resolves its own overview by zoom)
+    — :func:`measure_display`'s per-tile query override (#116) uses it so the
+    stock xarray router reads the resolution-appropriate level instead of
+    always the native one. Defined here (no geo deps) so
+    :func:`measure_display` stays import-light; built by
+    :mod:`cng_benchmark.metrics.display_tiles`.
     """
 
     label: str
@@ -43,6 +51,7 @@ class TileSpec(NamedTuple):
     y: int
     chunks: int
     approx: bool = False
+    group: str | None = None
 
 
 def _fetch(url: str, timeout: float) -> bytes:
@@ -86,40 +95,61 @@ def measure_display(
     timeout: float = 30.0,
     path_prefix: str = "cog",
     extra_query: dict[str, str] | None = None,
+    group_query_key: str | None = None,
 ) -> list[MetricResult]:
-    """Time TiTiler tile fetches per chunk-crossing scenario.
+    """Time TiTiler tile fetches per chunk-crossing or resolution scenario.
 
     ``endpoint`` is the TiTiler base URL; ``cog_uri`` is the URL TiTiler serves
-    from (e.g. ``s3://…``). ``tiles`` are the scenarios to time, one per chunk
-    bucket (see :func:`display_tiles.select_chunk_tiles`); each is fetched
-    ``samples`` times and reported as its own flat ``display_{label}_*`` metrics.
-    Returns an empty-scenario summary if ``tiles`` is empty (e.g. no bucket was
-    reachable for this object).
+    from (e.g. ``s3://…``). ``tiles`` are the scenarios to time — chunk-bucket
+    tiles (see :func:`display_tiles.select_chunk_tiles`) and/or one-per-target-
+    resolution tiles (:func:`display_tiles.select_zarr_resolution_tiles`) —
+    each fetched ``samples`` times and reported as its own flat
+    ``display_{label}_*`` metrics. Returns an empty-scenario summary if
+    ``tiles`` is empty (e.g. no bucket was reachable for this object).
 
     ``path_prefix`` selects the tiler router — ``"cog"`` for a COG against
     TiTiler's COG endpoints, ``"zarr"``/``"geozarr"`` for a GeoZarr store's
     stock-xarray or ``GeoZarrReader`` router — and ``extra_query`` carries any
     extra query parameters that router needs (e.g. ``{"variable": "data"}`` to
-    pick the array). Every metric's ``detail`` records ``path_prefix``, so a
-    report is never ambiguous about which reader produced a given number.
+    pick the array), the same for every tile.
+
+    ``group_query_key`` (#116) is the escape hatch from that "same for every
+    tile" default: when set, a tile that carries its own ``.group`` (a
+    resolution-scenario tile addressing the GeoZarr level that actually
+    serves it, not the chunk-bucket tiles alongside it, which carry none)
+    gets that one query key overridden to ``spec.group`` for *its own*
+    fetch only. Without this, the stock xarray router — which has no
+    multiscale awareness of its own — would read the same (typically
+    native) level for every tile regardless of the zoom being tested,
+    making it structurally incapable of showing the store's pyramid have
+    any effect. ``None`` (the default) preserves today's one-query-for-
+    every-tile behaviour exactly.
+
+    Every metric's ``detail`` records ``path_prefix``, so a report is never
+    ambiguous about which reader produced a given number.
     """
     if samples < 1:
         raise ValueError("samples must be >= 1")
     base = endpoint.rstrip("/")
     encoded = quote(cog_uri, safe="")
     prefix = f"/{path_prefix.strip('/')}" if path_prefix.strip("/") else ""
-    extra = "".join(
-        f"&{quote(k)}={quote(str(v))}" for k, v in (extra_query or {}).items()
-    )
+    base_query = dict(extra_query or {})
+    extra = "".join(f"&{quote(k)}={quote(str(v))}" for k, v in base_query.items())
 
     # Validate the object is servable before timing tiles (clearer failures).
     _fetch(f"{base}{prefix}/info?url={encoded}{extra}", timeout)
 
     metrics: list[MetricResult] = []
     for spec in tiles:
+        tile_query = base_query
+        if group_query_key and spec.group is not None:
+            tile_query = {**base_query, group_query_key: spec.group}
+        tile_extra = "".join(
+            f"&{quote(k)}={quote(str(v))}" for k, v in tile_query.items()
+        )
         tile_url = (
             f"{base}{prefix}/tiles/{tile_matrix_set}/"
-            f"{spec.z}/{spec.x}/{spec.y}.{fmt}?url={encoded}{extra}"
+            f"{spec.z}/{spec.x}/{spec.y}.{fmt}?url={encoded}{tile_extra}"
         )
         latencies: list[float] = []
         bytes_total = 0
@@ -143,6 +173,7 @@ def measure_display(
                     "bytes_total": bytes_total,
                     "cold_s": latencies[0],
                     "path_prefix": path_prefix,
+                    "group": spec.group,
                 },
             ),
             MetricResult(
@@ -162,7 +193,12 @@ def measure_display(
                 "samples": samples,
                 "path_prefix": path_prefix,
                 "scenarios": [
-                    {"label": s.label, "tile": f"{s.z}/{s.x}/{s.y}", "chunks": s.chunks}
+                    {
+                        "label": s.label,
+                        "tile": f"{s.z}/{s.x}/{s.y}",
+                        "chunks": s.chunks,
+                        "group": s.group,
+                    }
                     for s in tiles
                 ],
             },

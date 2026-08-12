@@ -39,3 +39,12 @@ params:
     read: 1
     display: 1
   display_titiler_path: geozarr
+  # Same values as the stock-router and COG arms (#116) — one tile per
+  # target resolution, shared across all three so a
+  # display_res_60m_latency_mean (etc.) figure is directly comparable
+  # across /cog, /zarr and /geozarr, not an accidental mix of differently
+  # anchored overview ladders or zoom ranges.
+  display_target_resolutions: [20, 60, 120, 360, 720]
+  # Many repeats per tile: a trustworthy per-resolution latency number needs
+  # enough samples to average out network noise (#116; was hardcoded to 8).
+  display_tile_samples: 30

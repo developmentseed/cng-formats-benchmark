@@ -47,17 +47,30 @@ class _Grid(NamedTuple):
     it from its internal block size + overviews, a GeoZarr store from its chunk
     shape + multiscale levels. ``block_w``/``block_h`` is the addressable unit
     (COG block / Zarr chunk); ``decimations`` the available overview/level
-    decimations (``[1, …]``); ``inv`` the inverse affine (world → pixel).
+    decimations (``[1, …]``, real ratios read off the store's own pyramid, not
+    assumed to double — #116); ``level_paths`` the group each entry of
+    ``decimations`` is actually served from (``None`` for COG, which has no
+    server-side group concept — rio-tiler resolves its overviews itself);
+    ``native_resolution`` the object's own native pixel size, in its own CRS'
+    units (metres for a projected CRS) — the same units a ``multiscale_levels``/
+    ``display_target_resolutions`` config value is given in, *not* the
+    WebMercator-projected resolution tile selection otherwise works in
+    (#116; the two differ by a latitude-dependent scale factor, so a target
+    resolution given in native units has to be converted before it can be
+    compared against a WebMercator zoom's cell size); ``inv`` the inverse
+    affine (world → pixel).
     """
 
     block_w: int
     block_h: int
     decimations: list[int]
+    native_resolution: float
     crs: object
     inv: object
     width: int
     height: int
     bounds: tuple[float, float, float, float]
+    level_paths: list[str | None]
 
 
 def _require_geo():
@@ -79,16 +92,66 @@ def _read_cog_grid(cog_path: str) -> _Grid:
     _morecantile, rasterio, _tb = _require_geo()
     with rasterio.open(cog_path) as src:
         block_h, block_w = src.block_shapes[0]
+        decimations = [1, *src.overviews(1)]
         return _Grid(
             block_w=int(block_w),
             block_h=int(block_h),
-            decimations=[1, *src.overviews(1)],
+            decimations=decimations,
+            native_resolution=abs(src.transform.a),
             crs=src.crs,
             inv=~src.transform,
             width=src.width,
             height=src.height,
             bounds=tuple(src.bounds),
+            # rio-tiler resolves a COG's overview by zoom internally -- no
+            # server-side group to name, unlike the stock GeoZarr router.
+            level_paths=[None] * len(decimations),
         )
+
+
+def _entry_resolution(entry: dict, fallback: float) -> float:
+    """Ground resolution (native's own units) one multiscales layout entry
+    declares via its own ``spatial:transform`` — ``fallback`` if absent."""
+    tr = entry.get("spatial:transform")
+    if not tr or len(tr) < 5:
+        return fallback
+    return min(abs(tr[0]), abs(tr[4]))
+
+
+def _resolve_multiscale_layout(
+    open_group, attrs: dict, group: str | None
+) -> tuple[list[dict], str]:
+    """Return a GeoZarr store's real pyramid layout for ``group``, and the
+    path prefix each entry's ``asset`` resolves against.
+
+    Tries ``group``'s own ``zarr_conventions.multiscales.layout`` first — a
+    non-batched store (``group=None``, the doc is on the store root) or a
+    ``#102`` single-resolution bundle's grid subtree (``group="gridN"``)
+    both declare it directly on the group being addressed, describing
+    exactly that component's own levels, nested as its children. Falls back
+    to the *store root*'s own doc when ``group`` has none of its own — a
+    ``#114`` unified multi-resolution pyramid, where every level is written
+    as a top-level group at the store root and ``group`` just names the
+    level a component's own data *starts* at (its
+    :meth:`~cng_benchmark.formats.geozarr.GeoZarrAdapter.component_locator`)
+    — scoped to that component's own contiguous chain by slicing the root
+    layout from the entry whose ``asset`` matches ``group`` onward, never
+    the levels below it where that component has no data (by construction
+    of how ``#114`` writes it).
+    """
+    layout = (attrs.get("multiscales") or {}).get("layout")
+    if layout:
+        return list(layout), (group or "")
+    if not group:
+        return [], ""
+    root_attrs = dict(open_group("").attrs)
+    root_layout = (root_attrs.get("multiscales") or {}).get("layout") or []
+    start = next(
+        (i for i, e in enumerate(root_layout) if e.get("asset") == group), None
+    )
+    if start is None:
+        return [], ""
+    return list(root_layout[start:]), ""
 
 
 def _read_zarr_grid(
@@ -100,12 +163,16 @@ def _read_zarr_grid(
 ) -> _Grid:
     """Read the chunk/multiscale grid of a GeoZarr store (chunk = addressable unit).
 
-    Chunk shape is the partial-read unit; multiscale levels become the available
-    decimations ``[1, 2, 4, …]``; the CRS and the affine come from the store's
-    own ``geo-proj`` / ``spatial`` convention attributes — the same ones any
-    reader uses, not a CF grid-mapping variable written for GDAL's benefit.
-    ``group``/``var_name`` address one component of a bundled store (#102) —
-    ``None`` (the defaults) reproduce today's single-component addressing.
+    Chunk shape is the partial-read unit; decimations and the group serving
+    each level are read from the store's own ``zarr_conventions.multiscales.
+    layout`` (:func:`_resolve_multiscale_layout`) — the doc a spec-compliant
+    reader (GeoZarrReader included) already uses — rather than re-derived by
+    walking directory structure, which silently under-counts a ``#114``
+    unified multi-resolution bundle's levels (#116). The CRS and the affine
+    come from the store's own ``geo-proj``/``spatial`` convention attributes.
+    ``group``/``var_name`` address one component of a bundled store
+    (#102/#114) — ``None`` (the defaults) reproduce today's single-component
+    addressing.
     """
     import zarr
     from affine import Affine
@@ -116,20 +183,12 @@ def _read_zarr_grid(
 
     name = var_name or DATA_VAR
     so = fsspec_storage_options(role) if is_s3(store) else None
-    root = zarr.open_group(store, mode="r", storage_options=so, path=group or "")
-    # The pyramid-describing group either way: for a non-batched store that's
-    # its own root; for a bundled store, `group` (one grid's own subtree) —
-    # opened as if it were the root via zarr's `path=`.
-    attrs = dict(root.attrs)
-    if name in root:
-        arr, levels = root[name], 0
-    else:
-        keys = sorted((k for k in root.group_keys()), key=lambda k: int(k))
-        levels = len(keys) - 1
-        arr = root[keys[0]][name]
 
-    height, width = int(arr.shape[-2]), int(arr.shape[-1])
-    block_h, block_w = int(arr.chunks[-2]), int(arr.chunks[-1])
+    def _open(path: str):
+        return zarr.open_group(store, mode="r", storage_options=so, path=path)
+
+    root = _open(group or "")
+    attrs = dict(root.attrs)
     crs_def = attrs.get("proj:code") or attrs.get("proj:wkt2") or ""
     coeffs = [float(v) for v in attrs.get("spatial:transform", [])]
     # Tile selection has to project the store into WebMercator, so both the CRS
@@ -142,8 +201,31 @@ def _read_zarr_grid(
             f"spatial:transform has {len(coeffs)} of 6 coefficients); "
             "cannot select map tiles"
         )
+    # `spatial:transform` is already in rasterio/affine coefficient order
+    # ([a, b, c, d, e, f]) -- `a` is the pixel width, this group's own native
+    # resolution regardless of whether a multiscales doc exists.
+    native_resolution = abs(coeffs[0])
+
+    layout, level_prefix = _resolve_multiscale_layout(_open, attrs, group)
+    if layout:
+        level_paths = [
+            f"{level_prefix}/{e['asset']}" if level_prefix else str(e["asset"])
+            for e in layout
+        ]
+        arr = _open(level_paths[0])[name]
+        decimations = [
+            max(1, round(_entry_resolution(e, native_resolution) / native_resolution))
+            for e in layout
+        ]
+    else:
+        # No multiscales doc at all: a flat, single-level store or component.
+        arr = root[name]
+        level_paths = [group]
+        decimations = [1]
+
+    height, width = int(arr.shape[-2]), int(arr.shape[-1])
+    block_h, block_w = int(arr.chunks[-2]), int(arr.chunks[-1])
     crs = CRS.from_user_input(crs_def)
-    # `spatial:transform` is already in rasterio/affine coefficient order.
     transform = Affine(*coeffs)
     inv = ~transform
     # All four raster corners, so a rotated/sheared transform still bounds right.
@@ -152,8 +234,18 @@ def _read_zarr_grid(
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     bounds = (min(xs), min(ys), max(xs), max(ys))
-    decimations = [2**i for i in range(levels + 1)]
-    return _Grid(block_w, block_h, decimations, crs, inv, width, height, bounds)
+    return _Grid(
+        block_w,
+        block_h,
+        decimations,
+        native_resolution,
+        crs,
+        inv,
+        width,
+        height,
+        bounds,
+        level_paths,
+    )
 
 
 def _blocks_spanned(lo: float, hi: float, block: float) -> int:
@@ -274,6 +366,143 @@ def select_zarr_chunk_tiles(
         targets=targets,
         max_tiles_per_zoom=max_tiles_per_zoom,
     )
+
+
+def select_resolution_tiles(
+    cog_path: str,
+    *,
+    target_resolutions: list[float] | None = None,
+    tile_matrix_set: str = "WebMercatorQuad",
+    max_tiles_per_zoom: int = 4000,
+) -> list[TileSpec]:
+    """Select one tile per target ground resolution for the COG (#116).
+
+    Pass the *same* ``target_resolutions`` as the matched GeoZarr arm's
+    :func:`select_zarr_resolution_tiles` call so ``"res_60m"`` means the
+    same physical zoom regardless of format — comparing a format-relative
+    overview/level index instead would silently compare different ground
+    resolutions and call it a format comparison (#116). ``None`` derives
+    resolutions from the COG's own overview decimations (today's implicit
+    per-format behaviour), for an arm where cross-format alignment isn't
+    the point.
+    """
+    return _select_by_resolution(
+        _read_cog_grid(cog_path),
+        target_resolutions,
+        tile_matrix_set=tile_matrix_set,
+        max_tiles_per_zoom=max_tiles_per_zoom,
+    )
+
+
+def select_zarr_resolution_tiles(
+    store: str,
+    *,
+    role: str = "sink",
+    target_resolutions: list[float] | None = None,
+    tile_matrix_set: str = "WebMercatorQuad",
+    max_tiles_per_zoom: int = 4000,
+    group: str | None = None,
+    var_name: str | None = None,
+) -> list[TileSpec]:
+    """Select one tile per target ground resolution for the GeoZarr ``store`` (#116).
+
+    Each tile carries the ``.group`` that actually serves its resolution,
+    read from the store's real pyramid (:func:`_read_zarr_grid`, correctly
+    scoped to one component even for a `#114` unified multi-resolution
+    bundle) — :func:`~cng_benchmark.metrics.display.measure_display`'s
+    per-tile query override uses it so the stock router reads the
+    resolution-appropriate level instead of always the native one.
+    ``group``/``var_name`` address one component of a bundled store
+    (#102/#114); ``None`` reproduces today's addressing.
+    """
+    return _select_by_resolution(
+        _read_zarr_grid(store, role, group=group, var_name=var_name),
+        target_resolutions,
+        tile_matrix_set=tile_matrix_set,
+        max_tiles_per_zoom=max_tiles_per_zoom,
+    )
+
+
+def _select_by_resolution(
+    grid: _Grid,
+    target_resolutions: list[float] | None,
+    *,
+    tile_matrix_set: str = "WebMercatorQuad",
+    max_tiles_per_zoom: int = 4000,
+) -> list[TileSpec]:
+    """Select one representative tile per target ground resolution for ``grid``.
+
+    Unlike :func:`_select_from_grid` (bucketed by how many chunks a tile
+    touches — a different, still-useful question), this is bucketed by
+    *zoom range coverage*: one tile per entry of ``target_resolutions``
+    (in ``grid.native_resolution``'s units — metres for a projected CRS,
+    matching the ``multiscale_levels``/``display_target_resolutions``
+    convention), or, when not given, one per the grid's own decimations
+    (today's implicit per-format behaviour). Each resolution maps to the
+    coarsest decimation still finer-or-equal to it (:func:`_pick_decimation`
+    — the same GDAL-overview-style rule the tiler itself effectively
+    applies) and thus to the group that decimation's level is actually
+    served from (``grid.level_paths``, ``None`` for COG). Labeled by
+    resolution (``"res_{r:g}m"``), not a format-relative level index, so the
+    label is comparable across formats.
+    """
+    morecantile, _rasterio, transform_bounds = _require_geo()
+    block_w, block_h = grid.block_w, grid.block_h
+    decimations = grid.decimations
+    native_resolution = grid.native_resolution
+    crs, inv = grid.crs, grid.inv
+    width, height = grid.width, grid.height
+    bounds = grid.bounds
+
+    tms = morecantile.tms.get(tile_matrix_set)
+    west, south, east, north = transform_bounds(crs, "EPSG:4326", *bounds)
+    mleft, _, mright, _ = transform_bounds(crs, tms.crs, *bounds)
+    native_res_webmercator = (mright - mleft) / width
+    # `target_resolutions` are in the object's own native CRS units, but
+    # `tms.zoom_for_res` (and the chunk-counting math below) work in
+    # WebMercator metres, which differ from native-CRS metres by a
+    # latitude-dependent scale factor -- derived once here from the two
+    # already-known native resolutions, rather than reprojecting per tile.
+    to_webmercator = native_res_webmercator / native_resolution
+
+    resolutions = target_resolutions or [native_resolution * d for d in decimations]
+
+    selected: list[TileSpec] = []
+    for res in resolutions:
+        decim = _pick_decimation(decimations, native_resolution, res)
+        group = grid.level_paths[decimations.index(decim)]
+        z = tms.zoom_for_res(res * to_webmercator)
+
+        best: TileSpec | None = None
+        best_interior = False
+        for i, tile in enumerate(tms.tiles(west, south, east, north, [z])):
+            if i >= max_tiles_per_zoom:
+                break
+            counted = _count_chunks(
+                tile,
+                tms,
+                transform_bounds,
+                crs,
+                inv,
+                width,
+                height,
+                block_w,
+                block_h,
+                decim,
+            )
+            if counted is None:
+                continue
+            chunks, interior = counted
+            if best is None or (interior and not best_interior):
+                best = TileSpec(
+                    f"res_{res:g}m", tile.z, tile.x, tile.y, chunks, group=group
+                )
+                best_interior = interior
+                if interior:
+                    break
+        if best is not None:
+            selected.append(best)
+    return selected
 
 
 def _select_from_grid(
