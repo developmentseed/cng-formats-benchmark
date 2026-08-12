@@ -1443,7 +1443,7 @@ def test_convert_batch_anchors_the_pyramid_on_native_resolution_groups(tmp_path)
     assert layouts["b2"].native_level == 0
     assert layouts["b2"].multiscale_levels == 3  # 20, 40, 80 m, all derived
     assert layouts["clm_r2"].native_level == 1
-    assert layouts["clm_r2"].multiscale_levels == 2  # 40, 80 m, derived from its own 20 m
+    assert layouts["clm_r2"].multiscale_levels == 2  # 40, 80 m, derived from its own
 
     root = zarr.open_group(target, mode="r")
     assert sorted(root.group_keys(), key=int) == ["0", "1", "2", "3"]
@@ -1500,7 +1500,11 @@ def test_convert_batch_unified_pyramid_multi_hop_derivation(tmp_path):
         target,
         # "20" matches the real 20 m tier (used as real data); "60" is the
         # synthetic 3x hop past it.
-        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": [20, 60]},
+        {
+            "chunk_shape": [32, 32],
+            "shard_shape": [64, 64],
+            "multiscale_levels": [20, 60],
+        },
     )
 
     root = zarr.open_group(target, mode="r")
@@ -1544,7 +1548,11 @@ def test_convert_batch_unified_pyramid_rejects_a_ladder_mismatch(tmp_path):
             sources,
             str(tmp_path / "bad.zarr"),
             # 30 matches neither the real 20 m tier nor a valid doubling of it.
-            {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": [30, 60]},
+            {
+                "chunk_shape": [32, 32],
+                "shard_shape": [64, 64],
+                "multiscale_levels": [30, 60],
+            },
         )
 
 
@@ -1583,7 +1591,8 @@ def test_convert_batch_unified_pyramid_accepts_the_maja_shaped_ladder(tmp_path):
     assert sorted(root.group_keys(), key=int) == ["0", "1", "2", "3", "4", "5"]
     layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
     assert layouts["b2"].multiscale_levels == 5  # 20/60/120/360/720, all derived
-    assert layouts["clm_r2"].multiscale_levels == 4  # 60/120/360/720, derived from real 20 m
+    # 60/120/360/720, derived from the real 20 m tier.
+    assert layouts["clm_r2"].multiscale_levels == 4
 
 
 def test_convert_batch_unified_pyramid_produces_more_objects_than_the_flattened_bug(
