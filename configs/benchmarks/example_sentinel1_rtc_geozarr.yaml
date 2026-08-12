@@ -1,11 +1,16 @@
-# Example benchmark arm: Sentinel-1 RTC (gamma0) -> GeoZarr v3 (per-component, 2D).
+# Example benchmark arm: Sentinel-1 RTC (gamma0) -> GeoZarr v3 (bundled, 2D).
 #
-# The RTC analogue of example_sentinel2_maja_geozarr.yaml: each VV/VH gamma0
-# band (picked in the dataset `options`) is converted independently to its own
-# sharded 2D GeoZarr store — the head-to-head structural comparison against the
-# COG arm, from the same canonical source. Unlike MAJA, RTC gamma0 is not a
-# packed/scaled product, so `scale_offset` does not apply here; the reader
-# supplies `standard_name` (backscatter coefficient) per component.
+# The RTC analogue of example_sentinel2_maja_geozarr.yaml, but structurally
+# simpler: VV and VH are two measurements of the identical grid, not two
+# different native resolutions (#108, companion to #107's S2 case), so
+# `bundle_components: true` puts them in one grid group sharing coordinates,
+# no resolution-grouping logic needed. The reference EOPF `s1-tiling`
+# ingestion also bundles a border/validity mask as a third component, but a
+# real S1Tiling delivery listing has no equivalent raster to add (see
+# `datasets/sentinel1.py`'s reader docstring) — VV+VH is the whole bundle
+# here. Unlike MAJA, RTC gamma0 is not a packed/scaled product, so
+# `scale_offset` does not apply here; the reader supplies `standard_name`
+# (backscatter coefficient) per component.
 #
 # Run with `--dataset configs/datasets/example_sentinel1_rtc.yaml`. `output`
 # (and the TiTiler endpoint for display) are supplied by the deployment.
@@ -29,9 +34,21 @@ params:
   chunk_shape: [1024, 1024]
   shard_shape: [2048, 2048]
   codec: zstd                     # matched against the COG arm's codec (#72)
-  # Overview pyramid, /2 down to roughly a tile — the analogue of the COG arm's
-  # overviews (#71); `auto` derives the depth from the scene.
-  multiscale_levels: auto
+  # Overview pyramid anchored on the EOPF S1-tiling/S2 cross-mission target
+  # ladder (10 m native -> 20 -> 60 -> 120 -> 360 -> 720 m; #107, #108) rather
+  # than naive halving — every level past the 10 m native is synthetic for
+  # S1 either way (there is no native S1 acquisition at 20/60 m), so this
+  # buys cross-mission consistency, not fewer objects: an S1 store and an S2
+  # store expose the same target-resolution levels, so a viewer/tile server
+  # built against one product's pyramid shape works against the other
+  # unmodified.
+  multiscale_levels: [20, 60, 120, 360, 720]
+  # Group VV + VH by shared grid (#108) — they are two measurements of one
+  # identical 10 m grid, so this shares one set of coordinate arrays instead
+  # of VV and VH each paying for their own copy (#105's measured
+  # fragmentation: ~30 of ~48 objects per band were per-level zarr.json +
+  # x/y copies).
+  bundle_components: true
   scope: product-set              # product (one scene) | product-set (many)
   products:
     prefix: ""

@@ -14,6 +14,15 @@ The member-name pattern lives here, not in shared config: an RTC band is
 quicklooks and ``.aux.xml`` sidecars are ignored. Members are read **on the fly**
 through GDAL's ``/vsizip//vsis3`` chain, so the conversion's write metric pays the
 real archive read cost, exactly as the MAJA reader does.
+
+No border/validity mask member: the reference EOPF ``s1-tiling`` ingestion
+(``ingest_s1tiling_acquisition``, #108) bundles VV, VH *and* a border mask
+into one store, but a captured real S1Tiling delivery listing
+(``tests/test_datasets.py``'s ``S1_MEMBERS``) has only the two ``_GAM_`` band
+rasters plus a quicklook jpg and an ``.aux.xml`` sidecar — no third raster
+this reader could plausibly be a border mask. This CNES delivery genuinely
+has no equivalent to bundle as a third component, rather than the reader
+silently missing one.
 """
 
 from __future__ import annotations
