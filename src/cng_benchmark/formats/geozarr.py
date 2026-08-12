@@ -89,7 +89,11 @@ class GeoZarrParams(BaseModel):
     — an arm without a pyramid makes the tile server read full-resolution chunks
     for every zoomed-out tile (#71). An explicit integer overrides it; ``0``
     writes the base array alone, which is the flat-store comparison, not a
-    representative GeoZarr.
+    representative GeoZarr. An explicit *list* of target resolutions (metres,
+    coarsest last, native excluded — e.g. ``[20, 60, 120, 360, 720]`` off a
+    10 m native array) anchors the ladder on those real resolutions instead of
+    assuming every step halves — the S1/S2 cross-mission target ladder
+    (#107, #108), whose 60 -> 20 and 360 -> 120 steps are 3x, not 2x.
 
     ``scale_offset`` switches how a packed source (one with a ``scale_factor``)
     is encoded. Off, the CF ``scale_factor``/``add_offset`` attributes are
@@ -146,6 +150,44 @@ def _multiscale_depth(value: Any, shape: tuple[int, int]) -> int:
     if value is None or (isinstance(value, str) and value.strip().lower() == "auto"):
         return ms.auto_depth(shape)
     return max(0, int(value))
+
+
+def _resolve_pyramid_levels(
+    value: Any, shape: tuple[int, int], gt: tuple[float, ...] | None
+) -> list[int]:
+    """Return each pyramid level's cumulative decimation from level 0 (native).
+
+    ``"auto"``/``None`` and an explicit level count both derive today's
+    uniform COG-style doubling ladder via :func:`_multiscale_depth`
+    (unchanged): ``[1, 2, 4, ...]``. An explicit *list* of target resolutions
+    instead (metres, the geotransform's own units, coarsest last, native
+    excluded — e.g. ``[20, 60, 120, 360, 720]`` off a 10 m native array)
+    anchors the ladder on those *real* resolutions rather than assuming every
+    step halves — the S1/S2 cross-mission target ladder (#107, #108), whose
+    60 -> 20 and 360 -> 120 steps are 3x, not 2x. Each level's cumulative
+    decimation is computed from the array's own native pixel size
+    (:func:`~cng_benchmark.formats.geozarr_multiscales.pixel_size`).
+    """
+    if isinstance(value, list) and value:
+        if gt is None:
+            raise ValueError(
+                "multiscale_levels as an explicit resolution list needs a "
+                "geotransform to anchor the ladder on"
+            )
+        native = ms.pixel_size(gt)
+        cumulative = [1]
+        for target in value:
+            factor = float(target) / native
+            rounded = round(factor)
+            if rounded <= cumulative[-1] or abs(factor - rounded) > 1e-6:
+                raise ValueError(
+                    f"multiscale_levels target {target!r} is not a whole, "
+                    f"increasing multiple of the native resolution {native}"
+                )
+            cumulative.append(rounded)
+        return cumulative
+    depth = _multiscale_depth(value, shape)
+    return [2**i for i in range(depth + 1)]
 
 
 def _fit_chunk(chunk: tuple[int, int], shape: tuple[int, int]) -> tuple[int, int]:
@@ -211,30 +253,39 @@ def _scale_offset_filters(scale_factor: float, add_offset: float, stored_dtype: 
     ]
 
 
-def _levels(data, n_levels: int, fill_value: float | None = None) -> list:
-    """Return the multiscale pyramid: the base array plus ``n_levels`` coarsenings.
+def _levels(data, factors: list[int], fill_value: float | None = None) -> list:
+    """Return the multiscale pyramid: the base array plus one coarsening per
+    entry of ``factors``, each relative to the level before it.
 
-    Each extra level halves both spatial dims (mean-coarsened, trimming a ragged
-    edge), the Zarr analogue of COG overviews. ``n_levels == 0`` returns just the
-    base array.
+    Each step block-means a ``factor x factor`` block (trimming a ragged
+    edge), the Zarr analogue of COG overviews. A uniform ``[2, 2, ...]``
+    reproduces the original halving pyramid; a non-uniform sequence (e.g.
+    ``[2, 3, 2, 3, 2]``) anchors the pyramid on real target resolutions that
+    are not all reachable by repeated doubling (#107, #108). An empty
+    ``factors`` returns just the base array.
 
-    When ``fill_value`` is known the mean is taken over the *valid* pixels of each
-    2x2 block, and a block that is entirely fill stays fill. Averaging a fill
-    pixel as though it were data drags the overview towards the fill value — with
-    MAJA's -10000 that darkens every swath edge — and GDAL already excludes
-    nodata when it builds COG overviews, so doing it here keeps the two arms
-    comparable.
+    When ``fill_value`` is known the mean is taken over the *valid* pixels of
+    each block, and a block that is entirely fill stays fill. Averaging a
+    fill pixel as though it were data drags the overview towards the fill
+    value — with MAJA's -10000 that darkens every swath edge — and GDAL
+    already excludes nodata when it builds COG overviews, so doing it here
+    keeps the two arms comparable.
     """
     import numpy as np
 
     arrays = [data]
     cur = data
-    for _ in range(max(0, int(n_levels))):
+    for factor in factors:
+        factor = max(1, int(factor))
+        if factor == 1:
+            continue
         h, w = cur.shape
-        if h < 2 or w < 2:
+        if h < factor or w < factor:
             break
-        trimmed = cur[: h - (h % 2), : w - (w % 2)]
-        blocks = trimmed.reshape(trimmed.shape[0] // 2, 2, trimmed.shape[1] // 2, 2)
+        trimmed = cur[: h - (h % factor), : w - (w % factor)]
+        blocks = trimmed.reshape(
+            trimmed.shape[0] // factor, factor, trimmed.shape[1] // factor, factor
+        )
         if fill_value is None:
             cur = blocks.mean(axis=(1, 3)).astype(data.dtype)
         else:
@@ -306,13 +357,16 @@ def _write_sharded(
     import numpy as np
     import xarray as xr
 
-    depth = _multiscale_depth(multiscale_levels, data.shape)
-    # Coarsen in the *packed* domain: the fill compares exactly there, which it
-    # would not after a float multiply.
-    levels = _levels(data, depth, fill_value)
     compressors = _compressor(codec)
     gt = ms.parse_geotransform(geotransform)
     y_attrs, x_attrs = ms.coordinate_attrs(crs_wkt)
+
+    is_ladder = isinstance(multiscale_levels, list) and bool(multiscale_levels)
+    cumulative = _resolve_pyramid_levels(multiscale_levels, data.shape, gt)
+    factors = [cumulative[i] // cumulative[i - 1] for i in range(1, len(cumulative))]
+    # Coarsen in the *packed* domain: the fill compares exactly there, which it
+    # would not after a float multiply.
+    levels = _levels(data, factors, fill_value)
 
     packed_dtype = str(data.dtype)
     offset = add_offset or 0.0
@@ -345,7 +399,7 @@ def _write_sharded(
 
     def _level_gt(level: int) -> tuple[float, ...] | None:
         """The geotransform of level ``level`` — the native one, coarsened."""
-        return None if gt is None else ms.decimate(gt, 2**level)
+        return None if gt is None else ms.decimate(gt, cumulative[level])
 
     def _data_var(level: int, level_data) -> xr.DataArray:
         da = xr.DataArray(level_data, dims=("y", "x"))
@@ -456,7 +510,18 @@ def _write_sharded(
         # The pyramid group is what declares the pyramid: which group holds
         # each level, how it was derived, and where every level sits on the
         # ground. Written once per grid, by its first component.
-        root_attrs = ms.group_attrs(crs_wkt, gt, [tuple(lv.shape) for lv in levels])
+        if is_ladder:
+            # An explicit resolution ladder's steps are not all 2x (#107,
+            # #108's S1/S2 cross-mission chain has 3x steps), so the layout's
+            # per-level scale has to be the *real* ratio between two levels'
+            # pixel sizes, not `group_attrs`'s assumed halving.
+            entries = [
+                ms.ChainEntry(asset=str(i), gt=_level_gt(i), shape=tuple(lv.shape))
+                for i, lv in enumerate(levels)
+            ]
+            root_attrs = ms.chain_group_attrs(crs_wkt, entries)
+        else:
+            root_attrs = ms.group_attrs(crs_wkt, gt, [tuple(lv.shape) for lv in levels])
         xr.Dataset(attrs=root_attrs).to_zarr(
             store, mode="a", group=group, zarr_format=3, consolidated=False
         )

@@ -140,6 +140,59 @@ def test_multiscale_levels_build_a_pyramid(tmp_path):
     assert ly.shard_count > 4
 
 
+# --- multiscale_levels as an explicit resolution ladder (#107, #108) --------
+
+
+def test_multiscale_levels_as_a_resolution_list_anchors_on_real_ratios(tmp_path):
+    # The 10 m native array here explicitly targets 20 m then 60 m -- a 3x
+    # step a uniform-halving ladder could never reach.
+    import zarr
+
+    store = _store(tmp_path, name="ladder.zarr", multiscale_levels=[20, 60])
+    group = zarr.open_group(store, mode="r")
+
+    assert sorted(group.group_keys(), key=int) == ["0", "1", "2"]
+    assert [group[k][DATA_VAR].shape for k in ("0", "1", "2")] == [
+        (2048, 2048),
+        (1024, 1024),
+        (341, 341),  # (2048 // 2) trimmed to a multiple of 3, then / 3
+    ]
+    assert describe_store_layout(store, "x").multiscale_levels == 2
+
+    layout = group.attrs["multiscales"]["layout"]
+    assert [e["asset"] for e in layout] == ["0", "1", "2"]
+    assert "derived_from" not in layout[0]
+    assert layout[1]["derived_from"] == "0"
+    assert layout[1]["transform"]["scale"] == [2.0, 2.0]
+    assert layout[2]["derived_from"] == "1"
+    assert layout[2]["transform"]["scale"] == [3.0, 3.0]
+    x0, y0 = 300000.0, 4900020.0
+    assert layout[1]["spatial:transform"] == [20.0, 0.0, x0, 0.0, -20.0, y0]
+    assert layout[2]["spatial:transform"] == [60.0, 0.0, x0, 0.0, -60.0, y0]
+
+
+def test_multiscale_levels_resolution_list_rejects_a_bad_target(tmp_path):
+    # 15 is not a whole multiple of the 10 m native pixel size.
+    with pytest.raises(ValueError, match="not a whole"):
+        _store(tmp_path, name="bad.zarr", multiscale_levels=[15])
+    # Targets must strictly increase -- a repeat or a step backwards isn't a
+    # coarser level.
+    with pytest.raises(ValueError, match="not a whole"):
+        _store(tmp_path, name="bad2.zarr", multiscale_levels=[20, 20])
+
+
+def test_multiscale_levels_resolution_list_requires_a_geotransform(tmp_path):
+    with pytest.raises(ValueError, match="geotransform"):
+        _write_sharded(
+            str(tmp_path / "no-gt.zarr"),
+            np.zeros((8, 8), dtype="int16"),
+            chunk=(4, 4),
+            shard=(8, 8),
+            codec="zstd",
+            multiscale_levels=[20],
+        )
+
+
 def test_unknown_codec_raises(tmp_path):
     with pytest.raises(ValueError, match="unknown geozarr codec"):
         _store(tmp_path, name="bad.zarr", codec="lz4-nope")
@@ -1306,3 +1359,51 @@ def test_convert_batch_single_resolution_bundle_is_unaffected_by_anchoring(tmp_p
     root = zarr.open_group(target, mode="r")
     assert "multiscales" not in root.attrs
     assert root.attrs["cng_benchmark:components"] == {"wse": "grid0", "sig0": "grid0"}
+
+
+def test_convert_batch_bundles_vv_vh_on_the_resolution_ladder(tmp_path):
+    # The #108 S1 RTC case: VV and VH share one 10 m grid (no resolution
+    # grouping needed, unlike #107's S2 case), bundled together, each on the
+    # explicit target-resolution ladder rather than naive halving.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "vv.tif"), value=1, pixel_size=10)
+    _write_source_at(str(tmp_path / "vh.tif"), value=2, pixel_size=10)
+    sources = [
+        SourceObject(name="VV", uri=str(tmp_path / "vv.tif")),
+        SourceObject(name="VH", uri=str(tmp_path / "vh.tif")),
+    ]
+
+    target = str(tmp_path / "s1.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {
+            "chunk_shape": [32, 32],
+            "shard_shape": [64, 64],
+            "multiscale_levels": [20, 60],
+        },
+    )
+
+    # Both polarisations independently carry the same-shaped ladder -- they
+    # share the grid, but not the data (#108: "VV and VH ... cannot share
+    # data, only the grid").
+    layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
+    assert layouts["VV"].multiscale_levels == 2
+    assert layouts["VH"].multiscale_levels == 2
+
+    root = zarr.open_group(target, mode="r")
+    grid0 = root["grid0"]
+    assert sorted(grid0.group_keys(), key=int) == ["0", "1", "2"]
+    for level, shape in (("0", (256, 256)), ("1", (128, 128)), ("2", (42, 42))):
+        assert grid0[level]["VV"].shape == shape
+        assert grid0[level]["VH"].shape == shape
+
+    layout = grid0.attrs["multiscales"]["layout"]
+    assert [e["transform"]["scale"] for e in layout[1:]] == [[2.0, 2.0], [3.0, 3.0]]
