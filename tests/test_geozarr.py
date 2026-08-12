@@ -87,7 +87,7 @@ def test_fit_shard_aligns_to_chunk_multiple_and_clamps():
 
 def test_spatial_pair_passes_auto_through():
     assert _spatial_pair("auto", (9, 9)) == AUTO
-    assert _spatial_pair("AUTO", (9, 9)) == AUTO  # case-insensitive, like multiscale_levels
+    assert _spatial_pair("AUTO", (9, 9)) == AUTO  # case-insensitive
     assert _spatial_pair(" Auto ", (9, 9)) == AUTO
 
 
