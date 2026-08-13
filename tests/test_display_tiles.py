@@ -11,8 +11,10 @@ from cng_benchmark.metrics.display_tiles import (  # noqa: E402
     render_chunk_layout,
     render_zarr_chunk_layout,
     select_chunk_tiles,
+    select_pan_zoom_session,
     select_resolution_tiles,
     select_zarr_chunk_tiles,
+    select_zarr_pan_zoom_session,
     select_zarr_resolution_tiles,
 )
 
@@ -353,3 +355,85 @@ def test_select_resolution_tiles_defaults_to_the_objects_own_decimations(zarr_st
     # where cross-format resolution alignment isn't the point.
     tiles = select_zarr_resolution_tiles(zarr_store)
     assert [t.label for t in tiles] == ["res_10m", "res_20m", "res_40m"]
+
+
+# --- Pan-and-zoom session (#122) -------------------------------------------
+
+
+def test_select_pan_zoom_session_is_deterministic(cog_path):
+    first = select_pan_zoom_session(cog_path)
+    second = select_pan_zoom_session(cog_path)
+    assert first == second
+
+
+def test_select_pan_zoom_session_default_shape(cog_path):
+    tiles = select_pan_zoom_session(cog_path)
+    # 1 start + 3 zoom-in + 4 pan + 2 zoom-out (the confirmed default shape).
+    assert [t.label for t in tiles] == [
+        "pan_zoom_00_start",
+        "pan_zoom_01_zoom_in",
+        "pan_zoom_02_zoom_in",
+        "pan_zoom_03_zoom_in",
+        "pan_zoom_04_pan_e",
+        "pan_zoom_05_pan_s",
+        "pan_zoom_06_pan_w",
+        "pan_zoom_07_pan_n",
+        "pan_zoom_08_zoom_out",
+        "pan_zoom_09_zoom_out",
+    ]
+    zooms = [t.z for t in tiles]
+    # Strictly increasing through the 3 zoom-in steps, flat across the 4 pan
+    # steps, strictly decreasing through the 2 zoom-out steps.
+    assert zooms[0] < zooms[1] < zooms[2] < zooms[3]
+    assert zooms[3] == zooms[4] == zooms[5] == zooms[6] == zooms[7]
+    assert zooms[7] > zooms[8] > zooms[9]
+
+
+def test_select_pan_zoom_session_pan_loop_returns_to_the_zoomed_in_tile(cog_path):
+    # East, south, west, north from the deepest zoom-in tile is a closed
+    # clockwise loop -- panning "north" last lands exactly back where
+    # zooming stopped, the same tile a person glancing around one spot
+    # would return their attention to.
+    tiles = select_pan_zoom_session(cog_path)
+    deepest = tiles[3]
+    after_pan_loop = tiles[7]
+    assert (after_pan_loop.z, after_pan_loop.x, after_pan_loop.y) == (
+        deepest.z,
+        deepest.x,
+        deepest.y,
+    )
+    # Zooming back out retraces the exact same ancestor chain the zoom-in
+    # steps built, since panning closed the loop before zooming out.
+    assert (tiles[8].z, tiles[8].x, tiles[8].y) == (tiles[2].z, tiles[2].x, tiles[2].y)
+    assert (tiles[9].z, tiles[9].x, tiles[9].y) == (tiles[1].z, tiles[1].x, tiles[1].y)
+
+
+def test_select_pan_zoom_session_consecutive_tiles_differ(cog_path):
+    # Unlike the repeated single-tile fetch this replaces (#122), every step
+    # is a genuinely different tile from the one immediately before it.
+    tiles = select_pan_zoom_session(cog_path)
+    for prev, cur in zip(tiles, tiles[1:], strict=False):
+        assert (prev.z, prev.x, prev.y) != (cur.z, cur.x, cur.y)
+
+
+def test_select_pan_zoom_session_custom_step_counts(cog_path):
+    tiles = select_pan_zoom_session(cog_path, zoom_in_steps=1, zoom_out_steps=0)
+    assert [t.label for t in tiles] == [
+        "pan_zoom_00_start",
+        "pan_zoom_01_zoom_in",
+        "pan_zoom_02_pan_e",
+        "pan_zoom_03_pan_s",
+        "pan_zoom_04_pan_w",
+        "pan_zoom_05_pan_n",
+    ]
+
+
+def test_select_zarr_pan_zoom_session_matches_the_cog_shape(zarr_store):
+    tiles = select_zarr_pan_zoom_session(zarr_store)
+    assert len(tiles) == 10
+    assert tiles[0].label == "pan_zoom_00_start"
+    assert tiles[-1].label == "pan_zoom_09_zoom_out"
+    zooms = [t.z for t in tiles]
+    assert zooms[0] < zooms[3]
+    assert zooms[3] == zooms[7]
+    assert zooms[7] > zooms[9]

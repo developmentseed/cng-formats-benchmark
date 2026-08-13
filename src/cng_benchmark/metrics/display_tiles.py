@@ -409,11 +409,10 @@ def select_zarr_resolution_tiles(
     Each tile carries the ``.group`` that actually serves its resolution,
     read from the store's real pyramid (:func:`_read_zarr_grid`, correctly
     scoped to one component even for a `#114` unified multi-resolution
-    bundle) — :func:`~cng_benchmark.metrics.display.measure_display`'s
-    per-tile query override uses it so the stock router reads the
-    resolution-appropriate level instead of always the native one.
-    ``group``/``var_name`` address one component of a bundled store
-    (#102/#114); ``None`` reproduces today's addressing.
+    bundle) — informational only (``MetricResult.detail["group"]``): no
+    router's query is built from a per-tile ``.group`` (#121). ``group``/
+    ``var_name`` address one component of a bundled store (#102/#114);
+    ``None`` reproduces today's addressing.
     """
     return _select_by_resolution(
         _read_zarr_grid(store, role, group=group, var_name=var_name),
@@ -421,6 +420,138 @@ def select_zarr_resolution_tiles(
         tile_matrix_set=tile_matrix_set,
         max_tiles_per_zoom=max_tiles_per_zoom,
     )
+
+
+#: Pan-and-zoom session default shape (#122): how many child-tile steps zoom
+#: in toward native resolution before panning, and how many parent-tile
+#: steps zoom back out afterward.
+DEFAULT_ZOOM_IN_STEPS = 3
+DEFAULT_ZOOM_OUT_STEPS = 2
+
+
+def select_pan_zoom_session(
+    cog_path: str,
+    *,
+    tile_matrix_set: str = "WebMercatorQuad",
+    zoom_in_steps: int = DEFAULT_ZOOM_IN_STEPS,
+    zoom_out_steps: int = DEFAULT_ZOOM_OUT_STEPS,
+) -> list[TileSpec]:
+    """Select a deterministic pan-and-zoom tile sequence for the COG (#122)."""
+    return _select_pan_zoom_session(
+        _read_cog_grid(cog_path),
+        tile_matrix_set=tile_matrix_set,
+        zoom_in_steps=zoom_in_steps,
+        zoom_out_steps=zoom_out_steps,
+    )
+
+
+def select_zarr_pan_zoom_session(
+    store: str,
+    *,
+    role: str = "sink",
+    tile_matrix_set: str = "WebMercatorQuad",
+    zoom_in_steps: int = DEFAULT_ZOOM_IN_STEPS,
+    zoom_out_steps: int = DEFAULT_ZOOM_OUT_STEPS,
+    group: str | None = None,
+    var_name: str | None = None,
+) -> list[TileSpec]:
+    """Select a deterministic pan-and-zoom tile sequence for the GeoZarr
+    ``store`` (#122). ``group``/``var_name`` address one component of a
+    bundled store (#102/#114); ``None`` reproduces today's addressing.
+    """
+    return _select_pan_zoom_session(
+        _read_zarr_grid(store, role, group=group, var_name=var_name),
+        tile_matrix_set=tile_matrix_set,
+        zoom_in_steps=zoom_in_steps,
+        zoom_out_steps=zoom_out_steps,
+    )
+
+
+def _select_pan_zoom_session(
+    grid: _Grid,
+    *,
+    tile_matrix_set: str = "WebMercatorQuad",
+    zoom_in_steps: int = DEFAULT_ZOOM_IN_STEPS,
+    zoom_out_steps: int = DEFAULT_ZOOM_OUT_STEPS,
+) -> list[TileSpec]:
+    """Build one pan-and-zoom session's tile sequence for ``grid`` (#122).
+
+    Deterministic, not random, the same way every other selector in this
+    module is: start ``zoom_in_steps`` coarser than the grid's native
+    resolution, centred on the raster's own bounds (the same starting point
+    every run); zoom in one child tile at a time toward native resolution;
+    pan one tile east, then south, then west, then north — a closed
+    clockwise loop back to where zooming stopped, the same four glances a
+    person exploring one area generates; zoom back out ``zoom_out_steps``
+    parents. Panning is plain tile-index arithmetic (``x`` east/west, ``y``
+    north/south — the standard slippy-tile convention), not
+    :meth:`morecantile.TileMatrixSet.neighbors`, whose ordering is
+    unspecified and would make the sequence irreproducible.
+
+    Unlike the single fixed tile :func:`~cng_benchmark.metrics.display.
+    measure_display` used to fetch ``display_tile_samples`` times (#122),
+    every step here is a genuinely different tile from the one before it —
+    consecutive requests share only the chunks/blocks their footprints
+    happen to overlap, the same partial cache-warming a real session gets,
+    never a full repeat of one URL. ``chunks`` is ``0`` for a step whose
+    tile falls entirely outside the raster (a real client panning past the
+    data's edge gets an empty/nodata response, not an error) rather than
+    ``approx=True`` — that flag means "a substitute for an unreachable
+    target," and no step here is standing in for anything else.
+    """
+    morecantile, _rasterio, transform_bounds = _require_geo()
+    from morecantile.commons import Tile
+
+    block_w, block_h = grid.block_w, grid.block_h
+    decimations = grid.decimations
+    native_resolution = grid.native_resolution
+    crs, inv = grid.crs, grid.inv
+    width, height = grid.width, grid.height
+    bounds = grid.bounds
+
+    tms = morecantile.tms.get(tile_matrix_set)
+    west, south, east, north = transform_bounds(crs, "EPSG:4326", *bounds)
+    mleft, _, mright, _ = transform_bounds(crs, tms.crs, *bounds)
+    native_res_webmercator = (mright - mleft) / width
+    native_zoom = tms.zoom_for_res(native_res_webmercator)
+
+    start_zoom = max(tms.minzoom, native_zoom - zoom_in_steps)
+    deep_zoom = min(tms.maxzoom, start_zoom + zoom_in_steps)
+    lng, lat = (west + east) / 2, (south + north) / 2
+    tile = tms.tile(lng, lat, start_zoom)
+
+    # Re-derive each zoom-in step from the raster's own centre point, not
+    # `children(tile)[0]` -- that always takes the *top-left* child, which
+    # drifts the view toward a corner a step at a time rather than staying
+    # centred on where a person zooming in is actually looking.
+    sequence: list[tuple[str, Tile]] = [("start", tile)]
+    for z in range(start_zoom + 1, deep_zoom + 1):
+        tile = tms.tile(lng, lat, z)
+        sequence.append(("zoom_in", tile))
+
+    for action, dx, dy in (
+        ("pan_e", 1, 0),
+        ("pan_s", 0, 1),
+        ("pan_w", -1, 0),
+        ("pan_n", 0, -1),
+    ):
+        tile = Tile(x=tile.x + dx, y=tile.y + dy, z=tile.z)
+        sequence.append((action, tile))
+
+    for _ in range(min(zoom_out_steps, deep_zoom - tms.minzoom)):
+        tile = tms.parent(tile)[0]
+        sequence.append(("zoom_out", tile))
+
+    selected: list[TileSpec] = []
+    for i, (action, t) in enumerate(sequence):
+        tile_res = tms.matrix(t.z).cellSize
+        decim = _pick_decimation(decimations, native_resolution, tile_res)
+        counted = _count_chunks(
+            t, tms, transform_bounds, crs, inv, width, height, block_w, block_h, decim
+        )
+        chunks = counted[0] if counted is not None else 0
+        selected.append(TileSpec(f"pan_zoom_{i:02d}_{action}", t.z, t.x, t.y, chunks))
+    return selected
 
 
 def _select_by_resolution(

@@ -38,33 +38,28 @@ def test_display_measures_tiles_with_fake_titiler(monkeypatch):
     monkeypatch.setattr(display.urllib.request, "urlopen", fake_urlopen)
 
     metrics = display.measure_display(
-        "http://titiler:8000/", "s3://bench/results/cog/cog.tif", _TILES, samples=3
+        "http://titiler:8000/", "s3://bench/results/cog/cog.tif", _TILES
     )
     names = {m.name for m in metrics}
-    # Flat per-scenario metrics, one mean+p50 per chunk bucket, plus a summary.
+    # Flat per-scenario metrics, one fetch per chunk bucket, plus a summary
+    # (#122: no more repeated-and-averaged fetch of the same tile).
     assert {
-        "display_1chunk_latency_mean",
-        "display_1chunk_latency_p50",
-        "display_2chunk_latency_mean",
-        "display_2chunk_latency_p50",
+        "display_1chunk_latency",
+        "display_2chunk_latency",
         "display_scenarios",
     } <= names
     assert next(m.value for m in metrics if m.name == "display_scenarios") == 2
-    detail = next(m.detail for m in metrics if m.name == "display_1chunk_latency_mean")
+    detail = next(m.detail for m in metrics if m.name == "display_1chunk_latency")
     assert detail["chunks"] == 1
-    assert "cold_s" in detail
+    assert "bytes" in detail
     # Every metric records which router served it (#88) — no figure ambiguous
     # about which reader produced it.
     assert detail["path_prefix"] == "cog"
-    p50_detail = next(
-        m.detail for m in metrics if m.name == "display_1chunk_latency_p50"
-    )
-    assert p50_detail["path_prefix"] == "cog"
     scenarios_detail = next(m.detail for m in metrics if m.name == "display_scenarios")
     assert scenarios_detail["path_prefix"] == "cog"
-    # /cog/info once, then samples fetches per tile (1 + 2*3 = 7 calls).
+    # /cog/info once, then one fetch per tile (1 + 2 = 3 calls).
     assert calls[0].startswith("http://titiler:8000/cog/info?url=")
-    assert len(calls) == 1 + len(_TILES) * 3
+    assert len(calls) == 1 + len(_TILES)
     assert "/cog/tiles/WebMercatorQuad/0/0/0.png?url=" in calls[1]
     assert "s3%3A%2F%2Fbench" in calls[1]
 
@@ -104,13 +99,6 @@ def test_display_raises_clear_error_on_http_failure(monkeypatch):
         display.measure_display("http://titiler:8000", "s3://b/k.tif", _TILES)
 
 
-def test_display_rejects_zero_samples():
-    with pytest.raises(ValueError, match="samples"):
-        display.measure_display(
-            "http://titiler:8000", "s3://b/k.tif", _TILES, samples=0
-        )
-
-
 def test_display_records_a_non_default_path_prefix(monkeypatch):
     # The geozarr arm (#88): a GeoZarrReader-backed router, addressed with
     # `variables` (not `variable`) per its own query contract.
@@ -124,7 +112,7 @@ def test_display_records_a_non_default_path_prefix(monkeypatch):
         path_prefix="geozarr",
         extra_query={"variables": "/:data"},
     )
-    detail = next(m.detail for m in metrics if m.name == "display_1chunk_latency_mean")
+    detail = next(m.detail for m in metrics if m.name == "display_1chunk_latency")
     assert detail["path_prefix"] == "geozarr"
 
 
@@ -148,7 +136,6 @@ def test_display_group_query_key_overrides_group_per_tile(monkeypatch):
         "http://titiler:8000",
         "s3://b/k.zarr",
         tiles,
-        samples=1,
         path_prefix="zarr",
         extra_query={"variable": "data", "group": "grid0/0"},
         group_query_key="group",
@@ -176,7 +163,6 @@ def test_display_group_query_key_none_is_a_no_op(monkeypatch):
         "http://titiler:8000",
         "s3://b/k.zarr",
         tiles,
-        samples=1,
         extra_query={"group": "grid0/0"},
     )
     tile_call = next(c for c in calls if "/tiles/" in c)
