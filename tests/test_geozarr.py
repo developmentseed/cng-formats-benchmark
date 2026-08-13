@@ -346,6 +346,50 @@ def test_convert_reads_a_raster_and_writes_a_store(tmp_path):
     assert metrics["read_decoded_throughput"] > 0
 
 
+def test_convert_consolidates_metadata(tmp_path):
+    # #126: every incremental `to_zarr` call writes `consolidated=False`
+    # (correct mid-write); the finished store must still end up consolidated
+    # so a reader (GeoZarrReader included) doesn't pay the "no consolidated
+    # metadata found" fallback cost on every open.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    source = str(tmp_path / "src.tif")
+    _write_source(source)
+    target = str(tmp_path / "out.zarr")
+    GeoZarrAdapter().convert(
+        source, target, {"chunk_shape": [64, 64], "shard_shape": [128, 128]}
+    )
+    root = zarr.open_group(target, mode="r")
+    assert root.metadata.consolidated_metadata is not None
+
+
+def test_convert_batch_consolidates_metadata(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    for name, value in [("wse", 10), ("sig0", 20)]:
+        _write_source_at(str(tmp_path / f"{name}.tif"), value=value)
+    sources = [
+        SourceObject(name=n, uri=str(tmp_path / f"{n}.tif")) for n in ("wse", "sig0")
+    ]
+    target = str(tmp_path / "bundle.zarr")
+    GeoZarrAdapter().convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 2},
+    )
+    root = zarr.open_group(target, mode="r")
+    assert root.metadata.consolidated_metadata is not None
+
+
 def test_convert_shard_shape_auto_on_a_non_round_raster(tmp_path):
     # End-to-end through the adapter (not just `_write_sharded` directly):
     # a raster whose extent isn't a multiple of the chunk still lands in
