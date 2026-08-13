@@ -1025,6 +1025,8 @@ class GeoZarrAdapter(FormatAdapter):
         codec and multiscale depth come from :class:`GeoZarrParams`.
         """
         _require_rioxarray()
+        import zarr
+
         opts = GeoZarrParams.model_validate(params)
         read = _read_component_array(source, params, opts)
         data = read["data"]
@@ -1051,6 +1053,14 @@ class GeoZarrAdapter(FormatAdapter):
             scale_offset=opts.scale_offset,
             standard_name=read["standard_name"],
         )
+        # Every `to_zarr` call above writes with `consolidated=False` (cheap,
+        # correct for an incremental multi-level write); consolidate once,
+        # now that the store is complete, so a reader opening it doesn't pay
+        # the "no consolidated metadata found" fallback cost on every open
+        # (#126 -- confirmed via titiler.eopf's own `open_dataset`, which
+        # tries consolidated first and warns/falls back to a slower
+        # per-group read otherwise).
+        zarr.consolidate_metadata(target)
 
     def convert_batch(
         self, sources: list[SourceObject], target: str, params: dict[str, Any]
@@ -1082,6 +1092,7 @@ class GeoZarrAdapter(FormatAdapter):
         """
         _require_rioxarray()
         import xarray as xr
+        import zarr
 
         reads: dict[str, dict] = {}
         keys: list[GridKey] = []
@@ -1183,6 +1194,14 @@ class GeoZarrAdapter(FormatAdapter):
         xr.Dataset(attrs=root_attrs).to_zarr(
             target, mode="a", zarr_format=3, consolidated=False
         )
+        # Every `to_zarr` call above writes with `consolidated=False` (cheap,
+        # correct for an incremental multi-component/multi-level write);
+        # consolidate once, now that the store is complete, so a reader
+        # opening it doesn't pay the "no consolidated metadata found"
+        # fallback cost on every open (#126 -- confirmed via titiler.eopf's
+        # own `open_dataset`, which tries consolidated first and warns/falls
+        # back to a slower per-group read otherwise).
+        zarr.consolidate_metadata(target)
 
     def _write_unified_pyramid(
         self,
