@@ -82,3 +82,24 @@ helm install swot-pixc helm/cng-benchmark \
 
 Adjust `runner.output` (the sink results prefix) and the dataset `source` in the
 overlay if your staged paths differ.
+
+### Capturing titiler diagnostics on a display-metric failure
+
+A display run against a real store can fail at the titiler side without a
+useful error reaching the runner (e.g. `/geozarr`'s `GeoZarrReader` against a
+`#114` unified-pyramid store, #119: every tile request comes back as a closed
+connection, and even `/healthz` never gets recorded because the process
+itself is down). `tool_versions` in the run's `result.json` now records a
+`tiler_healthz_error` key when `/healthz` couldn't be reached at all — check
+that first. If it's set, or a display metric came back `*_skipped`, pull the
+titiler pod's own logs before the release gets uninstalled (mirroring the CI
+kind-cluster diagnostics step, `.github/workflows/ci.yml`):
+
+```bash
+kubectl logs deploy/<release>-cng-benchmark-titiler --previous   # if it crashed/restarted
+kubectl logs deploy/<release>-cng-benchmark-titiler              # current logs
+kubectl describe pod -l app.kubernetes.io/instance=<release>,app.kubernetes.io/component=titiler
+```
+
+Substitute `<release>` with the `helm install` name you used (e.g. `swot-pixc`
+above gives `swot-pixc-cng-benchmark-titiler`).

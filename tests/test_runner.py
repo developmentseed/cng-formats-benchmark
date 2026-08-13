@@ -1,5 +1,6 @@
 """Tests for the orchestration runner (independent of the CLI)."""
 
+import numpy as np
 import pytest
 
 from cng_benchmark import __version__
@@ -9,6 +10,7 @@ from cng_benchmark.runner import (
     _measure_display_object,
     _safe_display_metrics,
     _safe_read_metrics,
+    _tool_versions,
     run_benchmark,
     run_conversion_benchmark,
     tier_policy_from_config,
@@ -152,6 +154,221 @@ def test_measure_display_object_cog_no_locator_omits_bidx(tmp_path, monkeypatch)
     )
 
     assert captured["extra_query"] is None
+
+
+def test_measure_display_object_zarr_query_group_is_fixed_not_per_tile(
+    tmp_path, monkeypatch
+):
+    # #121: the stock /zarr router's query must name one *fixed* group (its
+    # native/canonical level -- titiler.xarray needs some group to locate a
+    # nested variable at all, and this writer nests even the native level
+    # under its own integer group whenever the store carries any pyramid),
+    # the same for every tile regardless of which resolution is being timed
+    # -- not the #116/#117 per-tile override that swapped in a *different*,
+    # resolution-appropriate group per scenario, crediting the router with
+    # multiscale awareness it doesn't have.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import rasterio
+    from rasterio.transform import from_origin
+
+    import cng_benchmark.runner as _runner
+    from cng_benchmark.formats.geozarr import DATA_VAR, GeoZarrAdapter
+
+    source = tmp_path / "source.tif"
+    with rasterio.open(
+        source,
+        "w",
+        driver="GTiff",
+        width=256,
+        height=256,
+        count=1,
+        dtype="int16",
+        crs="EPSG:32631",
+        transform=from_origin(300000, 4900020, 10, 10),
+    ) as dst:
+        dst.write(np.full((256, 256), 1234, dtype="int16"), 1)
+
+    target = tmp_path / "store.zarr"
+    GeoZarrAdapter().convert(
+        str(source),
+        str(target),
+        {"chunk_shape": [64, 64], "shard_shape": [128, 128], "multiscale_levels": 1},
+    )
+
+    captured_calls = []
+
+    def _fake_measure_display(endpoint, uri, tiles, **kwargs):
+        captured_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(_runner, "measure_display", _fake_measure_display)
+
+    cfg = load_benchmark_config("configs/benchmarks/synthetic_geozarr.yaml")
+    _measure_display_object(
+        cfg,
+        GeoZarrAdapter(),
+        str(target),
+        "s3://bucket/store.zarr",
+        str(tmp_path),
+        "http://titiler.example",
+    )
+    assert len(captured_calls) == 1
+    # Native level 0 -- fixed, never a per-tile override.
+    assert captured_calls[0]["extra_query"] == {"variable": DATA_VAR, "group": "0"}
+    assert captured_calls[0]["group_query_key"] is None
+
+    # Same for a run with resolution-coverage scenarios configured -- #121's
+    # bug specifically compounded there via the per-tile override, which
+    # would have swapped `group` to a coarser level for each res_*m tile.
+    captured_calls.clear()
+    cfg = cfg.model_copy(
+        update={"params": {**cfg.params, "display_target_resolutions": [10, 20]}}
+    )
+    _measure_display_object(
+        cfg,
+        GeoZarrAdapter(),
+        str(target),
+        "s3://bucket/store.zarr",
+        str(tmp_path),
+        "http://titiler.example",
+    )
+    assert len(captured_calls) == 1
+    assert captured_calls[0]["extra_query"] == {"variable": DATA_VAR, "group": "0"}
+    assert captured_calls[0]["group_query_key"] is None
+
+
+def test_measure_display_object_geozarr_addresses_the_multiscales_owning_group(
+    tmp_path, monkeypatch
+):
+    # #119: GeoZarrReader only resolves the pyramid from the requested zoom
+    # for the *specific* group whose own zarr_conventions declare
+    # `multiscales` -- any other group is read as-is, no zoom-awareness at
+    # all. For a #114 cross-tier unified pyramid (S2: 10 m reflectance + 20
+    # m masks), that group is always the store root, never a component's
+    # own component_locator (its native *level*, e.g. "0"/"1") -- addressing
+    # a component there would silently pin every request to its native
+    # level regardless of the tile's actual zoom. A #102 single-resolution
+    # bundle (S1: VV+VH) is unaffected -- there, component_locator ("grid0")
+    # already IS the group that owns the doc.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import rasterio
+    from rasterio.transform import from_origin
+
+    import cng_benchmark.runner as _runner
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    def _write_source(path, value, pixel_size, size=256):
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=size,
+            height=size,
+            count=1,
+            dtype="int16",
+            crs="EPSG:32631",
+            transform=from_origin(300000, 4900020, pixel_size, pixel_size),
+        ) as dst:
+            dst.write(np.full((size, size), value, dtype="int16"), 1)
+
+    captured_calls = []
+
+    def _fake_measure_display(endpoint, uri, tiles, **kwargs):
+        captured_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(_runner, "measure_display", _fake_measure_display)
+
+    cfg = load_benchmark_config("configs/benchmarks/synthetic_geozarr_reader.yaml")
+    cfg = cfg.model_copy(
+        update={"params": {**cfg.params, "display_titiler_path": "geozarr"}}
+    )
+
+    # A #114 unified pyramid: b2 (10 m, native level "0") + clm (20 m,
+    # native level "1") -- the shape #119 was filed against.
+    _write_source(str(tmp_path / "b2.tif"), 1, 10)
+    _write_source(str(tmp_path / "clm.tif"), 2, 20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm", uri=str(tmp_path / "clm.tif")),
+    ]
+    unified_target = tmp_path / "unified.zarr"
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        str(unified_target),
+        {
+            "chunk_shape": [32, 32],
+            "shard_shape": [64, 64],
+            "multiscale_levels": [20, 60],
+        },
+    )
+    for name in ("b2", "clm"):
+        captured_calls.clear()
+        locator = adapter.component_locator(str(unified_target), name)
+        _measure_display_object(
+            cfg,
+            adapter,
+            str(unified_target),
+            "s3://bucket/unified.zarr",
+            str(tmp_path),
+            "http://titiler.example",
+            locator=locator,
+            name=name,
+        )
+        # Every tile, whatever component or resolution, addresses the
+        # store root -- not "locator" (a native level like "0" or "1").
+        assert all(
+            c["extra_query"] == {"variables": f"/:{name}"} for c in captured_calls
+        ), captured_calls
+
+    # A #102 single-resolution bundle: unaffected -- component_locator
+    # ("grid0") already IS the group that owns the multiscales doc.
+    _write_source(str(tmp_path / "vv.tif"), 1, 10)
+    _write_source(str(tmp_path / "vh.tif"), 2, 10)
+    bundle_sources = [
+        SourceObject(name="vv", uri=str(tmp_path / "vv.tif")),
+        SourceObject(name="vh", uri=str(tmp_path / "vh.tif")),
+    ]
+    bundle_target = tmp_path / "bundle.zarr"
+    adapter.convert_batch(
+        bundle_sources,
+        str(bundle_target),
+        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 2},
+    )
+    captured_calls.clear()
+    locator = adapter.component_locator(str(bundle_target), "vv")
+    _measure_display_object(
+        cfg,
+        adapter,
+        str(bundle_target),
+        "s3://bucket/bundle.zarr",
+        str(tmp_path),
+        "http://titiler.example",
+        locator=locator,
+        name="vv",
+    )
+    assert all(
+        c["extra_query"] == {"variables": "/grid0:vv"} for c in captured_calls
+    ), captured_calls
+
+
+def test_tool_versions_records_titiler_healthz_failure(monkeypatch):
+    # #119: a run's tool_versions must show *why* titiler_eopf (etc.) is
+    # missing rather than silently omitting it -- indistinguishable from a
+    # healthy endpoint that just reported nothing.
+    import cng_benchmark.runner as _runner
+
+    def _fake_fetch_titiler_versions(endpoint, **kwargs):
+        return {"tiler_healthz_error": "TiTiler unreachable at ...: refused"}
+
+    monkeypatch.setattr(_runner, "fetch_titiler_versions", _fake_fetch_titiler_versions)
+    versions = _tool_versions("http://titiler.example")
+    assert versions["cng_benchmark"] == __version__
+    assert "tiler_healthz_error" in versions
 
 
 def test_safe_read_metrics_returns_skipped_on_failure(monkeypatch):

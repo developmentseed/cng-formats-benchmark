@@ -73,6 +73,32 @@ def finest_level_group(
     return level_keys[0]
 
 
+def is_unified_pyramid(store: str) -> bool:
+    """Whether ``store``'s root owns a ``multiscales`` doc covering *every*
+    bundled component, not just its own (#114).
+
+    A reader that resolves the pyramid itself (``GeoZarrReader``) only
+    activates that resolution for the *specific* group whose own
+    ``zarr_conventions`` declare ``multiscales`` — addressing any other
+    group (e.g. a numbered pyramid level, or a bundled component's own
+    native-level locator) silently reads that one group's data with no
+    zoom-awareness at all, rather than erroring (#119). A non-batched
+    store's root always carries its own doc too, but there every
+    component's own :meth:`GeoZarrAdapter.component_locator` is already
+    ``None`` (root), so this distinction is moot for it. Where it matters is
+    a #102 single-resolution bundle, whose root carries *no* doc (each
+    grid's own subtree does, independently) versus a #114 cross-tier
+    unified pyramid, whose root's *one shared* doc is the only group that
+    covers every component regardless of which native level its own data
+    starts at — the caller must use the root, never ``component_locator``,
+    to address any component of one.
+    """
+    import zarr
+
+    root = zarr.open_group(store, mode="r")
+    return "multiscales" in root.attrs
+
+
 class GeoZarrParams(BaseModel):
     """Zarr v3 sharding levers, parsed from ``config.params``.
 
@@ -170,6 +196,17 @@ def _multiscale_depth(value: Any, shape: tuple[int, int]) -> int:
     if value is None or (isinstance(value, str) and value.strip().lower() == "auto"):
         return ms.auto_depth(shape)
     return max(0, int(value))
+
+
+def _flattens_to_zero(value: Any) -> bool:
+    """Whether ``multiscale_levels`` explicitly asks for zero pyramid depth.
+
+    Literal ``0`` only — never ``None``/``"auto"`` (both default-derive a
+    depth) nor an explicit resolution list (its own ladder, never flat).
+    """
+    if value is None or isinstance(value, (str, list)):
+        return False
+    return int(value) == 0
 
 
 def _resolve_pyramid_levels(
@@ -1086,8 +1123,10 @@ class GeoZarrAdapter(FormatAdapter):
                 pixel_sizes = None
                 break
             pixel_sizes[grid_id] = ms.pixel_size(gt)
-        is_multi_resolution = pixel_sizes is not None and (
-            len({round(p, 6) for p in pixel_sizes.values()}) > 1
+        is_multi_resolution = (
+            pixel_sizes is not None
+            and len({round(p, 6) for p in pixel_sizes.values()}) > 1
+            and not _flattens_to_zero(opts.multiscale_levels)
         )
 
         root_attrs: dict[str, Any]
