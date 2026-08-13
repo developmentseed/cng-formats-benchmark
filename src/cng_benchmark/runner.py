@@ -941,19 +941,29 @@ def _measure_display_object(
     addresses the array as ``{group}:{name}``.
 
     ``display_chunk_targets``/``display_target_resolutions``
-    (``config.params``, #116) control the scenario set: chunk-crossing
-    buckets (unchanged, #102's original question — the cost of straddling
-    chunks within one level) plus one tile per target ground resolution
-    (new — the cost of reading a precomputed overview vs. downsampling from
-    native, at a zoom a panning/zooming client would actually generate).
-    Each scenario is fetched once, not repeated-and-averaged (#122) — the
-    honest single-fetch number, not one smoothed over a warm cache a real
-    session never gets. ``display_target_resolutions`` should be set to the
-    *same* list on a COG arm and its matched GeoZarr arm so the resulting
-    ``res_*`` labels are directly comparable across formats — see
-    :func:`~cng_benchmark.metrics.display_tiles.select_resolution_tiles`.
+    (``config.params``, #116) control most of the scenario set: chunk-
+    crossing buckets (unchanged, #102's original question — the cost of
+    straddling chunks within one level) plus one tile per target ground
+    resolution (the cost of reading a precomputed overview vs. downsampling
+    from native, at a zoom a panning/zooming client would actually
+    generate). Each of those is fetched once, not repeated-and-averaged
+    (#122) — the honest single-fetch number, not one smoothed over a warm
+    cache a real session never gets. ``display_target_resolutions`` should
+    be set to the *same* list on a COG arm and its matched GeoZarr arm so
+    the resulting ``res_*`` labels are directly comparable across formats —
+    see :func:`~cng_benchmark.metrics.display_tiles.select_resolution_tiles`.
     Unset, resolutions are derived from the object's own decimations
     (today's implicit per-format behaviour, unaffected).
+
+    Alongside those, every run also gets one deterministic pan-and-zoom
+    session (:func:`~cng_benchmark.metrics.display_tiles.
+    select_pan_zoom_session`/``select_zarr_pan_zoom_session``, #122): zoom
+    in toward native resolution, pan around a bit, zoom back out — the one
+    scenario set where consecutive tiles are deliberately *different*, the
+    way an actual person using the map generates requests, rather than one
+    fixed tile per bucket/resolution. No config knob yet; the session shape
+    is fixed (see :data:`~cng_benchmark.metrics.display_tiles.
+    DEFAULT_ZOOM_IN_STEPS`/``DEFAULT_ZOOM_OUT_STEPS``).
 
     ``locator``/``name`` address one component of a batched adapter's bundled
     object (#102) the same way :func:`_measure_object_read` does: a COG's 1-based
@@ -975,8 +985,10 @@ def _measure_display_object(
         render_chunk_layout,
         render_zarr_chunk_layout,
         select_chunk_tiles,
+        select_pan_zoom_session,
         select_resolution_tiles,
         select_zarr_chunk_tiles,
+        select_zarr_pan_zoom_session,
         select_zarr_resolution_tiles,
     )
 
@@ -990,13 +1002,17 @@ def _measure_display_object(
         )
 
         var_name = name or DATA_VAR
-        tiles = select_zarr_chunk_tiles(
-            local_target, targets=targets, group=locator, var_name=name
-        ) + select_zarr_resolution_tiles(
-            local_target,
-            target_resolutions=target_resolutions,
-            group=locator,
-            var_name=name,
+        tiles = (
+            select_zarr_chunk_tiles(
+                local_target, targets=targets, group=locator, var_name=name
+            )
+            + select_zarr_resolution_tiles(
+                local_target,
+                target_resolutions=target_resolutions,
+                group=locator,
+                var_name=name,
+            )
+            + select_zarr_pan_zoom_session(local_target, group=locator, var_name=name)
         )
         prefix = str(config.params.get("display_titiler_path", "zarr"))
         group_query_key: str | None = None
@@ -1056,9 +1072,13 @@ def _measure_display_object(
             render_zarr_chunk_layout, group=locator, var_name=name
         )
     else:
-        tiles = select_chunk_tiles(
-            local_target, targets=targets
-        ) + select_resolution_tiles(local_target, target_resolutions=target_resolutions)
+        tiles = (
+            select_chunk_tiles(local_target, targets=targets)
+            + select_resolution_tiles(
+                local_target, target_resolutions=target_resolutions
+            )
+            + select_pan_zoom_session(local_target)
+        )
         extra_query = {"bidx": locator} if locator else None
         metrics = measure_display(
             titiler_endpoint,

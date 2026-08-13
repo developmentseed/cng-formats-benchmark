@@ -156,6 +156,53 @@ def test_measure_display_object_cog_no_locator_omits_bidx(tmp_path, monkeypatch)
     assert captured["extra_query"] is None
 
 
+def test_measure_display_object_includes_a_pan_zoom_session(tmp_path, monkeypatch):
+    # #122: every display run also gets one deterministic pan-and-zoom
+    # session alongside the chunk-bucket/resolution scenarios, for both the
+    # raster (COG) and zarr-store code paths.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rio_cogeo")
+    import cng_benchmark.runner as _runner
+    from cng_benchmark.fixtures import generate_cog_bytes
+    from cng_benchmark.formats.cog import CogAdapter
+
+    source = tmp_path / "source.tif"
+    source.write_bytes(generate_cog_bytes(size=512, blocksize=256, overview_levels=2))
+
+    captured_tiles = []
+
+    def _fake_measure_display(endpoint, uri, tiles, **kwargs):
+        captured_tiles.extend(tiles)
+        return []
+
+    monkeypatch.setattr(_runner, "measure_display", _fake_measure_display)
+
+    cfg = load_benchmark_config(SYNTHETIC)
+    _measure_display_object(
+        cfg,
+        CogAdapter(),
+        str(source),
+        "s3://bucket/source.tif",
+        str(tmp_path),
+        "http://titiler.example",
+    )
+    pan_zoom_labels = [
+        t.label for t in captured_tiles if t.label.startswith("pan_zoom_")
+    ]
+    assert pan_zoom_labels == [
+        "pan_zoom_00_start",
+        "pan_zoom_01_zoom_in",
+        "pan_zoom_02_zoom_in",
+        "pan_zoom_03_zoom_in",
+        "pan_zoom_04_pan_e",
+        "pan_zoom_05_pan_s",
+        "pan_zoom_06_pan_w",
+        "pan_zoom_07_pan_n",
+        "pan_zoom_08_zoom_out",
+        "pan_zoom_09_zoom_out",
+    ]
+
+
 def test_measure_display_object_zarr_query_group_is_fixed_not_per_tile(
     tmp_path, monkeypatch
 ):
