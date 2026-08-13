@@ -106,7 +106,7 @@ def test_example_maja_geozarr_reader_benchmark_config_validates():
 
 def test_example_s2_display_comparison_trio_shares_target_resolutions():
     # #116: /cog, /zarr and /geozarr must land on the *same* ground
-    # resolutions for a display_res_60m_latency_mean (etc.) figure to
+    # resolutions for a display_res_60m_latency (etc.) figure to
     # compare formats rather than an accidental mix of two differently
     # anchored overview ladders. All three arms in the comparison have to
     # opt into the same explicit list.
@@ -121,8 +121,6 @@ def test_example_s2_display_comparison_trio_shares_target_resolutions():
     for cfg in trio:
         assert "display" in cfg.metrics
         assert cfg.params["display_target_resolutions"] == [20, 60, 120, 360, 720]
-        # Also matches this arm's own multiscale_levels, where it has one.
-        assert cfg.params["display_tile_samples"] == 30
     # And every arm's resolution ladder is the identical list object-wise,
     # not just "20 happens to be in there somewhere" for each.
     assert (
@@ -142,7 +140,6 @@ def test_example_s1_display_comparison_trio_shares_target_resolutions():
     for cfg in (cog_cfg, geozarr_cfg):
         assert "display" in cfg.metrics
         assert cfg.params["display_target_resolutions"] == [20, 60, 120, 360, 720]
-        assert cfg.params["display_tile_samples"] == 30
     assert (
         cog_cfg.params["display_target_resolutions"]
         == geozarr_cfg.params["display_target_resolutions"]

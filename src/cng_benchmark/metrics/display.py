@@ -21,7 +21,6 @@ import logging
 import time
 import urllib.error
 import urllib.request
-from statistics import median
 from typing import NamedTuple
 from urllib.parse import quote
 
@@ -100,7 +99,6 @@ def measure_display(
     cog_uri: str,
     tiles: list[TileSpec],
     *,
-    samples: int = 8,
     tile_matrix_set: str = "WebMercatorQuad",
     fmt: str = "png",
     timeout: float = 30.0,
@@ -108,15 +106,18 @@ def measure_display(
     extra_query: dict[str, str] | None = None,
     group_query_key: str | None = None,
 ) -> list[MetricResult]:
-    """Time TiTiler tile fetches per chunk-crossing or resolution scenario.
+    """Time one TiTiler tile fetch per chunk-crossing or resolution scenario.
 
     ``endpoint`` is the TiTiler base URL; ``cog_uri`` is the URL TiTiler serves
     from (e.g. ``s3://…``). ``tiles`` are the scenarios to time — chunk-bucket
     tiles (see :func:`display_tiles.select_chunk_tiles`) and/or one-per-target-
     resolution tiles (:func:`display_tiles.select_zarr_resolution_tiles`) —
-    each fetched ``samples`` times and reported as its own flat
-    ``display_{label}_*`` metrics. Returns an empty-scenario summary if
-    ``tiles`` is empty (e.g. no bucket was reachable for this object).
+    each fetched *once* and reported as its own flat ``display_{label}_latency``
+    metric (#122: repeating the same fetch to average out noise let a warm
+    cache build up on one URL, which a real pan/zoom session never does — one
+    deterministic fetch per tile is the honest number, not an average).
+    Returns an empty-scenario summary if ``tiles`` is empty (e.g. no bucket
+    was reachable for this object).
 
     ``path_prefix`` selects the tiler router — ``"cog"`` for a COG against
     TiTiler's COG endpoints, ``"zarr"``/``"geozarr"`` for a GeoZarr store's
@@ -139,8 +140,6 @@ def measure_display(
     Every metric's ``detail`` records ``path_prefix``, so a report is never
     ambiguous about which reader produced a given number.
     """
-    if samples < 1:
-        raise ValueError("samples must be >= 1")
     base = endpoint.rstrip("/")
     encoded = quote(cog_uri, safe="")
     prefix = f"/{path_prefix.strip('/')}" if path_prefix.strip("/") else ""
@@ -162,38 +161,25 @@ def measure_display(
             f"{base}{prefix}/tiles/{tile_matrix_set}/"
             f"{spec.z}/{spec.x}/{spec.y}.{fmt}?url={encoded}{tile_extra}"
         )
-        latencies: list[float] = []
-        bytes_total = 0
-        for _ in range(samples):
-            start = time.perf_counter()
-            body = _fetch(tile_url, timeout)
-            latencies.append(time.perf_counter() - start)
-            bytes_total += len(body)
+        start = time.perf_counter()
+        body = _fetch(tile_url, timeout)
+        latency = time.perf_counter() - start
 
-        total = sum(latencies)
-        # First sample is the cold read; TiTiler warms its cache afterwards.
-        metrics += [
+        metrics.append(
             MetricResult(
-                name=f"display_{spec.label}_latency_mean",
-                value=total / len(latencies),
+                name=f"display_{spec.label}_latency",
+                value=latency,
                 unit="s",
                 detail={
                     "tile": f"{spec.z}/{spec.x}/{spec.y}",
                     "chunks": spec.chunks,
                     "approx": spec.approx,
-                    "bytes_total": bytes_total,
-                    "cold_s": latencies[0],
+                    "bytes": len(body),
                     "path_prefix": path_prefix,
                     "group": spec.group,
                 },
-            ),
-            MetricResult(
-                name=f"display_{spec.label}_latency_p50",
-                value=float(median(latencies)),
-                unit="s",
-                detail={"path_prefix": path_prefix},
-            ),
-        ]
+            )
+        )
 
     metrics.append(
         MetricResult(
@@ -201,7 +187,6 @@ def measure_display(
             value=len(tiles),
             detail={
                 "tile_matrix_set": tile_matrix_set,
-                "samples": samples,
                 "path_prefix": path_prefix,
                 "scenarios": [
                     {

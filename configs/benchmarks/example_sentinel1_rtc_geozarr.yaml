@@ -67,10 +67,7 @@ params:
   display_titiler_path: zarr
   # Same values as example_sentinel1_rtc_cog_zstd.yaml's COG arm (#116) —
   # one tile per target resolution, shared across the format pair so a
-  # display_res_60m_latency_mean (etc.) figure is directly comparable, not
+  # display_res_60m_latency (etc.) figure is directly comparable, not
   # an accidental mix of two formats' own differently-anchored overview
   # ladders. Matches this arm's own multiscale_levels above.
   display_target_resolutions: [20, 60, 120, 360, 720]
-  # Many repeats per tile: a trustworthy per-resolution latency number needs
-  # enough samples to average out network noise (#116; was hardcoded to 8).
-  display_tile_samples: 30

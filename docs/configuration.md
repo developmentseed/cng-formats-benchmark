@@ -430,7 +430,7 @@ the coldest (highest) one — or none, if the objects are too small for any tier
 | `object_size` | `metrics/objects.py` | `object_count`, `total_bytes` + the `object_profile` |
 | `write` | `metrics/write.py` | `write_elapsed`, `write_throughput` (output bytes/s, source read included) |
 | `read` | `metrics/read.py` | `read_window_count` (vector: `read_query_count`), `read_latency_mean/p50/spread`, `read_decoded_throughput` |
-| `display` | `metrics/display.py` (+ `display_tiles.py`) | per chunk-bucket `display_{1,2,4,9}chunk_latency_mean/p50`, `display_scenarios`, plus a `display_chunk_layout.png` artifact |
+| `display` | `metrics/display.py` (+ `display_tiles.py`) | per chunk-bucket `display_{1,2,4,9}chunk_latency`, `display_scenarios`, plus a `display_chunk_layout.png` artifact |
 
 `read` and `display` adapt to the produced object kind: a COG is read with
 rasterio over `/vsis3` and served by the bench tiler's `/cog` router; a GeoZarr

@@ -940,13 +940,15 @@ def _measure_display_object(
     ``GeoZarrReader`` resolves the pyramid itself from the requested zoom and
     addresses the array as ``{group}:{name}``.
 
-    ``display_chunk_targets``/``display_target_resolutions``/
-    ``display_tile_samples`` (``config.params``, #116) control the scenario
-    set: chunk-crossing buckets (unchanged, #102's original question — the
-    cost of straddling chunks within one level) plus one tile per target
-    ground resolution (new — the cost of reading a precomputed overview vs.
-    downsampling from native, at a zoom a panning/zooming client would
-    actually generate). ``display_target_resolutions`` should be set to the
+    ``display_chunk_targets``/``display_target_resolutions``
+    (``config.params``, #116) control the scenario set: chunk-crossing
+    buckets (unchanged, #102's original question — the cost of straddling
+    chunks within one level) plus one tile per target ground resolution
+    (new — the cost of reading a precomputed overview vs. downsampling from
+    native, at a zoom a panning/zooming client would actually generate).
+    Each scenario is fetched once, not repeated-and-averaged (#122) — the
+    honest single-fetch number, not one smoothed over a warm cache a real
+    session never gets. ``display_target_resolutions`` should be set to the
     *same* list on a COG arm and its matched GeoZarr arm so the resulting
     ``res_*`` labels are directly comparable across formats — see
     :func:`~cng_benchmark.metrics.display_tiles.select_resolution_tiles`.
@@ -980,7 +982,6 @@ def _measure_display_object(
 
     targets = tuple(config.params.get("display_chunk_targets", DEFAULT_TARGETS))
     target_resolutions = config.params.get("display_target_resolutions")
-    samples = int(config.params.get("display_tile_samples", 8))
     if adapter.object_kind is ObjectKind.ZARR_STORE:
         from cng_benchmark.formats.geozarr import (
             DATA_VAR,
@@ -1047,7 +1048,6 @@ def _measure_display_object(
             titiler_endpoint,
             object_uri,
             tiles,
-            samples=samples,
             path_prefix=prefix,
             extra_query=extra_query,
             group_query_key=group_query_key,
@@ -1064,7 +1064,6 @@ def _measure_display_object(
             titiler_endpoint,
             object_uri,
             tiles,
-            samples=samples,
             extra_query=extra_query,
         )
         render = render_chunk_layout

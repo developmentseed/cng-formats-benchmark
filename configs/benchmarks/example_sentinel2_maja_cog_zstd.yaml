@@ -6,7 +6,7 @@
 # arm alongside example_sentinel2_maja_geozarr.yaml (also zstd) isolates the
 # residual gap to the format/overviews; keep the deflate config as the baseline.
 # Also the display comparison partner for that arm (#116): both set the *same*
-# display_target_resolutions, so a display_res_60m_latency_mean (etc.) figure
+# display_target_resolutions, so a display_res_60m_latency (etc.) figure
 # means the same ground resolution regardless of format — COG's own overview
 # ladder (naive halving) wouldn't otherwise land on the same resolutions as
 # GeoZarr's #107/#108 target ladder.
@@ -37,6 +37,3 @@ params:
   # Same values as example_sentinel2_maja_geozarr(_reader).yaml's GeoZarr
   # ladder (#107, #108) — the display comparison's whole point (#116).
   display_target_resolutions: [20, 60, 120, 360, 720]
-  # Many repeats per tile: a trustworthy per-resolution latency number needs
-  # enough samples to average out network noise (#116; was hardcoded to 8).
-  display_tile_samples: 30
