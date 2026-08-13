@@ -17,6 +17,7 @@ in as :class:`TileSpec` values, so this module imports no rasterio/morecantile.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
@@ -25,6 +26,8 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from cng_benchmark.models import MetricResult
+
+logger = logging.getLogger(__name__)
 
 
 class TileSpec(NamedTuple):
@@ -37,10 +40,12 @@ class TileSpec(NamedTuple):
     bucket was unreachable. ``group`` is the GeoZarr group that actually
     serves this tile's resolution (``None`` for a chunk-crossing-bucket tile,
     which doesn't target a specific level, and always for COG, which has no
-    server-side group concept — rio-tiler resolves its own overview by zoom)
-    — :func:`measure_display`'s per-tile query override (#116) uses it so the
-    stock xarray router reads the resolution-appropriate level instead of
-    always the native one. Defined here (no geo deps) so
+    server-side group concept — rio-tiler resolves its own overview by zoom).
+    Informational only (``MetricResult.detail["group"]``) — no router's query
+    is built from a per-tile ``.group`` anymore (#121: doing so for the stock
+    xarray router credited it with multiscale awareness it doesn't have; a
+    real client's query is fixed, the same for every tile regardless of the
+    resolution being timed). Defined here (no geo deps) so
     :func:`measure_display` stays import-light; built by
     :mod:`cng_benchmark.metrics.display_tiles`.
     """
@@ -69,15 +74,21 @@ def fetch_titiler_versions(endpoint: str, *, timeout: float = 5.0) -> dict[str, 
     """Best-effort ``/healthz`` versions, so a run records which reader build
     produced its display numbers (``titiler_core``/``titiler_xarray``/
     ``titiler_eopf`` as-is; the generic GDAL-stack keys prefixed ``tiler_`` so
-    they don't collide with the harness's own tool versions). Returns ``{}``
-    on any failure (unreachable endpoint, unexpected payload) — this is
-    recording, not a metric, so it must never fail a run.
+    they don't collide with the harness's own tool versions). On any failure
+    (unreachable endpoint, unexpected payload) this must never fail a run —
+    but a silent ``{}`` left no trace of *why* a run's ``tool_versions`` was
+    missing every ``titiler_*``/``tiler_*`` key, indistinguishable from a
+    healthy endpoint that just reported nothing (#119: this gap meant a
+    crashing titiler left no record that ``/healthz`` itself never
+    succeeded). Returns ``{"tiler_healthz_error": ...}`` instead, and logs
+    the failure.
     """
     try:
         body = _fetch(f"{endpoint.rstrip('/')}/healthz", timeout)
         versions = json.loads(body)["versions"]
-    except Exception:  # noqa: BLE001 - best-effort, never fails a run
-        return {}
+    except Exception as exc:  # noqa: BLE001 - best-effort, never fails a run
+        logger.warning("titiler /healthz unreachable at %s: %s", endpoint, exc)
+        return {"tiler_healthz_error": str(exc)}
     return {
         (k if k.startswith("titiler_") else f"tiler_{k}"): str(v)
         for k, v in versions.items()

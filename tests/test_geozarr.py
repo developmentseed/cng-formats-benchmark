@@ -1690,13 +1690,57 @@ def test_convert_batch_shard_shape_auto_fits_each_resolution_group(tmp_path):
     # different native tiers, two different auto-fitted shard shapes at
     # their own native level, each still exactly one shard there.
     assert layouts["b2"].shard_shape == [320, 320]
-    # b2 (10 m) also carries a derived 20 m level alongside clm_r2's own
-    # real data there (#112's unified pyramid, not #109's flatten) -- one
-    # shard per level, two levels, not the single-level flat store this
-    # test predates.
-    assert layouts["b2"].shard_count == 2
+    # multiscale_levels: 0 means fully flat (#120) -- no derived 20 m level
+    # for b2 alongside clm_r2's own real data, just its own native shard.
+    assert layouts["b2"].shard_count == 1
     assert layouts["clm_r2"].shard_shape == [192, 192]
     assert layouts["clm_r2"].shard_count == 1
+
+
+def test_convert_batch_multiscale_levels_zero_keeps_a_multi_resolution_bundle_flat(
+    tmp_path,
+):
+    # #120: multiscale_levels: 0 on a multi-resolution bundle must mean no
+    # shared level ladder at all -- each native-resolution group written
+    # independently and flat, the same #109 shape convert_batch already uses
+    # for a single-resolution bundle, not #112's unified pyramid with its
+    # cross-tier derivation suppressed only past the coarsest real tier.
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import zarr
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    _write_source_at(str(tmp_path / "b2.tif"), value=1, pixel_size=10)
+    _write_source_at(str(tmp_path / "clm_r2.tif"), value=2, pixel_size=20)
+    sources = [
+        SourceObject(name="b2", uri=str(tmp_path / "b2.tif")),
+        SourceObject(name="clm_r2", uri=str(tmp_path / "clm_r2.tif")),
+    ]
+
+    target = str(tmp_path / "multires-flat.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        target,
+        {"chunk_shape": [32, 32], "shard_shape": [64, 64], "multiscale_levels": 0},
+    )
+
+    root = zarr.open_group(target, mode="r")
+    assert sorted(root.group_keys()) == ["grid0", "grid1"]
+    # No shared numbered-level groups, no cross-tier derivation: each
+    # component lives only in its own native-resolution group.
+    assert set(root["grid0"].array_keys()) == {"b2", "x", "y"}
+    assert set(root["grid1"].array_keys()) == {"clm_r2", "x", "y"}
+    assert "multiscales" not in root.attrs
+    assert root.attrs["cng_benchmark:components"] == {"b2": "grid0", "clm_r2": "grid1"}
+
+    layouts = {ly.name: ly for ly in adapter.describe_layout(target)}
+    assert layouts["b2"].native_level is None
+    assert layouts["b2"].multiscale_levels == 0
+    assert layouts["clm_r2"].native_level is None
+    assert layouts["clm_r2"].multiscale_levels == 0
 
 
 def test_convert_batch_single_resolution_bundle_is_unaffected_by_anchoring(tmp_path):

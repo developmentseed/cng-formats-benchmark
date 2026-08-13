@@ -240,6 +240,103 @@ def test_select_zarr_resolution_tiles_clamps_to_a_components_own_native(
     assert [t.group for t in tiles] == ["1", "1", "2"]  # 10m clamps to 20m's own group
 
 
+@pytest.fixture
+def unified_bundle_full_ladder(tmp_path):
+    """A #114-shaped bundle on the real production ladder (#107/#108's S1/S2
+    cross-mission chain, ``[20, 60, 120, 360, 720]`` off a 10 m native tier)
+    with *several* components sharing each tier -- MAJA's real fan-out
+    (several 10 m reflectance bands plus several 20 m masks, #118), not the
+    one-component-per-tier shape every other fixture here uses."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("rioxarray")
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from cng_benchmark.datasets.base import SourceObject
+    from cng_benchmark.formats.geozarr import GeoZarrAdapter
+
+    def _write_source(path, value, pixel_size, size=256):
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=size,
+            height=size,
+            count=1,
+            dtype="int16",
+            crs="EPSG:32631",
+            transform=from_origin(300000, 4900020, pixel_size, pixel_size),
+        ) as dst:
+            dst.write(np.full((size, size), value, dtype="int16"), 1)
+
+    fine_names = ["b2", "b3", "b4"]
+    coarse_names = ["clm_r2", "edg_r2", "sat_r2"]
+    for i, name in enumerate(fine_names):
+        _write_source(str(tmp_path / f"{name}.tif"), i + 1, 10)
+    for i, name in enumerate(coarse_names):
+        _write_source(str(tmp_path / f"{name}.tif"), i + 10, 20)
+    sources = [
+        SourceObject(name=n, uri=str(tmp_path / f"{n}.tif"))
+        for n in fine_names + coarse_names
+    ]
+    store = str(tmp_path / "unified-full.zarr")
+    adapter = GeoZarrAdapter()
+    adapter.convert_batch(
+        sources,
+        store,
+        {
+            "chunk_shape": [32, 32],
+            "shard_shape": [64, 64],
+            "multiscale_levels": [20, 60, 120, 360, 720],
+        },
+    )
+    return store, adapter
+
+
+def test_select_zarr_resolution_tiles_full_ladder_requests_distinct_zooms(
+    unified_bundle_full_ladder,
+):
+    # #118: whatever the `.group` a target resolution nominally maps to
+    # (informational only once #121 lands -- it no longer drives either
+    # router's query), what actually matters is that each target resolution
+    # produces a genuinely different request: `z` comes straight from the
+    # target resolution (`tms.zoom_for_res`), independent of `.group`, so
+    # every one of the production ladder's 5 steps must land on its own
+    # zoom -- multiple zooms really do get requested and measured.
+    store, adapter = unified_bundle_full_ladder
+
+    fine_tiles = select_zarr_resolution_tiles(
+        store,
+        target_resolutions=[20, 60, 120, 360, 720],
+        group=adapter.component_locator(store, "b2"),
+        var_name="b2",
+    )
+    assert [t.label for t in fine_tiles] == [
+        "res_20m",
+        "res_60m",
+        "res_120m",
+        "res_360m",
+        "res_720m",
+    ]
+    fine_zooms = [t.z for t in fine_tiles]
+    assert fine_zooms == sorted(fine_zooms, reverse=True)
+    assert len(set(fine_zooms)) == len(fine_zooms)
+
+    # Same for a component whose own chain is a slice of the root layout
+    # (the shape #118 was filed against) -- still distinct zooms per
+    # resolution, regardless of whatever `.group` it nominally reports.
+    coarse_tiles = select_zarr_resolution_tiles(
+        store,
+        target_resolutions=[20, 60, 120, 360, 720],
+        group=adapter.component_locator(store, "clm_r2"),
+        var_name="clm_r2",
+    )
+    coarse_zooms = [t.z for t in coarse_tiles]
+    assert coarse_zooms == sorted(coarse_zooms, reverse=True)
+    assert len(set(coarse_zooms)) == len(coarse_zooms)
+
+
 def test_select_resolution_tiles_cog_has_no_group(cog_path):
     # COG has no server-side group concept -- rio-tiler resolves its own
     # overview by zoom -- so every tile's `.group` stays None regardless of

@@ -208,7 +208,26 @@ def test_fetch_titiler_versions_is_best_effort_on_failure(monkeypatch):
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(display.urllib.request, "urlopen", boom)
-    assert display.fetch_titiler_versions("http://titiler:8000") == {}
+    # #119: never raises (still best-effort), but the failure itself is kept
+    # visible in the returned dict rather than silently becoming `{}` --
+    # otherwise a crashing titiler and a healthy one reporting nothing are
+    # indistinguishable in a run's tool_versions.
+    versions = display.fetch_titiler_versions("http://titiler:8000")
+    assert "tiler_healthz_error" in versions
+    assert "connection refused" in versions["tiler_healthz_error"]
+
+
+def test_fetch_titiler_versions_logs_a_warning_on_failure(monkeypatch, caplog):
+    import logging
+    import urllib.error
+
+    def boom(url, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(display.urllib.request, "urlopen", boom)
+    with caplog.at_level(logging.WARNING, logger="cng_benchmark.metrics.display"):
+        display.fetch_titiler_versions("http://titiler:8000")
+    assert any("healthz" in rec.message for rec in caplog.records)
 
 
 # --- write + read need rasterio -------------------------------------------------

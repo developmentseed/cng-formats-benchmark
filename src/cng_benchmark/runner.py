@@ -927,13 +927,18 @@ def _measure_display_object(
     ``display_titiler_path`` (default ``"zarr"``, the bench tiler's stock-xarray
     router; ``"geozarr"`` selects its ``GeoZarrReader``-backed one instead) + the
     zarr chunk grid. The two routers address the array differently -- the stock
-    router has no multiscale awareness of its own (it reads whatever group its
-    query names and TiTiler resamples that on the fly) and needs the
-    resolution-appropriate level's ``group=`` explicit, *per tile* -- not once
-    for the whole scenario set, which would make it structurally incapable of
-    ever reading anything but the native level (#116) -- while ``GeoZarrReader``
-    resolves the pyramid itself from the requested zoom and addresses the
-    array as ``{group}:{name}``.
+    router has no multiscale awareness of its own and is queried with a fixed
+    ``variable=``/``group=`` pair naming the store's own native/canonical
+    group, the same *every* tile gets regardless of which resolution is being
+    timed (the same fixed location a real client's STAC asset href would
+    already carry, never a per-zoom-level path it resolves itself); whatever
+    it reads gets resampled on the fly by TiTiler, so it pays the honest cost
+    of not knowing the store's pyramid, however far a target resolution is
+    from native (#121 removed the #116/#117 per-tile override that swapped in
+    a *different*, resolution-appropriate group per tile, crediting this
+    router with multiscale awareness it doesn't have) -- while
+    ``GeoZarrReader`` resolves the pyramid itself from the requested zoom and
+    addresses the array as ``{group}:{name}``.
 
     ``display_chunk_targets``/``display_target_resolutions``/
     ``display_tile_samples`` (``config.params``, #116) control the scenario
@@ -953,10 +958,10 @@ def _measure_display_object(
     band index goes out as ``bidx``, a GeoZarr grid group as ``{group}:{name}``
     (GeoZarrReader) or an explicit ``group=``/``variable=`` pair (the stock
     router). Run live against the docker-compose bench titiler for all three
-    routers and confirmed each component resolves to its own exact pixel
-    values, not a neighbour's — that pass also caught and fixed a real bug
-    where a bundled *flat* (``multiscale_levels: 0``) GeoZarr store's grid
-    attrs got wiped by the second component's write (see
+    routers and confirmed each component resolves to its own exact pixel values, not a
+    neighbour's — that pass also caught and fixed a real bug where a bundled
+    *flat* (``multiscale_levels: 0``) GeoZarr store's grid attrs got wiped by
+    the second component's write (see
     :func:`~cng_benchmark.formats.geozarr._write_sharded`).
     """
     if not titiler_endpoint:
@@ -977,7 +982,11 @@ def _measure_display_object(
     target_resolutions = config.params.get("display_target_resolutions")
     samples = int(config.params.get("display_tile_samples", 8))
     if adapter.object_kind is ObjectKind.ZARR_STORE:
-        from cng_benchmark.formats.geozarr import DATA_VAR, finest_level_group
+        from cng_benchmark.formats.geozarr import (
+            DATA_VAR,
+            finest_level_group,
+            is_unified_pyramid,
+        )
 
         var_name = name or DATA_VAR
         tiles = select_zarr_chunk_tiles(
@@ -993,19 +1002,40 @@ def _measure_display_object(
         if prefix == "geozarr":
             # GeoZarrReader addresses a variable as "{group}:{name}", where
             # `group` is the group that declares the zarr_conventions
-            # multiscales entry -- this writer's store root ("/"), or one
-            # grid's own subtree ("/grid0") for a bundled store -- and
-            # resolves the multiscale level from the requested zoom itself,
-            # so no per-tile override is needed here.
+            # multiscales entry -- and resolves the multiscale level from
+            # the requested zoom itself, but *only* when addressed via that
+            # exact group; any other group is read as-is, with no
+            # zoom-awareness at all (#119). That's this writer's store root
+            # ("/") for a non-batched store, or one grid's own subtree
+            # ("/grid0") for a #102 single-resolution bundle -- both of
+            # which `locator` already names. A #114 cross-tier unified
+            # pyramid is the one case `locator` gets wrong: it names a
+            # component's own native *level* ("/0", "/1", ...), never where
+            # that store's one shared multiscales doc actually lives -- the
+            # store root, covering every component regardless of which
+            # level its own data starts at.
             group_path = f"/{locator}" if locator else "/"
+            if locator and is_unified_pyramid(local_target):
+                group_path = "/"
             extra_query = {"variables": f"{group_path}:{var_name}"}
         else:
-            # Base query: the finest level, same as every tile got before
-            # #116 -- still correct for the chunk-bucket tiles above, which
-            # carry no `.group` of their own. Resolution-coverage tiles
-            # override `group` per fetch via `group_query_key` below, which
-            # is the whole fix: without it, every tile -- however many zooms
-            # get sampled -- would read this same finest-level query.
+            # The stock xarray router still needs *some* group to locate a
+            # nested variable -- titiler.xarray opens exactly the group it's
+            # given (no group -> the store's true root), and this writer
+            # nests even the native level under its own integer group
+            # ("0/data") whenever the store carries any pyramid at all, so
+            # omitting `group` outright would 404 every non-flat store. What
+            # a real client (its STAC asset href) actually points at is one
+            # *fixed* location -- the store's own native/canonical group --
+            # never a per-zoom-level path it would have to resolve itself.
+            # So the base query below stays fixed at the native level, same
+            # as every tile got before #116; what #121 removes is only the
+            # #116/#117 per-tile override that swapped in a *different*,
+            # resolution-appropriate group for each res_*m scenario, which
+            # credited this router with multiscale awareness it doesn't
+            # have -- no `group_query_key` is set here anymore, so every
+            # tile, whatever resolution it targets, reads this same fixed
+            # group and TiTiler resamples on the fly.
             extra_query = {"variable": var_name}
             level = finest_level_group(local_target, group=locator, var_name=name)
             group_path = locator
@@ -1013,7 +1043,6 @@ def _measure_display_object(
                 group_path = f"{locator}/{level}" if locator else level
             if group_path is not None:
                 extra_query["group"] = group_path
-            group_query_key = "group"
         metrics = measure_display(
             titiler_endpoint,
             object_uri,
