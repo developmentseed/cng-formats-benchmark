@@ -365,9 +365,7 @@ def test_tool_versions_records_titiler_healthz_failure(monkeypatch):
     def _fake_fetch_titiler_versions(endpoint, **kwargs):
         return {"tiler_healthz_error": "TiTiler unreachable at ...: refused"}
 
-    monkeypatch.setattr(
-        _runner, "fetch_titiler_versions", _fake_fetch_titiler_versions
-    )
+    monkeypatch.setattr(_runner, "fetch_titiler_versions", _fake_fetch_titiler_versions)
     versions = _tool_versions("http://titiler.example")
     assert versions["cng_benchmark"] == __version__
     assert "tiler_healthz_error" in versions
