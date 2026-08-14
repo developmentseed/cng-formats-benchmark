@@ -16,7 +16,12 @@ dependencies = [
     # upstream's own `cache` extra to satisfy that import -- caching itself
     # stays off: `EOPFCacheSettings.enable` defaults to `False` and no
     # `EOPF_CACHE__*` env is set here.
-    "titiler.eopf[cache] @ git+https://github.com/EOPF-Explorer/titiler-eopf.git@v0.10.0",
+    # v0.10.1 fixes `GeoZarrReader.tile()` reading full native resolution
+    # whenever a caller (this app included) omits `tilesize` -- v0.10.0
+    # passed `None` straight through instead of falling back to the tile
+    # matrix's own size, silently bypassing the multiscale pyramid on
+    # every request (#130, fixed upstream in EOPF-Explorer/titiler-eopf#140).
+    "titiler.eopf[cache] @ git+https://github.com/EOPF-Explorer/titiler-eopf.git@v0.10.1",
     "rasterio>=1.3",
     "pydantic-settings>=2.0",
     "uvicorn[standard]>=0.30",

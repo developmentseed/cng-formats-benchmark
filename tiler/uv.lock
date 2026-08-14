@@ -274,7 +274,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "rasterio", specifier = ">=1.3" },
     { name = "titiler-core", specifier = ">=2.0,<3.0" },
-    { name = "titiler-eopf", extras = ["cache"], git = "https://github.com/EOPF-Explorer/titiler-eopf.git?rev=v0.10.0" },
+    { name = "titiler-eopf", extras = ["cache"], git = "https://github.com/EOPF-Explorer/titiler-eopf.git?rev=v0.10.1" },
     { name = "titiler-xarray", specifier = ">=2.0,<3.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
@@ -1832,8 +1832,8 @@ wheels = [
 
 [[package]]
 name = "titiler-eopf"
-version = "0.10.0"
-source = { git = "https://github.com/EOPF-Explorer/titiler-eopf.git?rev=v0.10.0#58b1dada10e87c5d597232b476dc40332448766b" }
+version = "0.10.1"
+source = { git = "https://github.com/EOPF-Explorer/titiler-eopf.git?rev=v0.10.1#2e9c83d6d3884334e335df23eeb43d8241abb8d1" }
 dependencies = [
     { name = "obstore" },
     { name = "orjson" },
