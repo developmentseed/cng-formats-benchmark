@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.7.1...v0.8.0) (2026-08-14)
+
+
+### Features
+
+* **display:** pan-and-zoom session, drop repeated-tile sampling ([#124](https://github.com/developmentseed/cng-formats-benchmark/issues/124)) ([ebce3f3](https://github.com/developmentseed/cng-formats-benchmark/commit/ebce3f3998777340e2cf20134ba6f7ec94160c03))
+* **formats:** bundle multi-component writes for GeoZarr store, COG multi-band ([#103](https://github.com/developmentseed/cng-formats-benchmark/issues/103)) ([7079bc6](https://github.com/developmentseed/cng-formats-benchmark/commit/7079bc61e4013bed590cd76de2666b595a4e2bdd))
+* **geozarr:** add shard_shape/chunk_shape: auto to stop silent shard fragmentation ([#113](https://github.com/developmentseed/cng-formats-benchmark/issues/113)) ([399b652](https://github.com/developmentseed/cng-formats-benchmark/commit/399b65233011bac0b80173b91b96cb26aea408d3))
+* **geozarr:** bundle S1 RTC VV+VH on the cross-mission resolution ladder ([#110](https://github.com/developmentseed/cng-formats-benchmark/issues/110)) ([6e382fe](https://github.com/developmentseed/cng-formats-benchmark/commit/6e382fee8ed32f361f17f6d2753608948576087f))
+
+
+### Bug Fixes
+
+* **display:** make /cog, /zarr, /geozarr display latency pan/zoom-comparable ([#117](https://github.com/developmentseed/cng-formats-benchmark/issues/117)) ([27fc869](https://github.com/developmentseed/cng-formats-benchmark/commit/27fc869146ad6eed99254d7f05269c046bb82f56))
+* **display:** send explicit tilesize, bump titiler.eopf to v0.10.1 ([#131](https://github.com/developmentseed/cng-formats-benchmark/issues/131)) ([a162e9b](https://github.com/developmentseed/cng-formats-benchmark/commit/a162e9bff878f5519fc01ab5a82c1297ae2fa13a))
+* **geozarr:** anchor S2/MAJA GeoZarr pyramids on native resolution groups ([#109](https://github.com/developmentseed/cng-formats-benchmark/issues/109)) ([ca528f6](https://github.com/developmentseed/cng-formats-benchmark/commit/ca528f673efa328e7fd7d1602b1f387d2170de6c))
+* **geozarr:** consolidate metadata after every store write ([#127](https://github.com/developmentseed/cng-formats-benchmark/issues/127)) ([cc28aaa](https://github.com/developmentseed/cng-formats-benchmark/commit/cc28aaa60d39c11ef947794538abe5ee89ba9504))
+* **geozarr:** flatten multiscale_levels:0 bundles and fix stock/geozarr display queries ([#123](https://github.com/developmentseed/cng-formats-benchmark/issues/123)) ([1381c67](https://github.com/developmentseed/cng-formats-benchmark/commit/1381c677a27821a558778df30550982021e5246a))
+* **geozarr:** stop a bundled flat store's later components wiping grid attrs ([#106](https://github.com/developmentseed/cng-formats-benchmark/issues/106)) ([3587c37](https://github.com/developmentseed/cng-formats-benchmark/commit/3587c37472250114dcea11eac7de1918c8095bde))
+* **geozarr:** unify the multi-resolution pyramid so every component gets a full chain ([#114](https://github.com/developmentseed/cng-formats-benchmark/issues/114)) ([751fbf5](https://github.com/developmentseed/cng-formats-benchmark/commit/751fbf5acf4945d96bcce40f69e2693d57aaa076))
+
 ## [0.7.1](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.7.0...v0.7.1) (2026-08-10)
 
 
