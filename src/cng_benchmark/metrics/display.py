@@ -100,6 +100,7 @@ def measure_display(
     tiles: list[TileSpec],
     *,
     tile_matrix_set: str = "WebMercatorQuad",
+    tilesize: int = 256,
     fmt: str = "png",
     timeout: float = 30.0,
     path_prefix: str = "cog",
@@ -118,6 +119,17 @@ def measure_display(
     deterministic fetch per tile is the honest number, not an average).
     Returns an empty-scenario summary if ``tiles`` is empty (e.g. no bucket
     was reachable for this object).
+
+    ``tilesize`` (256, ``WebMercatorQuad``'s own tile size) is sent
+    explicitly on every tile fetch rather than left for the router to
+    default — a router that only coalesces a missing ``tilesize`` for *some*
+    readers, not others, silently reads full native resolution at every zoom
+    for the readers it doesn't coalesce for, never touching the multiscale
+    pyramid the scenario is supposed to be measuring (#130: found via
+    ``GeoZarrReader.tile()``, upstream-fixed in
+    ``EOPF-Explorer/titiler-eopf#140``, but a benchmark's own numbers
+    shouldn't depend on remembering that a *specific* reader's default
+    happened to be safe).
 
     ``path_prefix`` selects the tiler router — ``"cog"`` for a COG against
     TiTiler's COG endpoints, ``"zarr"``/``"geozarr"`` for a GeoZarr store's
@@ -159,7 +171,8 @@ def measure_display(
         )
         tile_url = (
             f"{base}{prefix}/tiles/{tile_matrix_set}/"
-            f"{spec.z}/{spec.x}/{spec.y}.{fmt}?url={encoded}{tile_extra}"
+            f"{spec.z}/{spec.x}/{spec.y}.{fmt}"
+            f"?url={encoded}&tilesize={tilesize}{tile_extra}"
         )
         start = time.perf_counter()
         body = _fetch(tile_url, timeout)
@@ -187,6 +200,7 @@ def measure_display(
             value=len(tiles),
             detail={
                 "tile_matrix_set": tile_matrix_set,
+                "tilesize": tilesize,
                 "path_prefix": path_prefix,
                 "scenarios": [
                     {

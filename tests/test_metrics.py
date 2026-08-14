@@ -62,6 +62,26 @@ def test_display_measures_tiles_with_fake_titiler(monkeypatch):
     assert len(calls) == 1 + len(_TILES)
     assert "/cog/tiles/WebMercatorQuad/0/0/0.png?url=" in calls[1]
     assert "s3%3A%2F%2Fbench" in calls[1]
+    # #130: tilesize is sent explicitly on every tile fetch, never left for
+    # the router to default -- a reader that doesn't coalesce a missing
+    # tilesize (GeoZarrReader, pre-titiler.eopf#140) silently reads full
+    # native resolution instead of the zoom-matched multiscale level.
+    assert "tilesize=256" in calls[1]
+    assert scenarios_detail["tilesize"] == 256
+
+
+def test_display_sends_a_custom_tilesize(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        display.urllib.request,
+        "urlopen",
+        lambda url, timeout=None: (calls.append(url), _Resp(b"tile"))[1],
+    )
+    display.measure_display(
+        "http://titiler:8000", "s3://b/k.tif", _TILES[:1], tilesize=512
+    )
+    tile_call = next(c for c in calls if "/tiles/" in c)
+    assert "tilesize=512" in tile_call
 
 
 def test_display_handles_no_reachable_scenarios(monkeypatch):
