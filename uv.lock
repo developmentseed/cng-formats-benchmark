@@ -476,7 +476,7 @@ wheels = [
 
 [[package]]
 name = "cng-benchmark"
-version = "0.6.0"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -496,6 +496,7 @@ copc = [
     { name = "h5netcdf" },
     { name = "h5py" },
     { name = "laspy", extra = ["lazrs"] },
+    { name = "pyproj" },
     { name = "s3fs" },
     { name = "xarray" },
 ]
@@ -510,6 +511,7 @@ dev = [
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "pyogrio" },
+    { name = "pyproj" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "shapely" },
@@ -572,6 +574,8 @@ requires-dist = [
     { name = "pyogrio", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "pyogrio", marker = "extra == 'flatgeobuf'", specifier = ">=0.7" },
     { name = "pyogrio", marker = "extra == 'geoparquet'", specifier = ">=0.7" },
+    { name = "pyproj", marker = "extra == 'copc'", specifier = ">=3.6" },
+    { name = "pyproj", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "rasterio", marker = "extra == 'cog'", specifier = ">=1.3" },

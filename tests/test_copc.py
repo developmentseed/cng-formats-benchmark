@@ -32,10 +32,12 @@ def _cloud(n=40_000, seed=0):
     )
 
 
-def _copc(tmp_path, name="out.copc.laz", *, n=40_000, span=32, max_depth=4):
+def _copc(
+    tmp_path, name="out.copc.laz", *, n=40_000, span=32, max_depth=4, extras=None
+):
     target = str(tmp_path / name)
     x, y, z = _cloud(n)
-    _build_copc(target, x, y, z, span=span, max_depth=max_depth)
+    _build_copc(target, x, y, z, extras, span=span, max_depth=max_depth)
     return target
 
 
@@ -71,6 +73,110 @@ def test_octree_bounds_node_size_on_a_skewed_cloud(tmp_path):
     assert ly.point_count == n  # every point written, none dropped
     assert ly.num_nodes > 1  # subdivided, not dumped into one bucket
     assert ly.points_per_node <= budget  # no giant node -> bounded peak memory
+
+
+def test_pixc_octree_root_is_a_spatial_sample_not_a_height_slice(tmp_path):
+    # Issue #134: a PIXC group's raw lon/lat (degrees) sits next to height
+    # (metres) -- Z's raw extent is ~10,000x LARGER than X/Y's before
+    # projection. Un-reprojected, the octree cube comes out sized on height
+    # alone, and the root node is `span` points from one narrow height band
+    # (flat water), not a spatial sample of the tile. `_read_pixc_group`
+    # reprojects lon/lat to a local UTM zone before the octree is built, so
+    # the root must instead be a genuine, roughly footprint-covering sample.
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("h5py")
+    laspy = pytest.importorskip("laspy")
+    from cng_benchmark.formats.copc import CopcAdapter
+
+    n = 20_000
+    granule, source_ds = _pixc_netcdf(tmp_path, n)
+    target = str(tmp_path / "root.copc.laz")
+    CopcAdapter().convert(
+        f"{PIXC_SCHEME}{granule}::pixel_cloud", target, {"span": 32, "max_depth": 8}
+    )
+
+    reader = laspy.CopcReader.open(target)
+    root = reader.query(level=0)
+    assert len(root) > 32  # well above `span`, not a single height-band leaf
+
+    full = reader.query()
+    full_x_range = float(np.asarray(full.x).max() - np.asarray(full.x).min())
+    full_y_range = float(np.asarray(full.y).max() - np.asarray(full.y).min())
+    root_x_range = float(np.asarray(root.x).max() - np.asarray(root.x).min())
+    root_y_range = float(np.asarray(root.y).max() - np.asarray(root.y).min())
+    # The root's own footprint covers most of the full cloud's footprint --
+    # a spatial overview, not points clustered from one narrow height slice.
+    assert root_x_range >= 0.5 * full_x_range
+    assert root_y_range >= 0.5 * full_y_range
+
+
+def test_octree_level_growth_is_gradual_not_a_single_dump(tmp_path):
+    # Issue #134's second defect: a node under the per-node budget used to be
+    # written whole (no voxel sampling), so a "coarse" level could actually
+    # hold nearly the entire cloud. On a uniform cloud, no single level should
+    # add anywhere near the whole cloud once every node is voxel-sampled.
+    laspy = pytest.importorskip("laspy")
+    import copclib as copc
+
+    rng = np.random.default_rng(4)
+    n, span = 60_000, 8
+    pts = rng.uniform(0, 1000, size=(n, 3))
+    target = str(tmp_path / "uniform.copc.laz")
+    _build_copc(target, pts[:, 0], pts[:, 1], pts[:, 2], span=span, max_depth=8)
+
+    depth = copc.FileReader(target).GetMaxDepth()
+    reader = laspy.CopcReader.open(target)
+    level_counts = [len(reader.query(level=lvl)) for lvl in range(depth + 1)]
+    assert sum(level_counts) == n  # every point accounted for, once
+    assert depth >= 2  # this cloud is large enough to actually subdivide
+    for count in level_counts:
+        assert count <= 0.5 * n  # no single level dumps most of the cloud
+
+
+def test_pixc_output_declares_a_crs_and_xy_round_trips(tmp_path):
+    # Issue #134: the produced COPC used to declare no CRS at all
+    # (`header.parse_crs()` was always `None`) since the octree was built on
+    # raw, unprojected lon/lat. `_build_copc` now writes the UTM CRS
+    # `_read_pixc_group` reprojected onto, so the file is self-describing,
+    # and inverting that projection must land back on the source lon/lat.
+    pytest.importorskip("xarray")
+    pytest.importorskip("h5netcdf")
+    pytest.importorskip("h5py")
+    laspy = pytest.importorskip("laspy")
+    pyproj = pytest.importorskip("pyproj")
+    from cng_benchmark.formats.copc import CopcAdapter
+
+    n = 10_000
+    granule, source_ds = _pixc_netcdf(tmp_path, n)
+    target = str(tmp_path / "crs.copc.laz")
+    CopcAdapter().convert(
+        f"{PIXC_SCHEME}{granule}::pixel_cloud", target, {"span": 32, "max_depth": 6}
+    )
+
+    # The CRS lives in the EVLR section (COPC keeps its large VLRs, the
+    # hierarchy and, now, the WKT, there); `laspy.CopcReader`'s header does not
+    # surface EVLRs at all (`.header.evlrs` is always `None`), so the CRS check
+    # needs the plain reader. This is a real, complete round trip either way:
+    # any standard LAS/LAZ reader (PDAL, GDAL, ...) reads a file's EVLRs.
+    with laspy.open(target) as plain_reader:
+        crs = plain_reader.header.parse_crs()
+    assert crs is not None
+
+    reader = laspy.CopcReader.open(target)
+    full = reader.query()
+    inverse = pyproj.Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    lon_back, lat_back = inverse.transform(np.asarray(full.x), np.asarray(full.y))
+    lon_source = np.asarray(source_ds["longitude"].values)
+    lat_source = np.asarray(source_ds["latitude"].values)
+    # Statistical round-trip (point order is not preserved by the octree
+    # bucketing): inverting the output's own CRS lands back on the source
+    # lon/lat footprint within a fraction of a metre (~1e-6 deg), not the
+    # un-reprojected bug's ~0.01 deg (~1 km) footprint distortion.
+    assert abs(float(lon_back.min()) - float(lon_source.min())) < 1e-6
+    assert abs(float(lon_back.max()) - float(lon_source.max())) < 1e-6
+    assert abs(float(lat_back.min()) - float(lat_source.min())) < 1e-6
+    assert abs(float(lat_back.max()) - float(lat_source.max())) < 1e-6
 
 
 def test_params_default_and_tolerate_extra_keys():
@@ -130,16 +236,27 @@ def test_octree_node_read_metric_round_trips(tmp_path):
 
 
 def _pixc_netcdf(tmp_path, n=20_000, *, nan_first=False):
-    """Write a synthetic PIXC pixel_cloud netCDF: geometry + a few point variables."""
+    """Write a synthetic PIXC pixel_cloud netCDF: geometry + a few point variables.
+
+    lon/lat are realistic geographic degrees (a ~1 km tile footprint) and height
+    is realistic metres -- deliberately mismatched in numeric scale (0.01 deg
+    against 100 m), the exact shape that exposed the octree-cube-sized-on-height
+    defect (issue #134): a naive cube built from ``max(x_extent, y_extent,
+    z_extent)`` on unprojected lon/lat next to metric height comes out driven by
+    height alone. `_read_pixc_group` reprojects lon/lat to a local UTM zone
+    before the octree is built, so this fixture is what that reprojection has
+    to correct for the fix to be tested honestly, not sidestepped by picking
+    lon/lat magnitudes that happen not to trigger it.
+    """
     import xarray as xr
 
-    lon, lat, height = _cloud(n)
-    lon = lon / 1000.0
-    lat = lat / 1000.0
+    rng = np.random.default_rng(7)
+    lon = 1.40 + rng.uniform(0, 0.01, n)
+    lat = 43.60 + rng.uniform(0, 0.01, n)
+    height = rng.uniform(0, 100, n).astype("float64")
     if nan_first:
         height = height.copy()
         height[0] = np.nan
-    rng = np.random.default_rng(7)
     ds = xr.Dataset(
         {
             "longitude": ("points", lon),
@@ -267,6 +384,110 @@ def test_render_copc_lod_writes_png(tmp_path):
     out = str(tmp_path / "lod.png")
     assert render_copc_lod(target, out) == out
     assert os.path.getsize(out) > 0
+
+
+def _rgb_extras(n, seed=7):
+    # LAS RGB is nominally 16-bit; use the full range so auto-detection has
+    # something real to normalise against.
+    rng = np.random.default_rng(seed)
+    return {
+        "red": rng.integers(0, 65536, n, dtype="uint16"),
+        "green": rng.integers(0, 65536, n, dtype="uint16"),
+        "blue": rng.integers(0, 65536, n, dtype="uint16"),
+    }
+
+
+def test_render_copc_lod_color_by_auto_uses_rgb_when_carried(tmp_path):
+    # A flat colour makes a photogrammetric/colour-LiDAR cloud unreadable as a
+    # cloud (no terrain, no structure); auto should reach for the cloud's own
+    # colour when it has one, the CO3D/CARS case (issue: LOD figure request).
+    pytest.importorskip("matplotlib")
+    import os
+
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    target = _copc(tmp_path, n=20_000, span=16, max_depth=5, extras=_rgb_extras(20_000))
+    out = str(tmp_path / "lod_rgb.png")
+    assert render_copc_lod(target, out) == out
+    assert os.path.getsize(out) > 0
+
+
+def test_render_copc_lod_color_by_auto_falls_back_to_height_without_rgb(tmp_path):
+    pytest.importorskip("matplotlib")
+    import os
+
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    target = _copc(tmp_path, n=20_000, span=16, max_depth=5)  # no extras -> no RGB
+    out = str(tmp_path / "lod_z.png")
+    assert render_copc_lod(target, out) == out
+    assert os.path.getsize(out) > 0
+
+
+def test_render_copc_lod_color_by_a_carried_extra_dimension(tmp_path):
+    pytest.importorskip("matplotlib")
+    import os
+
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    n = 20_000
+    rng = np.random.default_rng(3)
+    extras = {"scan_angle_rank": rng.uniform(-30, 30, n).astype("float32")}
+    target = _copc(tmp_path, n=n, span=16, max_depth=5, extras=extras)
+    out = str(tmp_path / "lod_dim.png")
+    assert render_copc_lod(target, out, color_by="scan_angle_rank") == out
+    assert os.path.getsize(out) > 0
+
+
+def test_render_copc_lod_color_by_rgb_without_rgb_raises(tmp_path):
+    pytest.importorskip("matplotlib")
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    target = _copc(tmp_path, n=5_000, span=16, max_depth=3)  # geometry only
+    with pytest.raises(ValueError, match="rgb"):
+        render_copc_lod(target, str(tmp_path / "lod.png"), color_by="rgb")
+
+
+def test_render_copc_lod_color_by_unknown_dimension_raises(tmp_path):
+    pytest.importorskip("matplotlib")
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    target = _copc(tmp_path, n=5_000, span=16, max_depth=3)
+    with pytest.raises(ValueError, match="not a dimension"):
+        render_copc_lod(target, str(tmp_path / "lod.png"), color_by="not_a_real_dim")
+
+
+def test_render_copc_lod_dot_count_scales_with_panel_point_share(tmp_path, monkeypatch):
+    # Issue #134's third defect: every panel used to draw up to the same fixed
+    # `max_points` dots regardless of how many points it actually held, so a
+    # sparse coarse level looked as dense as the full cloud. A skewed cloud
+    # (dense core + sparse halo) forces multiple octree levels with clearly
+    # different point counts, so the coarse panel's dot budget must come out
+    # smaller than the full-detail panel's.
+    pytest.importorskip("matplotlib")
+    import matplotlib.axes
+
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    rng = np.random.default_rng(1)
+    dense = rng.uniform(0, 50, size=(40_000, 3))
+    sparse = rng.uniform(0, 500, size=(4_000, 3))
+    pts = np.vstack([dense, sparse])
+    target = str(tmp_path / "skew.copc.laz")
+    _build_copc(target, pts[:, 0], pts[:, 1], pts[:, 2], span=16, max_depth=6)
+
+    scatter_sizes: list[int] = []
+    orig_scatter = matplotlib.axes.Axes.scatter
+
+    def spy(self, x, *a, **kw):
+        scatter_sizes.append(len(x))
+        return orig_scatter(self, x, *a, **kw)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "scatter", spy)
+    render_copc_lod(target, str(tmp_path / "lod.png"), max_points=2000, color_by="flat")
+
+    assert len(scatter_sizes) >= 2
+    assert scatter_sizes[0] < scatter_sizes[-1]  # coarse panel is visibly sparser
 
 
 def _cars_tile(tmp_path, name="0_0.laz", n=20_000):
