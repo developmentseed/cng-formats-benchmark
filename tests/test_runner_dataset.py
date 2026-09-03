@@ -756,6 +756,61 @@ def test_cars_tiles_convert_to_one_copc_each(tmp_path):
     assert (output / "objects" / "CO3D_CARS" / "0_0" / "copc.laz").is_file()
 
 
+def test_cars_empty_tile_is_skipped_not_fatal(tmp_path):
+    """A legitimately point-free tile (a photogrammetric reconstruction gap)
+    must not abort the whole product's conversion (#89 follow-up).
+
+    ``CopcAdapter.convert`` raises :class:`EmptySourceError` for a tile with
+    no finite points; the per-component loop in ``_run_product`` catches it,
+    records a ``write_skipped`` marker, and continues with the remaining
+    tiles rather than letting the exception propagate and fail the batch.
+    """
+    pytest.importorskip("copclib")
+    laspy = pytest.importorskip("laspy")
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    src = tmp_path / "CO3D_CARS"
+    src.mkdir()
+    rng = np.random.default_rng(5)
+    for tile in ("0_0", "0_1"):
+        las = laspy.LasData(laspy.LasHeader(point_format=3))
+        las.x = rng.uniform(300000, 300500, 5_000)
+        las.y = rng.uniform(4900000, 4900500, 5_000)
+        las.z = rng.uniform(0, 100, 5_000)
+        las.write(str(src / f"{tile}.laz"))
+    # A genuinely empty tile: zero points, same point format, as CARS can
+    # legitimately deliver for an occluded/textureless ground cell.
+    empty = laspy.LasData(laspy.LasHeader(point_format=3))
+    empty.write(str(src / "1_0.laz"))
+    output = tmp_path / "out"
+
+    cfg = _benchmark(
+        ["write", "object_size", "read"],
+        {"scope": "product", "span": 16, "max_depth": 4},
+    ).model_copy(update={"formats": ["copc"]})
+    ds_cfg = DatasetConfig.model_validate(
+        {
+            "id": "co3d-cars",
+            "reader": "co3d-cars",
+            "source": str(src),
+            "baseline_format": "laz",
+            "target_formats": ["copc"],
+        }
+    )
+    result = run_dataset_benchmark(cfg, ds_cfg, str(output))
+
+    run = result.per_product[0]
+    # Only the 2 non-empty tiles produced an object; the empty one is absent,
+    # not a crash.
+    assert run.object_profile.count == 2
+    assert [ly.name for ly in run.object_layouts] == ["0_0", "0_1"]
+    assert not (output / "objects" / "CO3D_CARS" / "1_0" / "copc.laz").exists()
+    write_metric = next(m for m in run.metrics if m.name == "write_throughput")
+    assert write_metric.detail["components_skipped"] == 1
+    assert write_metric.detail["components"] == 3
+
+
 # --- bytes_in source-size coverage across source layouts -----------------------
 
 

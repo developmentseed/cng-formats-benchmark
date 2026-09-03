@@ -23,6 +23,20 @@ if TYPE_CHECKING:
     from cng_benchmark.datasets.base import SourceObject
 
 
+class EmptySourceError(ValueError):
+    """Raised by :meth:`FormatAdapter.convert` when a source component holds no
+    usable content — an empty tile, a point cloud with no finite points, a
+    raster with no valid pixels within bounds.
+
+    A legitimate content condition (a photogrammetric reconstruction can fail
+    on individual ground cells: occlusion, water, no stereo texture), not a
+    defect in the adapter or the source. The runner's per-component product
+    loop catches this specifically to skip the one component and continue,
+    rather than aborting a multi-hundred-component batch over a single
+    legitimately-empty unit.
+    """
+
+
 class ObjectKind(StrEnum):
     """The kind of object an adapter materialises at the conversion target.
 
