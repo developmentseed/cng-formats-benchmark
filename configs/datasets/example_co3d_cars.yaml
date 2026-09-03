@@ -1,0 +1,30 @@
+# Example point-cloud dataset descriptor: a CO3D CARS delivery.
+#
+# The CARS pipeline delivers its point cloud as *tiled LAZ* — one file per ground
+# tile — so the product is a set of tiles, not a single granule: `reader` selects
+# the Co3dCarsDataset, which enumerates the tiles under `source` and yields one
+# component per tile, keeping the tile identity in the component name so the
+# object-size distribution is per tile. Tiles are grouped into products by the
+# directory holding them, so a root staging one delivery gives one product.
+#
+# Each tile is converted to one COPC file by the COPC adapter — the same
+# point-cloud path as the SWOT PIXC arm, reused unchanged; its loader reads the
+# tile's geometry *and* the rest of its point record with laspy, so the produced
+# object is content-complete. `source` is the delivery root; replace it with a
+# reachable prefix — nothing here is provider-specific.
+id: example-co3d-cars
+description: Example CO3D CARS point cloud (tiled LAZ -> COPC).
+source: s3://example-bucket/CO3D_CARS/
+baseline_format: laz
+reader: co3d-cars
+target_formats:
+  - copc
+options:
+  # The delivered tile extension (`.las` for an uncompressed staging).
+  tile_suffix: .laz
+grouping_lever:
+  # Open question this arm answers: a single tile is small and may sit below
+  # Tier 2, so is the lever the octree node budget *inside* one tile (swept here,
+  # one COPC per tile), or *merging* tiles into one COPC? This descriptor
+  # measures the first; the merge is a separate aggregation lever.
+  copc_max_depth: [null, 6]
