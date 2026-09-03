@@ -43,7 +43,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+from cng_benchmark.formats.base import EmptySourceError, FormatAdapter, ObjectKind
 from cng_benchmark.models import CopcLayout
 from cng_benchmark.registry import FORMATS
 
@@ -650,7 +650,7 @@ class CopcAdapter(FormatAdapter):
         opts = CopcParams.model_validate(params)
         x, y, z, extras = _load_points(source)
         if len(x) == 0:
-            raise ValueError(f"COPC source {source!r} yielded no finite points")
+            raise EmptySourceError(f"COPC source {source!r} yielded no finite points")
 
         span = int(_first(opts.span, DEFAULT_SPAN))
         max_depth_value = _first(opts.max_depth, None)

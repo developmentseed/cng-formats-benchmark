@@ -33,7 +33,7 @@ from cng_benchmark import __version__, storage
 from cng_benchmark.config import BenchmarkConfig, DatasetConfig, tier_policy_from_config
 from cng_benchmark.datasets import Product, build_dataset
 from cng_benchmark.datasets.base import Dataset, SourceObject
-from cng_benchmark.formats.base import FormatAdapter, ObjectKind
+from cng_benchmark.formats.base import EmptySourceError, FormatAdapter, ObjectKind
 from cng_benchmark.gdal_env import gdal_session
 from cng_benchmark.metrics.display import fetch_titiler_versions, measure_display
 from cng_benchmark.metrics.objects import profile_object_sizes
@@ -337,11 +337,18 @@ def _aggregate_write_metrics(
     before #102) — a bundled write call covers several components in one
     call, so a batched caller passes the real component count explicitly
     rather than undercounting it as "one write call = one component".
+
+    A component the caller skipped (an :class:`~cng_benchmark.formats.base.
+    EmptySourceError`, e.g. a legitimately point-free tile) contributes a
+    single ``write_skipped`` marker instead of the elapsed/throughput pair;
+    it is counted into ``detail["components_skipped"]`` so the skip stays
+    visible in the aggregate rather than silently dropping out.
     """
     total_elapsed = 0.0
     bytes_out = 0
     bytes_in = 0
     have_bytes_in = False
+    skipped = 0
     for metrics in per_component:
         for m in metrics:
             if m.name == "write_elapsed":
@@ -351,6 +358,8 @@ def _aggregate_write_metrics(
                 if "bytes_in" in m.detail:
                     bytes_in += int(m.detail["bytes_in"])
                     have_bytes_in = True
+            elif m.name == "write_skipped":
+                skipped += 1
     throughput = bytes_out / total_elapsed if total_elapsed > 0 else float("inf")
     detail: dict = {
         "bytes_out": bytes_out,
@@ -360,6 +369,8 @@ def _aggregate_write_metrics(
     }
     if have_bytes_in:
         detail["bytes_in"] = bytes_in
+    if skipped:
+        detail["components_skipped"] = skipped
     return [
         MetricResult(name="write_elapsed", value=total_elapsed, unit="s"),
         MetricResult(
@@ -516,13 +527,32 @@ def _run_product(
                 if value is not None:
                     convert_params.setdefault(key, value)
             with gdal_session("source"):
-                wm = measure_write(
-                    adapter,
-                    source_path,
-                    local_target,
-                    convert_params,
-                    source_size=source_size,
-                )
+                try:
+                    wm = measure_write(
+                        adapter,
+                        source_path,
+                        local_target,
+                        convert_params,
+                        source_size=source_size,
+                    )
+                except EmptySourceError as exc:
+                    logger.warning(
+                        "  [%d/%d] %s: write skipped (%s)",
+                        i + 1,
+                        n_comp,
+                        component.name,
+                        exc,
+                    )
+                    write_calls.append(
+                        [
+                            MetricResult(
+                                name="write_skipped",
+                                value=0.0,
+                                detail={"error": str(exc)},
+                            )
+                        ]
+                    )
+                    continue
             write_calls.append(wm)
             _log_write_done(wm, prefix=f"  [{i + 1}/{n_comp}] {component.name}: ")
 
