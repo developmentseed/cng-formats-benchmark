@@ -412,6 +412,44 @@ def test_render_copc_lod_color_by_auto_uses_rgb_when_carried(tmp_path):
     assert os.path.getsize(out) > 0
 
 
+def test_render_copc_lod_rgb_contrast_stretches_a_narrow_range(tmp_path, monkeypatch):
+    # A natural-scene cloud (rock, concrete, vegetation) rarely spans the full
+    # LAS RGB range; normalising against the cloud's own raw max keeps a
+    # narrow real range narrow and reads as flat, washed-out grey (the CO3D/
+    # PHR3D cliff face this was raised against). The percentile stretch must
+    # expand a narrow band back out towards the full [0, 1] colour range.
+    pytest.importorskip("matplotlib")
+    import matplotlib.axes
+
+    from cng_benchmark.formats.copc import render_copc_lod
+
+    n = 20_000
+    rng = np.random.default_rng(9)
+    # All three channels confined to ~3% of the full 0-65535 LAS RGB range.
+    narrow = {
+        "red": (30000 + rng.uniform(0, 2000, n)).astype("uint16"),
+        "green": (30500 + rng.uniform(0, 2000, n)).astype("uint16"),
+        "blue": (31000 + rng.uniform(0, 2000, n)).astype("uint16"),
+    }
+    target = _copc(tmp_path, n=n, span=16, max_depth=5, extras=narrow)
+
+    captured = []
+    orig_scatter = matplotlib.axes.Axes.scatter
+
+    def spy(self, x, *a, **kw):
+        colors = kw.get("c")
+        if colors is not None and hasattr(colors, "ndim") and colors.ndim == 2:
+            captured.append(colors)
+        return orig_scatter(self, x, *a, **kw)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "scatter", spy)
+    render_copc_lod(target, str(tmp_path / "lod.png"), color_by="rgb")
+
+    assert captured
+    full_panel_colors = captured[-1]
+    assert full_panel_colors.max() - full_panel_colors.min() > 0.5
+
+
 def test_render_copc_lod_color_by_auto_falls_back_to_height_without_rgb(tmp_path):
     pytest.importorskip("matplotlib")
     import os

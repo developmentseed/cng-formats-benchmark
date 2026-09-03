@@ -692,11 +692,16 @@ def render_copc_lod(
       values, same colormap/colourbar treatment as height.
     - ``"flat"``: the original single-colour scatter.
 
-    RGB is normalised once against the cloud's own maximum channel value (LAS
-    RGB is nominally 16-bit but writers vary in whether they use the full
-    range), and every other coloured mode shares one min/max normalisation
-    across all three panels, computed from the full-detail query, so colour is
-    directly comparable panel to panel, not renormalised per panel.
+    RGB is contrast-stretched once, per channel, against the cloud's own 2nd
+    and 98th percentile (not its bare min/max, which a handful of outlier
+    pixels can compress the real range against): a photogrammetric or
+    natural-scene cloud (rock, vegetation, concrete) rarely spans the full
+    0-65535 LAS RGB range writers nominally allow, so normalising against the
+    true extremes alone under-uses the colour range and reads as flat,
+    washed-out grey. Every other coloured mode shares one min/max
+    normalisation across all three panels, computed from the full-detail
+    query, so colour is directly comparable panel to panel, not renormalised
+    per panel.
     """
     import copclib as copc
     import laspy
@@ -754,16 +759,22 @@ def render_copc_lod(
     # One full-depth query up front: the "full detail" panel needs it anyway,
     # and it gives a stable colour normalisation shared across all 3 panels.
     full_pts = reader.query(level=range(0, cuts[-1] + 1))
-    rgb_max = 1.0
+    rgb_lo = np.zeros(3)
+    rgb_span = np.ones(3)
     value_range: tuple[float, float] | None = None
     dim_name = "z" if mode == "z" else mode
     if mode == "rgb":
-        rgb_max = max(
-            float(np.asarray(full_pts.red).max()),
-            float(np.asarray(full_pts.green).max()),
-            float(np.asarray(full_pts.blue).max()),
-            1.0,
+        rgb_full = np.stack(
+            [
+                np.asarray(full_pts.red, dtype="float64"),
+                np.asarray(full_pts.green, dtype="float64"),
+                np.asarray(full_pts.blue, dtype="float64"),
+            ],
+            axis=1,
         )
+        rgb_lo = np.percentile(rgb_full, 2, axis=0)
+        rgb_hi = np.percentile(rgb_full, 98, axis=0)
+        rgb_span = np.maximum(rgb_hi - rgb_lo, 1.0)
     elif mode != "flat":
         values = np.asarray(getattr(full_pts, dim_name), dtype="float64")
         value_range = (float(values.min()), float(values.max()))
@@ -799,7 +810,7 @@ def render_copc_lod(
             )
             if idx is not None:
                 rgb = rgb[idx]
-            colors = np.clip(rgb / rgb_max, 0, 1)
+            colors = np.clip((rgb - rgb_lo) / rgb_span, 0, 1)
             ax.scatter(x, y, s=0.4, c=colors, alpha=0.8, linewidths=0)
         elif mode == "flat":
             ax.scatter(x, y, s=0.4, c="#1d4ed8", alpha=0.5, linewidths=0)
