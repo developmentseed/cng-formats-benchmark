@@ -378,9 +378,23 @@ def _build_copc(
     header.global_encoding.wkt = 1  # required for a LAS 1.4 / pf6 file
     header.offsets = mn
     header.scales = [scale, scale, scale]
-    # Seed with the standard LAS dimension names (x/y/z, classification, …) so a
-    # source variable that collides with a reserved name is carried under a
-    # suffixed extra-dimension name rather than clashing with the point record.
+    # The target format's own standard fields (x/y/z, classification,
+    # intensity, …). A source variable whose name matches one of these is the
+    # *same field*, carried over from a source point format that also has it
+    # (e.g. classification/intensity/return_number are standard on both format
+    # 2, a common CARS delivery format, and format 6 here) — it belongs in that
+    # native slot, not as a renamed ExtraBytes duplicate that leaves the real
+    # field empty and doubles the bytes for no reason. Only a name with no home
+    # in the target format's own fields (RGB, a source-specific quality flag, …)
+    # is a genuine extra dimension.
+    native_names = set(laspy.PointFormat(POINT_FORMAT_ID).standard_dimension_names) - {
+        "X",
+        "Y",
+        "Z",
+    }
+    native_overlap = {
+        name: extras.pop(name) for name in list(extras) if name in native_names
+    }
     used: set[str] = set(laspy.PointFormat(POINT_FORMAT_ID).standard_dimension_names)
     # Declare the extra dims on the header first (schema only — no value copies),
     # so the LAS record can be allocated once.
@@ -396,9 +410,14 @@ def _build_copc(
 
     las = laspy.LasData(header)
     las.x, las.y, las.z = x, y, z
-    # Pack each variable into the record, then drop the source array. ``extras``
-    # is consumed so the full source set and the full LAS record never coexist —
-    # the peak that OOMs a content-complete, multi-million-point granule.
+    # Assign the native-field overlap straight into the target format's own
+    # dimensions (laspy casts to each field's LAS-mandated storage type).
+    for name in list(native_overlap):
+        las[name] = np.asarray(native_overlap.pop(name))
+    # Pack each remaining (genuine-extra) variable into the record, then drop
+    # the source array. ``extras`` is consumed so the full source set and the
+    # full LAS record never coexist — the peak that OOMs a content-complete,
+    # multi-million-point granule.
     for name in list(extras):
         arr = np.asarray(extras.pop(name))
         las[eb_names[name]] = arr.astype(_las_extra_dtype(arr.dtype))

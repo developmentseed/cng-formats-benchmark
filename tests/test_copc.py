@@ -164,7 +164,7 @@ def test_convert_carries_all_pixc_point_variables(tmp_path):
     from cng_benchmark.formats.copc import CopcAdapter
 
     n = 20_000
-    granule, _ = _pixc_netcdf(tmp_path, n, nan_first=True)
+    granule, source_ds = _pixc_netcdf(tmp_path, n, nan_first=True)
     target = str(tmp_path / "out.copc.laz")
     CopcAdapter().convert(
         f"{PIXC_SCHEME}{granule}::pixel_cloud", target, {"span": 32, "max_depth": 4}
@@ -172,14 +172,26 @@ def test_convert_carries_all_pixc_point_variables(tmp_path):
 
     ly = describe_copc_layout(target, "pixel_cloud")
     assert ly.point_count == n - 1  # the NaN point was dropped
-    # Every non-geometry point variable is carried as an extra dimension; the
-    # 'classification' name collides with a standard LAS dim and is suffixed.
+    # Every non-geometry point variable is carried; 'classification' is a
+    # standard dimension of the target format too, so it lands in that native
+    # field, not as a renamed extra dimension (only names with no home in the
+    # target format become extras).
     assert set(ly.extra_dimensions) == {
         "sig0",
         "water_frac",
-        "classification_1",
         "geolocation_qual",
     }
+
+    import laspy
+
+    back = laspy.CopcReader.open(target).query()
+    # The native 'classification' field actually carries the source values
+    # (not left empty by a name collision with a renamed extra dimension).
+    expected_classification = np.asarray(source_ds["classification"].values)[1:]
+    assert set(np.unique(np.asarray(back.classification))) <= set(
+        np.unique(expected_classification)
+    )
+    assert np.asarray(back.classification).max() > 0
 
 
 def test_extra_dimension_values_and_dtypes_round_trip(tmp_path):
@@ -294,10 +306,13 @@ def test_convert_carries_a_cars_tile_point_record(tmp_path):
     ly = describe_copc_layout(target, "0_0")
     assert ly.point_count == n
     carried = set(ly.extra_dimensions)
+    # RGB has no home in the target format (LAS 1.4 point format 6 carries no
+    # colour), so it is a genuine extra dimension, same as the tile's own
+    # 'confidence'. 'intensity' IS a standard dimension of the target format,
+    # so it lands in that native field instead, not as a renamed extra.
     assert {"red", "green", "blue", "confidence"} <= carried
-    # 'intensity' and 'classification' collide with standard dimensions of the
-    # target point format, so the writer suffixes them.
-    assert "intensity_1" in carried
+    assert "intensity" not in carried
+    assert "intensity_1" not in carried
     # The raw scaled-integer geometry is not carried twice.
     assert carried.isdisjoint({"X", "Y", "Z"})
 
@@ -318,8 +333,10 @@ def test_cars_tile_values_round_trip(tmp_path):
     order = np.argsort(np.asarray(back.confidence))
     expected = np.argsort(np.asarray(source.confidence))
     assert np.array_equal(np.asarray(back.red)[order], np.asarray(source.red)[expected])
+    # 'intensity' is a standard dimension of the target format, so it round-trips
+    # through that native field, not a renamed extra dimension.
     assert np.array_equal(
-        np.asarray(back.intensity_1)[order], np.asarray(source.intensity)[expected]
+        np.asarray(back.intensity)[order], np.asarray(source.intensity)[expected]
     )
     # The geometry survives the octree's own coordinate quantisation (the COPC is
     # written on a scale derived from the cloud extent, not the tile's 0.01 step).
