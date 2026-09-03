@@ -572,7 +572,11 @@ def _run_product(
             # never support batching, so `singles` is always the whole product
             # for this kind and `i == 0` is still the product's first component.
             if adapter.object_kind is ObjectKind.POINT_CLOUD_FILE and i == 0:
-                extra_artifacts += _publish_copc_lod(local_target, component_dir)
+                extra_artifacts += _publish_copc_lod(
+                    local_target,
+                    component_dir,
+                    color_by=config.params.get("lod_color_by", "auto"),
+                )
 
             if "read" in requested and sample_index < read_samples:
                 logger.info("  [%d/%d] %s: read metric", i + 1, n_comp, component.name)
@@ -759,18 +763,22 @@ def _run_product(
     return run, sizes
 
 
-def _publish_copc_lod(local_target: str, artifact_dir: str) -> list[Artifact]:
+def _publish_copc_lod(
+    local_target: str, artifact_dir: str, *, color_by: str = "auto"
+) -> list[Artifact]:
     """Render + publish the COPC octree level-of-detail PNG next to the object.
 
     The point-cloud structural artifact, mirroring how the display path publishes
     ``display_chunk_layout.png`` for a raster. Best-effort: a missing matplotlib
-    (the ``cog`` extra) is reported as a skipped artifact, not a failure.
+    (the ``cog`` extra) is reported as a skipped artifact, not a failure. A bad
+    ``color_by`` (an unknown dimension name) is a config mistake, not a runtime
+    condition, so it is left to raise rather than degrade silently.
     """
     from cng_benchmark.formats.copc import render_copc_lod
 
     try:
         local_lod = os.path.join(os.path.dirname(local_target) or ".", "_lod.png")
-        render_copc_lod(local_target, local_lod)
+        render_copc_lod(local_target, local_lod, color_by=color_by)
         lod_uri = storage.join(artifact_dir, "copc_octree_lod.png")
         storage.upload_from_path(local_lod, lod_uri, role="sink")
         return [

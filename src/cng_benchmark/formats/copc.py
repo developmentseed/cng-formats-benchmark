@@ -137,24 +137,27 @@ def _parse_pixc_uri(source: str) -> tuple[str, str, list[str] | None, list[str]]
 
 
 def _load_points(source: str, *, role: str = "source"):
-    """Load ``(x, y, z, extras)`` from a point-cloud source.
+    """Load ``(x, y, z, extras, crs)`` from a point-cloud source.
 
     Dispatches on the source form: a ``PIXC:`` URI reads the netCDF group's
     lon/lat/height plus its other point variables with ``xarray`` (the SWOT PIXC
-    pixel cloud); a ``.las``/``.laz`` path reads its geometry plus the rest of its
-    point record with ``laspy`` (the CO3D CARS tile). ``extras`` maps a variable
-    name to its per-point array.
+    pixel cloud), reprojecting lon/lat to a local UTM zone so x/y/z are all
+    metric (:func:`_read_pixc_group`); a ``.las``/``.laz`` path reads its
+    geometry plus the rest of its point record with ``laspy`` (the CO3D CARS
+    tile), carrying through whatever CRS the tile itself declares, unchanged
+    (:func:`_read_las`). ``extras`` maps a variable name to its per-point array;
+    ``crs`` is a :class:`pyproj.CRS` when known, else ``None``.
     Points with a non-finite coordinate are dropped from every array together.
     """
     import numpy as np
 
     if source.startswith(PIXC_SCHEME):
         granule_uri, group, include, exclude = _parse_pixc_uri(source)
-        x, y, z, extras = _read_pixc_group(
+        x, y, z, extras, crs = _read_pixc_group(
             granule_uri, group, role=role, include=include, exclude=exclude
         )
     elif source.lower().endswith((".las", ".laz")):
-        x, y, z, extras = _read_las(source, role=role)
+        x, y, z, extras, crs = _read_las(source, role=role)
     else:
         raise ValueError(
             f"COPC source {source!r} is neither a PIXC netCDF group "
@@ -170,7 +173,7 @@ def _load_points(source: str, *, role: str = "source"):
     # first would double peak memory on a multi-million-point cloud.
     for name in list(extras):
         extras[name] = np.asarray(extras[name]).ravel()[finite]
-    return x[finite], y[finite], z[finite], extras
+    return x[finite], y[finite], z[finite], extras, crs
 
 
 def _read_pixc_group(
@@ -181,7 +184,17 @@ def _read_pixc_group(
     include: list[str] | None,
     exclude: list[str],
 ):
-    """Read geometry + the carried point variables from a netCDF ``group``."""
+    """Read geometry + the carried point variables from a netCDF ``group``.
+
+    lon/lat (degrees, EPSG:4326) are reprojected to a local UTM zone chosen
+    from the group's own centroid (:func:`_local_utm_crs`) before returning,
+    so x/y come back already in metres, consistent with height (z), which is
+    already metres. Un-reprojected lon/lat next to a metric height is what
+    sizes the COPC octree cube off the height range alone (issue #134): x/y's
+    ~0.001-1 degree footprint is numerically tiny next to a several-hundred-
+    metre height range, so the octree cube ends up ~1000x too large in x/y
+    and the first several levels split on height only, not space.
+    """
     import numpy as np
     import xarray as xr
 
@@ -211,8 +224,8 @@ def _read_pixc_group(
         lon = _pick_var(ds, _LON_NAMES)
         lat = _pick_var(ds, _LAT_NAMES)
         height = _pick_var(ds, _HEIGHT_NAMES)
-        x = np.asarray(ds[lon].values)
-        y = np.asarray(ds[lat].values)
+        lon_deg = np.asarray(ds[lon].values, dtype="float64")
+        lat_deg = np.asarray(ds[lat].values, dtype="float64")
         z = np.asarray(ds[height].values)
         point_dim = ds[lon].dims[0]
         geometry = {lon, lat, height}
@@ -222,7 +235,40 @@ def _read_pixc_group(
         ds.close()
         if tmp_download is not None:
             os.unlink(tmp_download)
-    return x, y, z, extras
+
+    crs = _local_utm_crs(lon_deg, lat_deg)
+    if crs is None:
+        # No finite lon/lat to centre a zone on (an all-fill-value group);
+        # leave geometry as degrees, same as before this fix. `_load_points`
+        # drops all-non-finite rows anyway, so this cloud converts to nothing
+        # (`EmptySourceError`) regardless of projection.
+        return lon_deg, lat_deg, z, extras, None
+    import pyproj
+
+    x, y = pyproj.Transformer.from_crs("EPSG:4326", crs, always_xy=True).transform(
+        lon_deg, lat_deg
+    )
+    return x, y, z, extras, crs
+
+
+def _local_utm_crs(lon_deg, lat_deg):
+    """Return the UTM zone CRS (a :class:`pyproj.CRS`) centred on the cloud.
+
+    Chosen from the finite points' centroid: WGS84 UTM north for a
+    non-negative centroid latitude, south otherwise, zone from the centroid
+    longitude. ``None`` when there is no finite point to centre a zone on.
+    """
+    import numpy as np
+    import pyproj
+
+    finite = np.isfinite(lon_deg) & np.isfinite(lat_deg)
+    if not finite.any():
+        return None
+    lon_c = float(np.mean(lon_deg[finite]))
+    lat_c = float(np.mean(lat_deg[finite]))
+    zone = int((lon_c + 180) / 6) + 1
+    epsg = (32600 if lat_c >= 0 else 32700) + zone
+    return pyproj.CRS.from_epsg(epsg)
 
 
 def _select_point_vars(
@@ -256,7 +302,7 @@ def _pick_var(ds, names: tuple[str, ...]) -> str:
 
 
 def _read_las(path: str, *, role: str = "source"):
-    """Read ``(x, y, z, extras)`` from a LAS/LAZ tile with laspy.
+    """Read ``(x, y, z, extras, crs)`` from a LAS/LAZ tile with laspy.
 
     Content-complete like the PIXC group read: every non-geometry dimension the
     tile's point record declares — the standard LAS fields it carries (intensity,
@@ -267,6 +313,13 @@ def _read_las(path: str, *, role: str = "source"):
     as ``x``/``y``/``z``, so they are skipped; a name that collides with a
     reserved dimension of the *target* point format is suffixed by the writer
     (:func:`_sanitize_eb_name`).
+
+    ``crs`` is the source tile's own declared CRS (``laspy``'s
+    ``header.parse_crs()``, ``None`` when the tile carries no CRS VLR at all —
+    common for a CARS delivery, whose x/y/z are already in one consistent
+    metric CRS but do not name it). Carried through unchanged, never guessed:
+    x/y/z are not reprojected here, unlike the PIXC path (:func:`_read_pixc_group`),
+    whose lon/lat/height inputs are not already metric.
 
     laspy needs a local, seekable file — a LAZ chunk table is read by random
     access — so an S3 tile is downloaded first, as the PIXC granule read is.
@@ -296,7 +349,7 @@ def _read_las(path: str, *, role: str = "source"):
             for name in las.point_format.dimension_names
             if name not in _LAS_RAW_GEOMETRY_DIMS
         }
-        return las.x, las.y, las.z, extras
+        return las.x, las.y, las.z, extras, las.header.parse_crs()
     finally:
         if tmp_download is not None:
             os.unlink(tmp_download)
@@ -347,6 +400,7 @@ def _build_copc(
     span: int,
     max_depth: int,
     scale: float | None = None,
+    crs=None,
 ) -> None:
     """Write points (geometry + ``extras``) to a COPC LAZ at ``path``.
 
@@ -358,6 +412,24 @@ def _build_copc(
     ``max_depth``), each node filled by a vectorised ``Points.Unpack`` of the laspy
     point bytes — so every extra value round-trips. Pure ``laspy`` + ``copclib`` +
     ``numpy`` — CI-testable.
+
+    ``x``/``y``/``z`` must already be in one consistent metric unit (the caller's
+    job: :func:`_load_points` reprojects PIXC's geographic lon/lat to a local UTM
+    zone before calling this, and carries a LAS/LAZ source's own CRS through
+    unchanged, since its x/y/z are already metric). Building the octree cube on
+    mismatched units (geographic x/y next to a metric z) makes ``side`` come out
+    driven by whichever axis happens to be numerically largest rather than by
+    real spatial extent (issue #134's original defect).
+
+    ``crs`` (a :class:`pyproj.CRS`), when known, is written into the header as a
+    WKT VLR (:meth:`laspy.LasHeader.add_crs`), so the produced COPC is
+    self-describing; ``None`` leaves the header without one, same as before this
+    parameter existed, for a source whose CRS is genuinely unknown (an
+    undeclared CARS delivery). ``scale``, left ``None``, is now derived
+    **per axis** from that axis's own extent (floored at 1 mm) rather than from
+    the largest of the three, so an axis that varies far less than the others
+    (height inside a small footprint tile, or the reverse) is not quantised
+    coarser than it needs to be.
     """
     import copclib as copc
     import laspy
@@ -369,15 +441,24 @@ def _build_copc(
     z = np.asarray(z, "float64")
     xyz = np.stack([x, y, z], axis=1)
     mn = xyz.min(axis=0)
-    side = float((xyz.max(axis=0) - mn).max()) or 1.0
+    extent = xyz.max(axis=0) - mn
+    side = float(extent.max()) or 1.0
     if scale is None:
-        # Keep quantised coordinates well within the LAS 32-bit grid (< 2**31).
-        scale = max(side / 1e8, 1e-9)
+        # Per-axis: an axis that varies far less than the cube's overall side
+        # (a flat height range inside a wide footprint, or the reverse) keeps
+        # its own precision floor (1 mm) rather than inheriting the coarser
+        # scale the other axes would force under one shared value. Still kept
+        # well within the LAS 32-bit grid (< 2**31 counts) per axis.
+        scale_axes = [max(float(e) / 2**31, 1e-3) for e in extent]
+    else:
+        scale_axes = [float(scale)] * 3
 
     header = laspy.LasHeader(point_format=POINT_FORMAT_ID)
     header.global_encoding.wkt = 1  # required for a LAS 1.4 / pf6 file
     header.offsets = mn
-    header.scales = [scale, scale, scale]
+    header.scales = scale_axes
+    if crs is not None:
+        header.add_crs(crs)
     # The target format's own standard fields (x/y/z, classification,
     # intensity, …). A source variable whose name matches one of these is the
     # *same field*, carried over from a source point format that also has it
@@ -425,7 +506,7 @@ def _build_copc(
     records = las.points.array  # the packed LAS point records (incl. extra bytes)
 
     # Hand copclib a header carrying the matching ExtraBytes VLR via a 1-point LAZ.
-    config, point_header = _copc_config_from_header(header, mn, scale)
+    config, point_header = _copc_config_from_header(header, mn, scale_axes)
     config.las_header.min = list(mn)
     config.las_header.max = list(mn + side)
     center = mn + side / 2.0
@@ -442,17 +523,20 @@ def _build_copc(
         raw = records[idx].view(np.int8).reshape(-1)
         return copc.Points.Unpack(copc.VectorChar(raw), point_header)
 
-    # A node holds at most ``span**3`` points; above that it is subdivided, so no
-    # single node ever materialises a large fraction of the cloud.
-    budget = max(1, span**3)
     # Iterative octree build: (key, point indices, depth, node-min corner, side).
+    # Every node is voxel-sampled, even one already under the span**3 budget:
+    # `_voxel_split` bounds a node to at most one point per occupied cell of its
+    # own span-per-edge grid, so it is already <= span**3 by construction, budget
+    # or not (issue #134's second defect: a `len(idx) <= budget` short-circuit
+    # here wrote such a node whole, skipping the spatial thinning that makes a
+    # coarse level an actual overview instead of a full-density subset).
     stack = [(copc.VoxelKey(0, 0, 0, 0), np.arange(len(xyz)), 0, mn.copy(), side)]
     try:
         while stack:
             key, idx, depth, nmin, nside = stack.pop()
             if len(idx) == 0:
                 continue
-            if len(idx) <= budget or depth >= max_depth:
+            if depth >= max_depth:
                 node_idx, rest = idx, np.empty(0, dtype=int)
             else:
                 node_idx, rest = _voxel_split(xyz, idx, nmin, nside, span)
@@ -482,12 +566,14 @@ def _build_copc(
         writer.Close()
 
 
-def _copc_config_from_header(header, mn, scale: float):
+def _copc_config_from_header(header, mn, scale_axes: list[float]):
     """Return ``(CopcConfigWriter, LasHeader)`` carrying ``header``'s ExtraBytes.
 
     copclib cannot build an ExtraBytes VLR from Python, so a one-point LAZ written
     from the laspy ``header`` is read back with copclib to obtain the matching VLR
-    (for the COPC config) and the LAS header used to unpack point bytes.
+    (for the COPC config), the CRS WKT if ``header`` carries one
+    (:meth:`laspy.LasHeader.add_crs`), and the LAS header used to unpack point
+    bytes. ``scale_axes`` is the per-axis ``[sx, sy, sz]`` quantisation.
     """
     import copclib as copc
     import laspy
@@ -499,11 +585,20 @@ def _copc_config_from_header(header, mn, scale: float):
     try:
         tiny.write(tiny_path)
         laz_config = copc.LazReader(tiny_path).laz_config
+        # copclib's own ``LazReader.laz_config.wkt`` mis-parses the WKT VLR
+        # laspy just wrote (drops its first 6 bytes, "PROJCR" off a
+        # "PROJCRS[..." string — confirmed by re-reading the same tiny LAZ
+        # with laspy itself, which gets the full, correct WKT back). Use
+        # pyproj's own ``to_wkt()`` instead, straight from the header's own
+        # CRS, sidestepping that round trip for this one field; the ExtraBytes
+        # VLR and LAS header from the same round trip are unaffected and kept.
+        source_crs = header.parse_crs()
+        wkt = source_crs.to_wkt() if source_crs is not None else laz_config.wkt
         config = copc.CopcConfigWriter(
             POINT_FORMAT_ID,
-            scale=[scale, scale, scale],
+            scale=list(scale_axes),
             offset=[mn[0], mn[1], mn[2]],
-            wkt=laz_config.wkt,
+            wkt=wkt,
             extra_bytes_vlr=laz_config.extra_bytes_vlr,
         )
         return config, laz_config.las_header
@@ -565,15 +660,48 @@ def describe_copc_layout(path: str, name: str) -> CopcLayout:
     )
 
 
-def render_copc_lod(path: str, out_path: str, *, max_points: int = 120_000) -> str:
+def render_copc_lod(
+    path: str, out_path: str, *, max_points: int = 120_000, color_by: str = "auto"
+) -> str:
     """Render the COPC clustered-octree level-of-detail to ``out_path`` (a PNG).
 
-    Three top-down panels — a coarse overview from the shallow octree levels, a
-    mid level, and the full cloud — illustrate how a reader fetches progressively
-    deeper octree nodes: the COPC analogue of COG overviews / the tile-footprint
-    diagram, and the point-cloud structural artifact of a run. Each panel
-    subsamples to ``max_points`` for a legible scatter. Requires matplotlib (the
-    ``cog`` extra); returns ``out_path``.
+    Three top-down panels — a coarse overview, a mid level, and the full cloud —
+    illustrate how a reader fetches progressively deeper octree nodes: the COPC
+    analogue of COG overviews / the tile-footprint diagram, and the point-cloud
+    structural artifact of a run. The level cuts are chosen by **point fraction**
+    (roughly 10%, 50% and 100% of the cloud), not by a bare depth fraction: point
+    density is not uniform across levels, so a depth-based cut can put nearly the
+    whole cloud in the last panel and almost nothing in the others. Each panel's
+    dot budget is proportional to the share of the cloud it actually holds
+    (capped at ``max_points`` overall, for the full-detail panel), so the figure
+    shows real densification panel to panel instead of every panel maxing out
+    the same fixed dot count regardless of how sparse it is (issue #134's third
+    defect). Requires matplotlib (the ``cog`` extra); returns ``out_path``.
+
+    ``color_by`` picks what the scatter is coloured on, since a flat colour makes
+    a photogrammetric or coloured-LiDAR cloud unreadable as a *cloud* (no terrain,
+    no structure, just a point count):
+
+    - ``"auto"`` (default): the point cloud's own ``red``/``green``/``blue`` when
+      the file carries them (a photo-realistic render, the most representative
+      choice for CO3D/CARS-family colour clouds), else height (``z``).
+    - ``"rgb"``: force RGB; raises if the file carries no red/green/blue.
+    - ``"z"``: height, on a continuous colormap with a shared colourbar.
+    - any other carried dimension name (e.g. ``"intensity"``,
+      ``"classification"``, ``"scan_angle_rank"``): coloured on that dimension's
+      values, same colormap/colourbar treatment as height.
+    - ``"flat"``: the original single-colour scatter.
+
+    RGB is contrast-stretched once, per channel, against the cloud's own 2nd
+    and 98th percentile (not its bare min/max, which a handful of outlier
+    pixels can compress the real range against): a photogrammetric or
+    natural-scene cloud (rock, vegetation, concrete) rarely spans the full
+    0-65535 LAS RGB range writers nominally allow, so normalising against the
+    true extremes alone under-uses the colour range and reads as flat,
+    washed-out grey. Every other coloured mode shares one min/max
+    normalisation across all three panels, computed from the full-detail
+    query, so colour is directly comparable panel to panel, not renormalised
+    per panel.
     """
     import copclib as copc
     import laspy
@@ -590,31 +718,132 @@ def render_copc_lod(path: str, out_path: str, *, max_points: int = 120_000) -> s
             "extra); install with `uv sync --extra cog`"
         ) from exc
 
-    depth = copc.FileReader(path).GetMaxDepth()
     reader = laspy.CopcReader.open(path)
-    cuts = sorted({max(1, depth // 3), max(2, 2 * depth // 3), max(2, depth)})
+    # `dimension_names` lists raw X/Y/Z (uppercase) but not the scaled x/y/z
+    # accessors every point record still exposes, so add those explicitly.
+    available = set(reader.header.point_format.dimension_names) | {"x", "y", "z"}
+
+    mode = color_by
+    if mode == "auto":
+        mode = "rgb" if {"red", "green", "blue"}.issubset(available) else "z"
+    if mode == "rgb" and not {"red", "green", "blue"}.issubset(available):
+        raise ValueError(
+            f"render_copc_lod: color_by='rgb' but {path!r} carries no "
+            "red/green/blue dimension"
+        )
+    if mode not in ("rgb", "z", "flat") and mode not in available:
+        raise ValueError(
+            f"render_copc_lod: color_by={color_by!r} is not a dimension "
+            f"{path!r} carries (has: {sorted(available)})"
+        )
+
+    depth = copc.FileReader(path).GetMaxDepth()
+    # Per-level point counts -> a cumulative-fraction curve, so both the level
+    # cuts and each panel's dot budget below are chosen by how many points a
+    # level actually adds, not by its bare depth number.
+    level_counts = [len(reader.query(level=lvl)) for lvl in range(depth + 1)]
+    cum_counts = list(np.cumsum(level_counts))
+    total = cum_counts[-1] if cum_counts else 0
+
+    def _cut_for_fraction(frac: float) -> int:
+        target = frac * total
+        for lvl, c in enumerate(cum_counts):
+            if c >= target:
+                return lvl
+        return depth
+
+    cuts = sorted({_cut_for_fraction(0.1), _cut_for_fraction(0.5), depth})
     labels = ("coarse overview", "mid levels", "full detail")
     rng = np.random.default_rng(0)
+
+    # One full-depth query up front: the "full detail" panel needs it anyway,
+    # and it gives a stable colour normalisation shared across all 3 panels.
+    full_pts = reader.query(level=range(0, cuts[-1] + 1))
+    rgb_lo = np.zeros(3)
+    rgb_span = np.ones(3)
+    value_range: tuple[float, float] | None = None
+    dim_name = "z" if mode == "z" else mode
+    if mode == "rgb":
+        rgb_full = np.stack(
+            [
+                np.asarray(full_pts.red, dtype="float64"),
+                np.asarray(full_pts.green, dtype="float64"),
+                np.asarray(full_pts.blue, dtype="float64"),
+            ],
+            axis=1,
+        )
+        rgb_lo = np.percentile(rgb_full, 2, axis=0)
+        rgb_hi = np.percentile(rgb_full, 98, axis=0)
+        rgb_span = np.maximum(rgb_hi - rgb_lo, 1.0)
+    elif mode != "flat":
+        values = np.asarray(getattr(full_pts, dim_name), dtype="float64")
+        value_range = (float(values.min()), float(values.max()))
+
     fig, axes = plt.subplots(
         1, len(cuts), figsize=(4.5 * len(cuts), 4.6), constrained_layout=True
     )
     axes = np.atleast_1d(axes)
+    mappable = None
     for ax, cut, label in zip(axes, cuts, labels, strict=False):
-        pts = reader.query(level=range(0, cut + 1))
+        pts = full_pts if cut == cuts[-1] else reader.query(level=range(0, cut + 1))
         x = np.asarray(pts.x)
         y = np.asarray(pts.y)
-        if len(x) > max_points:
-            idx = rng.choice(len(x), max_points, replace=False)
+        # This panel's dot budget scales with the share of the cloud it holds
+        # (the full-detail panel always gets the full `max_points`), so the
+        # coarse panel is visibly sparser rather than padded out to look as
+        # dense as the full cloud.
+        panel_budget = (
+            max(1, round(max_points * cum_counts[cut] / total)) if total else max_points
+        )
+        idx = None
+        if len(x) > panel_budget:
+            idx = rng.choice(len(x), panel_budget, replace=False)
             x, y = x[idx], y[idx]
-        ax.scatter(x, y, s=0.4, c="#1d4ed8", alpha=0.5, linewidths=0)
+        if mode == "rgb":
+            rgb = np.stack(
+                [
+                    np.asarray(pts.red, dtype="float64"),
+                    np.asarray(pts.green, dtype="float64"),
+                    np.asarray(pts.blue, dtype="float64"),
+                ],
+                axis=1,
+            )
+            if idx is not None:
+                rgb = rgb[idx]
+            colors = np.clip((rgb - rgb_lo) / rgb_span, 0, 1)
+            ax.scatter(x, y, s=0.4, c=colors, alpha=0.8, linewidths=0)
+        elif mode == "flat":
+            ax.scatter(x, y, s=0.4, c="#1d4ed8", alpha=0.5, linewidths=0)
+        else:
+            values = np.asarray(getattr(pts, dim_name), dtype="float64")
+            if idx is not None:
+                values = values[idx]
+            mappable = ax.scatter(
+                x,
+                y,
+                s=0.4,
+                c=values,
+                cmap="viridis",
+                vmin=value_range[0],
+                vmax=value_range[1],
+                alpha=0.8,
+                linewidths=0,
+            )
         ax.set_title(f"{label}\nlevels 0–{cut} · {len(pts):,} pts", fontsize=10)
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_aspect("equal")
+    if mappable is not None:
+        fig.colorbar(mappable, ax=list(axes), shrink=0.75, pad=0.02, label=dim_name)
+    color_caption = {
+        "rgb": ", coloured by the cloud's own RGB",
+        "flat": "",
+    }.get(mode, f", coloured by {dim_name}")
     fig.suptitle(
-        "COPC clustered-octree level-of-detail — a reader fetches only the octree "
-        "nodes it needs:\ncoarse levels for an overview, deeper levels (or a bbox) "
-        "for detail (the source netCDF has no such index)",
+        "COPC clustered-octree level-of-detail"
+        f"{color_caption} — a reader fetches only the octree nodes it needs:\n"
+        "coarse levels for an overview, deeper levels (or a bbox) for detail "
+        "(the source netCDF has no such index)",
         fontsize=11,
     )
     fig.savefig(out_path, dpi=120)
@@ -648,7 +877,7 @@ class CopcAdapter(FormatAdapter):
             ) from exc
 
         opts = CopcParams.model_validate(params)
-        x, y, z, extras = _load_points(source)
+        x, y, z, extras, crs = _load_points(source)
         if len(x) == 0:
             raise EmptySourceError(f"COPC source {source!r} yielded no finite points")
 
@@ -667,6 +896,7 @@ class CopcAdapter(FormatAdapter):
             span=span,
             max_depth=max_depth,
             scale=float(scale_value) if scale_value is not None else None,
+            crs=crs,
         )
 
     def describe_grouping_lever(self) -> str:
