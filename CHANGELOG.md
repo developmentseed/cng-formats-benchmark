@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.8.0...v0.9.0) (2026-09-03)
+
+
+### Features
+
+* **co3d:** add a `co3d-cars` reader (CARS tiled LAZ) and the CO3D -&gt; COPC arm ([#89](https://github.com/developmentseed/cng-formats-benchmark/issues/89)) ([b1835b5](https://github.com/developmentseed/cng-formats-benchmark/commit/b1835b5dc16a9e407c046e76b4ba60087da918e9))
+
+
+### Bug Fixes
+
+* **copc:** build the octree on consistent metric units, sample every node, and make the LOD figure honest ([#135](https://github.com/developmentseed/cng-formats-benchmark/issues/135)) ([22f76ba](https://github.com/developmentseed/cng-formats-benchmark/commit/22f76ba8e69a37281f4522399b894716938060ad))
+* **copc:** skip a legitimately empty tile instead of aborting the batch ([#133](https://github.com/developmentseed/cng-formats-benchmark/issues/133)) ([e2e3e82](https://github.com/developmentseed/cng-formats-benchmark/commit/e2e3e825f2bf038b40bc50e9a48de95cf808dc28))
+
 ## [0.8.0](https://github.com/developmentseed/cng-formats-benchmark/compare/v0.7.1...v0.8.0) (2026-08-14)
 
 
